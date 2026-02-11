@@ -211,6 +211,106 @@ EOF
 )"
 
 echo ""
+echo "=== Creating enhancement issues ==="
+echo ""
+
+# ═══════════════════════════════════════════════════════════════════
+# ENHANCEMENT: Add debug-over-USB console to fx3_cmd
+# ═══════════════════════════════════════════════════════════════════
+
+create_issue \
+  "Enhancement: add debug-over-USB console subcommand to fx3_cmd" \
+  "enhancement" \
+  "$(cat <<'EOF'
+**Files:** `tests/fx3_cmd.c`, `SDDC_FX3/USBhandler.c:270-316`
+**Reference:** `docs/debugging.md`
+
+### Background
+
+The FX3 firmware has a built-in debug-over-USB path (enabled when
+`_DEBUG_USB_` is defined, which is the current default). It supports
+bidirectional communication over EP0 control transfers:
+
+- **Output:** firmware buffers `DebugPrint2USB` messages in
+  `bufdebug[100]`; host retrieves them by polling `READINFODEBUG`
+  (0xBA) with `wValue=0`.
+- **Input:** host sends one character per `READINFODEBUG` call via
+  `wValue=char`; firmware accumulates them in `ConsoleInBuffer` and
+  executes on CR (0x0D), giving access to the same `ParseCommand`
+  console (threads, stack, gpif, reset).
+- **Activation:** host must first send `TESTFX3` (0xAC) with
+  `wValue=1` to set `flagdebug=true`; without this, `DebugPrint2USB`
+  returns immediately and nothing is buffered.
+
+The host tool `fx3_cmd.c` already has all the USB control transfer
+infrastructure (`ctrl_read`, `ctrl_write_u32`, etc.) and every other
+vendor command, but has **no support for READINFODEBUG** and its
+`do_test()` always sends `wValue=0` (which disables debug mode).
+
+### What's needed
+
+**1. Add missing protocol constants**
+
+```c
+#define READINFODEBUG 0xBA
+#define MAXLEN_D_USB  100
+```
+
+**2. Add a `do_debug()` interactive console**
+
+The firmware packs both directions into a single EP0 transaction, so
+every poll can piggyback a character:
+
+```
+Host sends:  vendor IN, bRequest=0xBA, wValue=char_or_0, wLength=100
+Firmware:    (1) if wValue > 0, push char into ConsoleInBuffer
+             (2) if debug output buffered, return it in data phase
+             (3) else STALL EP0
+```
+
+The host-side loop would:
+
+1. Send `TESTFX3` with `wValue=1` to enable debug mode.
+2. Loop:
+   - Check stdin (non-blocking, e.g. `select` or `poll`) for a typed
+     character.
+   - Call `ctrl_read(h, READINFODEBUG, ch, 0, buf, MAXLEN_D_USB)`.
+   - If `r > 0`: print the returned debug string to stdout.
+   - If `r == LIBUSB_ERROR_PIPE` (STALL): no data — sleep ~50 ms and
+     poll again.
+3. On Ctrl-C, send `TESTFX3` with `wValue=0` to disable debug mode.
+
+**3. Wire it into main()**
+
+Add `debug` to the usage string and command dispatch, following the
+existing pattern.
+
+### Protocol notes
+
+- `READINFODEBUG` is a **vendor IN** request (device sends data to
+  host via `CyU3PUsbSendEP0Data`).
+- STALL on EP0 means "no debug output available" — not an error. The
+  host should treat `LIBUSB_ERROR_PIPE` as "try again later."
+- The firmware null-terminates at `len-1`, truncating the last byte of
+  each response (known issue documented in `docs/debugging.md`).
+- The firmware forces all input to lowercase (`| 0x20`), so
+  case-sensitive commands are not possible.
+- EP0 control path is independent of bulk streaming, so `fx3_cmd debug`
+  can run while `rx888_stream` is active (from a separate process with
+  its own libusb handle).
+
+### Usage
+
+```
+fx3_cmd debug         # interactive console to FX3 firmware
+```
+
+Then type `?`, `threads`, `stack`, `gpif`, `reset` as you would on
+the UART serial console.
+EOF
+)"
+
+echo ""
 echo "=== Creating cleanup issues ==="
 echo ""
 
