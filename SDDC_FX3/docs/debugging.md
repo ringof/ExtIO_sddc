@@ -6,7 +6,7 @@ USB debug-over-EP0. Both share the same interactive console and
 
 ## Compile-Time Selection
 
-Controlled by `_DEBUG_USB_` in `Interface.h` (will move to `Application.h`):
+Controlled by `_DEBUG_USB_` in `protocol.h`:
 
 | `_DEBUG_USB_` | `DebugPrint` expands to | Output path |
 |---------------|------------------------|-------------|
@@ -148,4 +148,5 @@ host-side instrumentation.
 | `DebugConsole.c` | UART init, USB debug buffer, printf formatter, console parser |
 | `USBhandler.c` | `READINFODEBUG` EP0 handler, `TraceSerial()`, `r820_initialize()` |
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` — error logging helpers |
-| `Application.h` | `DebugPrint` macro selection, `_DEBUG_USB_` / `MAXLEN_D_USB` |
+| `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection |
+| `Application.h` | `DebugPrint` macro selection |

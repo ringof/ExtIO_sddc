@@ -231,7 +231,7 @@ void ApplicationThread ( uint32_t input)
 						MsgParsing(Qevent);
 					}
 				}
-#ifndef _DEBUG_USB_  // #include "../Interface.h"  -> second count in serial debug
+#ifndef _DEBUG_USB_  // second count in serial debug
 				if (glDMACount > 7812)
 				{
 					glDMACount -= 7812;

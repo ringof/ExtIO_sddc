@@ -26,7 +26,7 @@
 #include "cyu3externcstart.h"
 #include "i2cmodule.h"
 
-#include "../Interface.h"
+#include "protocol.h"
 
 #define TRACESERIAL		/* enable the trace to serial port*/
 
@@ -70,7 +70,7 @@
 // void null_func(uint8_t, ...)  // redefine DebugPrint if required
 extern void DebugPrint2USB ( uint8_t priority, char *msg, ...);
 
-#ifndef _DEBUG_USB_  // #include "../Interface.h"
+#ifndef _DEBUG_USB_
 #define DebugPrint (CyU3PDebugPrint)
 #else
 #define DebugPrint (DebugPrint2USB)
