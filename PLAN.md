@@ -170,7 +170,7 @@ tests/fw_test.sh --firmware path/to/SDDC_FX3.img [options]
 2. **Device probe** — `fx3_cmd test`: verify HWconfig == 0x04 (RX888r2),
    firmware version matches expected
 3. **GPIO test** — `fx3_cmd gpio`: set known pattern (LEDs on)
-4. **ADC clock test** — `fx3_cmd adc 64000000`: set 64 MHz clock, verify ACK
+4. **ADC clock test** — `fx3_cmd adc 32000000`: set 32 MHz clock, verify ACK
 5. **Attenuator spot-check** — `fx3_cmd att 0` and `fx3_cmd att 63`
 6. **VGA spot-check** — `fx3_cmd vga 0` and `fx3_cmd vga 255`
 7. **Stop** — `fx3_cmd stop`: ensure clean state
