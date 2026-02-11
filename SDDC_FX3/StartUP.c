@@ -12,29 +12,24 @@
 
 #include "Application.h"
 
-#define UART_CTS	(54)
+#define GPIO_LED_RED_PIN	21	/* FX3 GPIO pin for red LED (RX888mk2) */
 
 void IndicateError(uint16_t ErrorCode)
 {
-	return; // not used
-/*
-	// Setup a PWM to blink the DVK's only user LED at an "error rate"
-    CyU3PGpioComplexConfig_t gpioConfig;
-	// LED is on UART_CTS which is currently been assigned to the UART driver, claim it back
-    CyU3PDeviceGpioOverride(UART_CTS, CyFalse);
-    // Configure UART_CTS as PWM output
-    CyU3PMemSet((uint8_t *)&gpioConfig, 0, sizeof(gpioConfig));
-	gpioConfig.outValue = CyTrue;
-    gpioConfig.driveLowEn = CyTrue;
-    gpioConfig.driveHighEn = CyTrue;
-    gpioConfig.pinMode = (ErrorCode == 0) ? CY_U3P_GPIO_MODE_STATIC : CY_U3P_GPIO_MODE_PWM;
-    gpioConfig.timerMode = CY_U3P_GPIO_TIMER_HIGH_FREQ;
-    gpioConfig.period = PWM_PERIOD << ErrorCode;
-    gpioConfig.threshold = PWM_THRESHOLD << ErrorCode;
-    CyU3PGpioSetComplexConfig(UART_CTS, &gpioConfig);
-    // Last ditch effort to tell the user, it may not get through
-    if (ErrorCode) DebugPrint(1, "\r\nFatal Error = %d", ErrorCode);
-*/
+	/*
+	 * Try to drive LED_RED via GPIO 21.  This is best-effort:
+	 * if the GPIO block hasn't been clocked yet the calls will
+	 * fail silently, which is harmless.
+	 */
+	CyU3PGpioSimpleConfig_t gpioConfig;
+
+	CyU3PDeviceGpioOverride(GPIO_LED_RED_PIN, CyTrue);
+	gpioConfig.outValue    = (ErrorCode != 0) ? CyTrue : CyFalse;
+	gpioConfig.driveLowEn  = CyTrue;
+	gpioConfig.driveHighEn = CyTrue;
+	gpioConfig.inputEn     = CyFalse;
+	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
+	CyU3PGpioSetSimpleConfig(GPIO_LED_RED_PIN, &gpioConfig);
 }
 
 

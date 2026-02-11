@@ -14,6 +14,41 @@
 // Declare external data
 extern CyBool_t glDebugTxEnabled;
 
+#define GPIO_LED_RED_PIN	21	/* FX3 GPIO pin for red LED (RX888mk2) */
+#define ERROR_BLINK_COUNT	10	/* Number of blinks before reset */
+#define ERROR_BLINK_MS		200	/* On/off time per blink in ms */
+
+/*
+ * Best-effort LED blink followed by device reset.
+ * Tries to configure GPIO_LED_RED as output and blink it.
+ * If the GPIO clock isn't started yet the config calls fail
+ * silently and we proceed straight to the reset.
+ */
+static void ErrorBlinkAndReset(void)
+{
+	CyU3PGpioSimpleConfig_t gpioConfig;
+	int i;
+
+	/* Try to grab the pin and configure as output */
+	CyU3PDeviceGpioOverride(GPIO_LED_RED_PIN, CyTrue);
+	gpioConfig.outValue    = CyFalse;
+	gpioConfig.driveLowEn  = CyTrue;
+	gpioConfig.driveHighEn = CyTrue;
+	gpioConfig.inputEn     = CyFalse;
+	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
+	CyU3PGpioSetSimpleConfig(GPIO_LED_RED_PIN, &gpioConfig);
+
+	for (i = 0; i < ERROR_BLINK_COUNT; i++)
+	{
+		CyU3PGpioSetValue(GPIO_LED_RED_PIN, CyTrue);
+		CyU3PThreadSleep(ERROR_BLINK_MS);
+		CyU3PGpioSetValue(GPIO_LED_RED_PIN, CyFalse);
+		CyU3PThreadSleep(ERROR_BLINK_MS);
+	}
+
+	CyU3PDeviceReset(CyFalse);
+}
+
 const char* ErrorCodeTextLookupTable[] = {
 	"SUCCESS",				// 0
 	"DELETED",				// 1
@@ -134,12 +169,8 @@ void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status)
 			DebugPrint(4, "%s = Successful\r\n", StringPtr);
 			return;
 		}
-		// else hang here
-		    DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
-		while (1)
-		{
-			DebugPrint(4, "?");
-		}
+		DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
+		ErrorBlinkAndReset();
 	}
 }
 
@@ -151,12 +182,8 @@ void CheckStatusSilent(char* StringPtr, CyU3PReturnStatus_t Status)
 	{
 		if (Status != CY_U3P_SUCCESS)
 		{
-		//  hang here
-		    DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
-			while (1)
-			{
-				DebugPrint(4, "?");
-			}
+		DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
+		ErrorBlinkAndReset();
 		}
 	}
 }
