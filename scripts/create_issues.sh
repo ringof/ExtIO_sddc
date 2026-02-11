@@ -210,6 +210,114 @@ but they have no effect.
 EOF
 )"
 
+# ═══════════════════════════════════════════════════════════════════
+# BUG: fw_test.sh stale-command tests don't distinguish STALL from accepted
+# ═══════════════════════════════════════════════════════════════════
+
+create_issue \
+  "Bug: fw_test.sh stale-command tests pass even when firmware accepts the command" \
+  "bug" \
+  "$(cat <<'EOF'
+**File:** `tests/fw_test.sh:296-317`
+**Severity:** Medium (silent false-positive in regression test)
+
+### Problem
+
+The stale tuner command tests (0xB4, 0xB5, 0xB8) use `run_cmd raw`
+and check whether the output starts with `PASS`:
+
+```bash
+output=$(run_cmd raw 0xB4) && {
+    tap_ok "stale TUNERINIT (0xB4): got STALL as expected"
+}
+```
+
+But `run_cmd` returns success whenever `[[ "$output" == PASS* ]]`, and
+`do_raw()` in `fx3_cmd.c` prints **both**:
+- `PASS raw 0xB4: STALL (as expected for removed command)` — correct
+- `PASS raw 0xB4: accepted` — command was NOT removed
+
+Both start with `PASS`, so the test passes either way. The test name
+says "got STALL as expected" but never actually verifies the word
+"STALL" appeared. This is a false-positive regression test for exactly
+the behavior it claims to check — confirming that removed commands are
+actually rejected.
+
+This is likely why an earlier test run did not flag a command that was
+still being accepted rather than stalled.
+
+### Fix
+
+Check for `STALL` in the output instead of relying on `run_cmd`
+success:
+
+```bash
+output=$("$FX3_CMD" raw 0xB4 2>&1) || true
+if [[ "$output" == *STALL* ]]; then
+    tap_ok "stale TUNERINIT (0xB4): STALL as expected"
+else
+    tap_fail "stale TUNERINIT (0xB4): command accepted (not removed?)" "$output"
+fi
+```
+
+Apply the same pattern to the 0xB5 and 0xB8 checks.
+EOF
+)"
+
+# ═══════════════════════════════════════════════════════════════════
+# BUG: fx3_cmd do_test() doesn't validate TESTFX3 reply length
+# ═══════════════════════════════════════════════════════════════════
+
+create_issue \
+  "Bug: fx3_cmd do_test() reports PASS on short TESTFX3 reply" \
+  "bug" \
+  "$(cat <<'EOF'
+**File:** `tests/fx3_cmd.c:163-178`
+**Severity:** Low (masks broken firmware during bring-up)
+
+### Problem
+
+`do_test()` checks `r < 0` but not `r < 4`:
+
+```c
+uint8_t buf[4] = {0};
+int r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+if (r < 0) {
+    printf("FAIL test: %s\n", libusb_strerror(r));
+    return 1;
+}
+uint8_t hwconfig   = buf[0];
+uint8_t fw_major   = buf[1];
+uint8_t fw_minor   = buf[2];
+uint8_t rqt_cnt    = buf[3];
+printf("PASS test: hwconfig=0x%02X fw=%d.%d vendorRqtCnt=%d\n",
+       hwconfig, fw_major, fw_minor, rqt_cnt);
+```
+
+`libusb_control_transfer` returns the number of bytes actually
+transferred, which could be 0-3 on a malformed firmware response.
+Since `buf` is zero-initialized, a short read silently produces:
+
+```
+PASS test: hwconfig=0x04 fw=2.0 vendorRqtCnt=0
+```
+
+This looks valid but is wrong — the firmware only sent 2 bytes. During
+automated bring-up with a new firmware build, this hides the problem.
+
+### Fix
+
+Require exactly 4 bytes:
+
+```c
+if (r < 4) {
+    printf("FAIL test: short reply (%d bytes, expected 4)\n", r);
+    return 1;
+}
+```
+EOF
+)"
+
 echo ""
 echo "=== Creating enhancement issues ==="
 echo ""
