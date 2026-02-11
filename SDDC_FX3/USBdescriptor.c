@@ -215,35 +215,7 @@ const uint8_t CyFxUSBManufactureDscr[] __attribute__ ((aligned (32))) =
     'o',0,'t',0,'y',0,'p',0,'e',0,'s',0
 };
 
-/* Standard product string descriptor */
-const uint8_t CyFxUSBProductDscr[] __attribute__ ((aligned (32))) =
-{
-    8,                              /* Descriptor size */
-    CY_U3P_USB_STRING_DESCR,        /* Device descriptor type */
-    'S',0,'D',0,'R',0
-};
-
-const uint8_t CyFxUSBProductDscrHF103[] __attribute__ ((aligned (32))) =
-{
-    12,                             /* Descriptor size */
-    CY_U3P_USB_STRING_DESCR,        /* Device descriptor type */
-    'H',0,'F',0,'1',0,'0',0,'3',0
-};
-
-const uint8_t CyFxUSBProductDscrBBRF103[] __attribute__ ((aligned (32))) =
-{
-    16,                             /* Descriptor size */
-    CY_U3P_USB_STRING_DESCR,        /* Device descriptor type */
-    'B',0,'B',0,'R',0,'F',0,'1',0,'0',0,'3',0
-};
-
-const uint8_t CyFxUSBProductDscrRX888[] __attribute__ ((aligned (32))) =
-{
-    12,                             /* Descriptor size */
-    CY_U3P_USB_STRING_DESCR,        /* Device descriptor type */
-    'R',0,'X',0,'8',0,'8',0,'8',0,
-};
-
+/* Product string descriptor */
 const uint8_t CyFxUSBProductDscrRX888mk2[] __attribute__ ((aligned (32))) =
 {
     18,                             /* Descriptor size */
@@ -295,27 +267,7 @@ CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig)
 	CheckStatus("SET_STRING0_DESCR", Status);
 	OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 1, (uint8_t *)CyFxUSBManufactureDscr);
 	CheckStatus("SET_STRING1_DESCR", Status);
-	switch(hwconfig)
-	{
-		case HF103:
-			OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscrHF103);
-			break;
-		case BBRF103:
-			OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscrBBRF103);
-			break;
-		case RX888:
-			OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscrRX888);
-			break;
-		case RX888r2:
-			OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscrRX888mk2);
-			break;
-		case RX888r3:
-		case RX999:
-		case RXLUCY:		
-	        default :
-	        	OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscr);
-	        	break;
-	}
+	OverallStatus |= Status = CyU3PUsbSetDesc(CY_U3P_USB_SET_STRING_DESCR, 2, (uint8_t *)CyFxUSBProductDscrRX888mk2);
 	CheckStatus("SET_STRING2_DESCR", Status);
 	
 	// serial number

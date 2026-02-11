@@ -25,7 +25,6 @@
 #include "cyu3uart.h"
 #include "cyu3externcstart.h"
 #include "i2cmodule.h"
-#include "adf4351.h"
 
 #include "../Interface.h"
 
@@ -77,12 +76,8 @@ extern void DebugPrint2USB ( uint8_t priority, char *msg, ...);
 #define DebugPrint (DebugPrint2USB)
 #endif
 
-// radio detect gpios 
-#define GPIO50			(50) // sense BBRF103
-#define GPIO52			(52) // sense RXLUCY
-#define GPIO53			(53) // sense RXLUCY
+// radio detect gpios
 #define GPIO36			(36) // sense RX888R2
-#define GPIO45			(45) // sense RX888
 
 typedef struct outxio_t
 {
@@ -96,45 +91,10 @@ typedef struct outxio_t
 CyU3PReturnStatus_t ConfGPIOsimpleout( uint8_t gpioid);
 CyU3PReturnStatus_t ConfGPIOsimpleinput( uint8_t gpioid);
 
-// bbrf103
-void bbrf103_GpioSet(uint32_t mdata);
-void bbrf103_GpioInitialize();
-
-// hf103
-void hf103_GpioSet(uint32_t mdata);
-void hf103_GpioInitialize();
-void hf103_SetAttenuator(uint8_t value);
-
-// rx888
-void rx888_GpioSet(uint32_t mdata);
-void rx888_GpioInitialize();
-
 // rx888r2
 void rx888r2_GpioSet(uint32_t mdata);
 void rx888r2_GpioInitialize();
 void rx888r2_SetAttenuator(uint8_t value);
 void rx888r2_SetGain(uint8_t value);
-
-// rx888r3
-void rx888r3_GpioSet(uint32_t mdata);
-void rx888r3_GpioInitialize();
-void rx888r3_SetAttenuator(uint8_t value);
-void rx888r3_SetGain(uint8_t value);
-int rx888r3_preselect(uint32_t data);
-
-// rx999
-void rx999_GpioSet(uint32_t mdata);
-void rx999_GpioInitialize();
-void rx999_SetAttenuator(uint8_t value);
-void rx999_SetGain(uint8_t value);
-int rx999_preselect(uint32_t data);
-
-// rxlucy
-void rxlucy_GpioSet(uint32_t mdata);
-void rxlucy_GpioInitialize();
-void rxlucy_SetAttenuator(uint8_t value);
-void rxlucy_VHFAttenuator(uint8_t value);
-
-extern adf4350_init_param adf4351_init_params;
 
 #endif // _INCLUDED_APPLICATION_H_

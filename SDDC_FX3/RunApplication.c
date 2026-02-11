@@ -13,7 +13,6 @@
 
 #include "tuner_r82xx.h"
 #include "Si5351.h"
-#include "rd5815.h"
 
 #include "radio.h"
 
@@ -148,14 +147,13 @@ void ApplicationThread ( uint32_t input)
 #endif
 	uint32_t nline;
 	CyBool_t measure;
-	CyBool_t measure2;
     CyU3PReturnStatus_t Status;
     HWconfig = 0;
 
     GpioInitClock();
 
 	DebugPrint(4, "Detect Hardware");
-    Status = I2cInit (); // initialize i2c on FX3014 must be ok.
+    Status = I2cInit ();
     if (Status != CY_U3P_SUCCESS)
     	DebugPrint(4, "I2cInit failed to initialize. Error code: %d.", Status);
 	else
@@ -163,99 +161,42 @@ void ApplicationThread ( uint32_t input)
 		Status = Si5351init();
 		if (Status != CY_U3P_SUCCESS)
 		{
-			ConfGPIOsimpleinputPU(GPIO52);
-			ConfGPIOsimpleinputPU(GPIO53);
-			CyU3PGpioSimpleGetValue ( GPIO52, &measure); //measure if external pull down
-			if (measure) 
-			{
-				HWconfig = HF103;
-				DebugPrint(4, "Si5351init failed to initialize. HF103 detected.");
-			}
-			else
-			{
-				HWconfig = RXLUCY;
-				DebugPrint(4, "Si5351init failed to initialize. RXLUCY detected.");
-			}
+			DebugPrint(4, "Si5351init failed to initialize. Error code: %d.", Status);
 		}
 		else
 		{
-			ConfGPIOsimpleinputPU(GPIO50);
-			ConfGPIOsimpleinputPU(GPIO45);
 			ConfGPIOsimpleinputPU(GPIO36);
 
 			si5351aSetFrequencyB(16000000);
 			uint8_t identity;
-			if (I2cTransfer(0, R820T_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
-			{
-				// check if BBRF103 or RX888 (RX666 ?)
-				CyU3PGpioSimpleGetValue ( GPIO50, &measure);
-				CyU3PGpioSimpleGetValue ( GPIO45, &measure2);
-
-				if(!measure) {
-					HWconfig = BBRF103;
-					DebugPrint(4, "R820T Detectedinitialize. BBRF103 detected.");
-				}
-				else if (!measure2)
-				{
-					HWconfig = RX888;
-					DebugPrint(4, "R820T Detectedinitialize. RX888 detected.");
-				}
-				else
-				{
-					HWconfig = NORADIO;
-				}
-			}
-			else if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
+			if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
 			{
 				CyU3PGpioSimpleGetValue ( GPIO36, &measure);
 
 				if (!measure)
 				{
 					HWconfig = RX888r2;
-					DebugPrint(4, "R828D Detectedinitialize. RX888r2 detected.");
+					DebugPrint(4, "R828D detected. RX888r2 detected.");
 				}
 				else
 				{
 					HWconfig = NORADIO;
+					DebugPrint(4, "R828D detected but GPIO36 sense failed.");
 				}
-			}
-			else if (I2cTransfer(0, RD5812_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
-			{
-				HWconfig = RX888r3;
-				DebugPrint(4, "RD5812 Detectedinitialize. RX888r3 detected.");
 			}
 			else
 			{
-				HWconfig = RX999;
-				DebugPrint(4, "No Tuner Detectedinitialize. RX999 detected.");
+				HWconfig = NORADIO;
+				DebugPrint(4, "No R828D tuner detected.");
 			}
 			si5351aSetFrequencyB(0);
 		}
 	}
     DebugPrint(4, "HWconfig: %d.", HWconfig);
 
-	switch(HWconfig) {
-		case HF103:
-			hf103_GpioInitialize();
-			break;
-		case BBRF103:
-			bbrf103_GpioInitialize();
-			break;
-		case RX888:
-			rx888_GpioInitialize();
-			break;
-		case RX888r2:
-			rx888r2_GpioInitialize();
-			break;
-		case RX888r3:
-			rx888r3_GpioInitialize();
-			break;
-		case RX999:
-			rx999_GpioInitialize();
-			break;
-		case RXLUCY:
-			rxlucy_GpioInitialize();
-			break;
+	if (HWconfig == RX888r2)
+	{
+		rx888r2_GpioInitialize();
 	}
 
     // Spin up the USB Connection
