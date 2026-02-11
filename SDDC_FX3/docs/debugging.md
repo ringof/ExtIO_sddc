@@ -133,9 +133,7 @@ in `USBhandler.c` logs every vendor request to the debug output:
 ```
 GPIOFX3     0x1a0
 STARTADC    64000000
-TUNERINIT   28800000
-TUNERTUNE   100000000
-SETARGFX3   R82XX_ATTENUATOR    5
+SETARGFX3   DAT31_ATT    15
 ```
 
 This provides a real-time trace of all host commands without any
@@ -146,7 +144,7 @@ host-side instrumentation.
 | File | Debug role |
 |------|-----------|
 | `DebugConsole.c` | UART init, USB debug buffer, printf formatter, console parser |
-| `USBhandler.c` | `READINFODEBUG` EP0 handler, `TraceSerial()`, `r820_initialize()` |
+| `USBhandler.c` | `READINFODEBUG` EP0 handler, `TraceSerial()` |
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` — error logging helpers |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection |
 | `Application.h` | `DebugPrint` macro selection |

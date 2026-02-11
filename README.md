@@ -7,6 +7,15 @@ This repository is a fork of the firmware portion of
 [ExtIO_sddc](https://github.com/ik1xpv/ExtIO_sddc), stripped down to
 support the RX888mk2 (rx888r2) hardware only.
 
+## Limitations
+
+This firmware operates the **HF direct-sampling path only**. The R828D
+VHF tuner is detected during hardware identification but is not
+controlled by the firmware — the GPL-licensed R82xx driver has been
+removed to resolve a license conflict with the proprietary Cypress SDK.
+VHF reception via the R828D requires a host-side tuner driver
+communicating over the I2C passthrough commands (`I2CWFX3`/`I2CRFX3`).
+
 ## Building
 
 ### Requirements
@@ -52,7 +61,7 @@ uploads the firmware, and runs an automated test suite.
 
 ```
 SDDC_FX3/           Firmware source code
-  driver/           IC drivers (Si5351 clock gen, R82xx tuner)
+  driver/           IC drivers (Si5351 clock generator)
   radio/            Radio hardware support (rx888r2)
 SDK/                Cypress FX3 SDK 1.3.4 (headers, libraries, build system)
 tests/              Hardware test tools
