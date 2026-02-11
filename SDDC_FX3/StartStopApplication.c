@@ -154,7 +154,7 @@ void StopApplication ( void )
 
     Status = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
     CheckStatus("FlushEndpoint", Status);
-    CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(&epConfig));
+    CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(epConfig));
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epConfig);
 	CheckStatus("SetEndpointConfig_Disable", Status);
     // OK, Application is now stopped

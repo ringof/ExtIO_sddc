@@ -241,7 +241,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 
 			case I2CRFX3:
-					CyU3PMemSet (glEp0Buffer, 0, sizeof (glEp0Buffer));
+					CyU3PMemSet (glEp0Buffer, 0, CYFX_SDRAPP_MAX_EP0LEN);
 					apiRetStatus = I2cTransfer (wIndex, wValue, wLength, glEp0Buffer, CyTrue);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
