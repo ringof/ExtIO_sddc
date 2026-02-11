@@ -4,6 +4,12 @@
  * Sends individual USB vendor requests to an RX888mk2 and reports
  * success/failure.  Designed for scripted hardware testing.
  *
+ * IMPORTANT: This tool assumes the device already has firmware loaded
+ * (PID 0x00F1).  It does NOT handle firmware upload.  Use rx888_stream
+ * from https://github.com/ringof/rx888_tools with its -f flag to load
+ * firmware onto a freshly powered device first.  The fw_test.sh wrapper
+ * script handles this automatically.
+ *
  * Build:  gcc -O2 -Wall -o fx3_cmd fx3_cmd.c -lusb-1.0
  * Needs:  libusb-1.0-0-dev
  *

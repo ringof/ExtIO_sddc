@@ -114,6 +114,18 @@ so HF streaming is unaffected. The `si5351aSetFrequencyB(0)` side-effect
 | TUNERINIT | 0xB4 | R82xx init — will be removed. |
 | TUNERTUNE | 0xB5 | R82xx tune — will be removed. |
 
+#### Firmware Upload Requirement
+
+The FX3 boots into bootloader mode (PID `0x00F3`) on every power cycle.
+Firmware must be uploaded before any vendor commands work.  `fx3_cmd` does
+NOT handle firmware upload — it assumes the device is already running at
+app PID `0x00F1`.
+
+`rx888_stream` (from [rx888_tools](https://github.com/ringof/rx888_tools))
+handles this: its `-f` flag uploads a `.img` file to the bootloader and
+waits for re-enumeration.  The `fw_test.sh` script uses `rx888_stream`
+for this purpose as its first step.
+
 #### Test Tool #1: `fx3_cmd` — Vendor Command Exerciser
 
 A small C program using libusb-1.0 that sends individual vendor commands
@@ -132,6 +144,7 @@ fx3_cmd stop              # STOPFX3: stop streaming
 fx3_cmd i2cr <addr> <reg> <len>   # I2CRFX3: read I2C
 fx3_cmd i2cw <addr> <reg> <data>  # I2CWFX3: write I2C
 fx3_cmd reset             # RESETFX3: reboot to bootloader
+fx3_cmd raw <code>        # Send raw vendor request (for stale-cmd tests)
 ```
 
 Each subcommand prints a one-line PASS/FAIL result with the USB status.
@@ -144,41 +157,51 @@ Each subcommand prints a one-line PASS/FAIL result with the USB status.
 
 #### Test Tool #2: `fw_test.sh` — Automated Firmware Test Script
 
-A shell script that uses `fx3_cmd` and `rx888_stream` to run a full
-test sequence against real hardware:
+A shell script that uses `rx888_stream` for firmware upload and streaming
+tests, and `fx3_cmd` for individual command tests:
 
 ```
-tests/fw_test.sh [--firmware path/to/SDDC_FX3.img] [--stream-seconds 5]
+tests/fw_test.sh --firmware path/to/SDDC_FX3.img [options]
 ```
 
-**Test sequence:**
-1. **Device probe** — `fx3_cmd test`: verify HWconfig == 0x04 (RX888r2),
+**Test sequence (15 tests):**
+1. **Firmware upload** — `rx888_stream -f SDDC_FX3.img` uploads firmware;
+   verify device appears at PID `0x00F1` via `lsusb`
+2. **Device probe** — `fx3_cmd test`: verify HWconfig == 0x04 (RX888r2),
    firmware version matches expected
-2. **GPIO test** — `fx3_cmd gpio`: set known pattern, read back via
-   `fx3_cmd test` (vendorRqtCnt increments)
-3. **ADC clock test** — `fx3_cmd adc 64000000`: set 64 MHz clock, verify ACK
-4. **Attenuator sweep** — `fx3_cmd att 0` through `fx3_cmd att 63`: verify
-   all values accepted
-5. **VGA sweep** — `fx3_cmd vga 0` through `fx3_cmd vga 255`: verify
-   all values accepted
-6. **Streaming test** — run `rx888_stream -s 64000000` for N seconds,
-   capture to file, verify:
-   - Exit code 0 (clean shutdown)
-   - Byte count matches expected rate (±5%)
+3. **GPIO test** — `fx3_cmd gpio`: set known pattern (LEDs on)
+4. **ADC clock test** — `fx3_cmd adc 64000000`: set 64 MHz clock, verify ACK
+5. **Attenuator spot-check** — `fx3_cmd att 0` and `fx3_cmd att 63`
+6. **VGA spot-check** — `fx3_cmd vga 0` and `fx3_cmd vga 255`
+7. **Stop** — `fx3_cmd stop`: ensure clean state
+8. **Stale command tests** (post-R82xx removal) — `fx3_cmd raw 0xB4`,
+   `0xB5`, `0xB8`: verify each returns STALL without crashing the device
+9. **Streaming test** — run `rx888_stream` for N seconds, capture to
+   file, verify:
+   - Data was received (non-zero byte count)
+   - Byte count matches expected rate (within 50%)
    - Data is not all-zero (ADC is actually sampling)
-7. **Stale command test** (post-R82xx removal) — `fx3_cmd` sends
-   TUNERINIT, TUNERTUNE, TUNERSTDBY; verify each returns STALL
-   (LIBUSB_ERROR_PIPE) without crashing the device, and that a
-   subsequent `fx3_cmd test` still works
 
 **Output:** TAP format (Test Anything Protocol) for easy integration
 with CI or manual review.
 
 #### Build and Dependency Requirements
 
+[rx888_tools](https://github.com/ringof/rx888_tools) is included as a
+git submodule at `tests/rx888_tools/`.  The test Makefile builds
+`rx888_stream` from source (it needs `ezusb.c` for firmware upload)
+and symlinks it into `tests/`.
+
 ```
+# On the test host (Linux machine with RX888mk2 connected)
 sudo apt install libusb-1.0-0-dev
+
+# Initialize submodule and build everything
+git submodule update --init
 cd tests && make
+
+# Run
+./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
 ### Step 3: (reserved — further cleanup TBD)

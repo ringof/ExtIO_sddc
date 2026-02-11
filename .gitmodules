@@ -1,0 +1,3 @@
+[submodule "tests/rx888_tools"]
+	path = tests/rx888_tools
+	url = https://github.com/ringof/rx888_tools.git

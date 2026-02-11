@@ -3,44 +3,103 @@
 # fw_test.sh — Automated firmware test for SDDC_FX3 on RX888mk2 hardware.
 #
 # Requires:
-#   - fx3_cmd (built from tests/Makefile)
+#   - fx3_cmd      (built from tests/Makefile)
 #   - rx888_stream (from https://github.com/ringof/rx888_tools)
-#   - RX888mk2 connected via USB with firmware loaded
+#   - RX888mk2 connected via USB
+#
+# rx888_stream handles firmware upload: if the device is in bootloader mode
+# (PID 0x00F3), it loads the .img and waits for re-enumeration before
+# proceeding.  This script uses a short rx888_stream run to upload firmware
+# and confirm basic streaming, then uses fx3_cmd for individual command tests.
 #
 # Output: TAP (Test Anything Protocol)
 #
 # Usage:
-#   ./fw_test.sh [--stream-seconds N] [--rx888-stream PATH] [--skip-stream]
+#   ./fw_test.sh --firmware path/to/SDDC_FX3.img [options]
+#
+# Options:
+#   --firmware PATH        Firmware .img to upload (required)
+#   --stream-seconds N     Streaming capture duration (default: 5)
+#   --rx888-stream PATH    Path to rx888_stream binary (default: search PATH)
+#   --skip-stream          Skip streaming tests
+#   --sample-rate HZ       ADC sample rate (default: 64000000)
 #
 
 set -euo pipefail
 
 # ---- Configuration ----
 
+FIRMWARE=""
 STREAM_SECONDS=5
-RX888_STREAM="rx888_stream"
+RX888_STREAM=""
 SKIP_STREAM=0
 SAMPLE_RATE=64000000
-FX3_CMD="$(dirname "$0")/fx3_cmd"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FX3_CMD="$SCRIPT_DIR/fx3_cmd"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --stream-seconds) STREAM_SECONDS="$2"; shift 2 ;;
-        --rx888-stream)   RX888_STREAM="$2"; shift 2 ;;
-        --skip-stream)    SKIP_STREAM=1; shift ;;
+        --firmware)        FIRMWARE="$2"; shift 2 ;;
+        --stream-seconds)  STREAM_SECONDS="$2"; shift 2 ;;
+        --rx888-stream)    RX888_STREAM="$2"; shift 2 ;;
+        --skip-stream)     SKIP_STREAM=1; shift ;;
+        --sample-rate)     SAMPLE_RATE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--stream-seconds N] [--rx888-stream PATH] [--skip-stream]"
+            sed -n '2,/^$/s/^# \?//p' "$0"
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 
+# ---- Locate rx888_stream ----
+
+find_rx888_stream() {
+    # Explicit path from --rx888-stream
+    if [[ -n "$RX888_STREAM" ]]; then
+        if [[ -x "$RX888_STREAM" ]]; then
+            return 0
+        fi
+        echo "Bail out! --rx888-stream '$RX888_STREAM' not found or not executable"
+        exit 1
+    fi
+
+    # Check submodule build (symlink created by tests/Makefile)
+    local submod="$SCRIPT_DIR/rx888_stream"
+    if [[ -x "$submod" ]]; then
+        RX888_STREAM="$submod"
+        return 0
+    fi
+
+    # Check submodule source directory directly
+    local submod_bin="$SCRIPT_DIR/rx888_tools/rx888_stream"
+    if [[ -x "$submod_bin" ]]; then
+        RX888_STREAM="$submod_bin"
+        return 0
+    fi
+
+    # Check PATH
+    if command -v rx888_stream &>/dev/null; then
+        RX888_STREAM="$(command -v rx888_stream)"
+        return 0
+    fi
+
+    return 1
+}
+
 # ---- Helpers ----
 
 TEST_NUM=0
 PASS_COUNT=0
 FAIL_COUNT=0
+TMPDIR=""
+
+cleanup() {
+    if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
+        rm -rf "$TMPDIR"
+    fi
+}
+trap cleanup EXIT
 
 tap_ok() {
     TEST_NUM=$((TEST_NUM + 1))
@@ -63,36 +122,104 @@ tap_skip() {
     echo "ok $TEST_NUM - $1 # SKIP $2"
 }
 
+# Run fx3_cmd, capture output.  Returns 0 if output starts with "PASS".
 run_cmd() {
-    # Run fx3_cmd, capture output. Returns 0 if PASS, 1 if FAIL.
     local output
     output=$("$FX3_CMD" "$@" 2>&1) || true
     echo "$output"
     [[ "$output" == PASS* ]]
 }
 
-# ---- Preflight ----
+# ---- Preflight checks ----
 
 if [[ ! -x "$FX3_CMD" ]]; then
-    echo "Bail out! fx3_cmd not found — run 'make' in tests/ first"
+    echo "Bail out! fx3_cmd not found at $FX3_CMD — run 'make' in tests/ first"
     exit 1
 fi
 
+if ! find_rx888_stream; then
+    echo "Bail out! rx888_stream not found. Build it:"
+    echo "#   git submodule update --init && cd tests && make"
+    echo "#   or pass --rx888-stream /path/to/rx888_stream"
+    exit 1
+fi
+
+if [[ -z "$FIRMWARE" ]]; then
+    # Default: look for the build output
+    DEFAULT_FW="$SCRIPT_DIR/../SDDC_FX3/SDDC_FX3.img"
+    if [[ -f "$DEFAULT_FW" ]]; then
+        FIRMWARE="$(cd "$(dirname "$DEFAULT_FW")" && pwd)/$(basename "$DEFAULT_FW")"
+        echo "# Using firmware: $FIRMWARE"
+    else
+        echo "Bail out! No firmware specified. Use --firmware path/to/SDDC_FX3.img"
+        echo "#   or build it first: cd SDDC_FX3 && make"
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$FIRMWARE" ]]; then
+    echo "Bail out! Firmware file not found: $FIRMWARE"
+    exit 1
+fi
+
+TMPDIR=$(mktemp -d /tmp/fw_test.XXXXXX)
+
+echo "# rx888_stream: $RX888_STREAM"
+echo "# firmware:     $FIRMWARE"
+echo "# sample rate:  $SAMPLE_RATE Hz"
+
 # ---- Test Plan ----
 
-# Count tests: 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
-#            + 3 stale commands + optional streaming (3 checks)
-PLANNED=11
+# Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
+#      + 3 stale commands + optional streaming (3 checks)
+PLANNED=12
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
 echo "1..$PLANNED"
 
-# ---- 1. Device probe ----
+# ==================================================================
+# 1. Firmware upload via rx888_stream
+# ==================================================================
+# Run rx888_stream briefly with the firmware file.  It will:
+#   - Find the device in bootloader mode (PID 0x00F3)
+#   - Upload the .img file
+#   - Wait for re-enumeration at app PID (0x00F1)
+#   - Start streaming (which we immediately kill)
+#
+# If the device already has firmware loaded, rx888_stream opens it
+# directly and this still exercises the basic startup path.
+
+UPLOAD_LOG="$TMPDIR/upload.log"
+
+timeout 15 "$RX888_STREAM" -f "$FIRMWARE" -s "$SAMPLE_RATE" \
+    > /dev/null 2>"$UPLOAD_LOG" &
+UPLOAD_PID=$!
+
+# Give it time to upload firmware and start streaming
+sleep 4
+kill "$UPLOAD_PID" 2>/dev/null || true
+wait "$UPLOAD_PID" 2>/dev/null || true
+
+# Allow device to settle after rx888_stream exits
+sleep 2
+
+# Check if the device is now at the app PID
+if lsusb -d 04b4:00f1 &>/dev/null; then
+    tap_ok "firmware upload: device running at PID 0x00F1"
+else
+    tap_fail "firmware upload: device not found at PID 0x00F1 after upload" \
+             "$(cat "$UPLOAD_LOG" 2>/dev/null || echo '(no log)')"
+    echo "Bail out! Cannot continue without firmware loaded"
+    exit 1
+fi
+
+# ==================================================================
+# 2. Device probe
+# ==================================================================
 
 output=$(run_cmd test) && {
-    # Parse hwconfig from output
-    hwconfig=$(echo "$output" | grep -oP 'hwconfig=0x\K[0-9A-Fa-f]+')
+    hwconfig=$(echo "$output" | grep -oP 'hwconfig=0x\K[0-9A-Fa-f]+' || echo "??")
     if [[ "$hwconfig" == "04" ]]; then
         tap_ok "device probe: RX888r2 detected (hwconfig=0x04)"
     else
@@ -102,7 +229,9 @@ output=$(run_cmd test) && {
     tap_fail "device probe: fx3_cmd test failed" "$output"
 }
 
-# ---- 2. GPIO test ----
+# ==================================================================
+# 3. GPIO test
+# ==================================================================
 
 # Set LEDs on, dither off, randomizer off
 output=$(run_cmd gpio 0x1C00) && {
@@ -111,15 +240,19 @@ output=$(run_cmd gpio 0x1C00) && {
     tap_fail "gpio: write failed" "$output"
 }
 
-# ---- 3. ADC clock ----
+# ==================================================================
+# 4. ADC clock
+# ==================================================================
 
-output=$(run_cmd adc $SAMPLE_RATE) && {
+output=$(run_cmd adc "$SAMPLE_RATE") && {
     tap_ok "adc: set clock to $SAMPLE_RATE Hz"
 } || {
     tap_fail "adc: set clock failed" "$output"
 }
 
-# ---- 4. Attenuator sweep (spot check min and max) ----
+# ==================================================================
+# 5. Attenuator spot-check (min and max)
+# ==================================================================
 
 output=$(run_cmd att 0) && {
     tap_ok "att: set 0 (minimum)"
@@ -133,7 +266,9 @@ output=$(run_cmd att 63) && {
     tap_fail "att: set 63 failed" "$output"
 }
 
-# ---- 5. VGA sweep (spot check min and max) ----
+# ==================================================================
+# 6. VGA spot-check (min and max)
+# ==================================================================
 
 output=$(run_cmd vga 0) && {
     tap_ok "vga: set 0 (minimum)"
@@ -147,7 +282,9 @@ output=$(run_cmd vga 255) && {
     tap_fail "vga: set 255 failed" "$output"
 }
 
-# ---- 6. Stop (ensure clean state before streaming test) ----
+# ==================================================================
+# 7. Stop (ensure clean state)
+# ==================================================================
 
 output=$(run_cmd stop) && {
     tap_ok "stop: clean state"
@@ -155,88 +292,87 @@ output=$(run_cmd stop) && {
     tap_fail "stop: failed" "$output"
 }
 
-# ---- 7. Stale command tests (post-R82xx removal) ----
-# These should STALL. The "raw" subcommand treats STALL as PASS.
+# ==================================================================
+# 8. Stale tuner command tests (post-R82xx removal)
+# ==================================================================
+# These should STALL.  The "raw" subcommand treats STALL as PASS.
+# After each, verify the device is still responsive.
 
 output=$(run_cmd raw 0xB4) && {
-    tap_ok "stale TUNERINIT (0xB4): expected STALL"
+    tap_ok "stale TUNERINIT (0xB4): got STALL as expected"
 } || {
     tap_fail "stale TUNERINIT (0xB4): unexpected result" "$output"
 }
 
 output=$(run_cmd raw 0xB5) && {
-    tap_ok "stale TUNERTUNE (0xB5): expected STALL"
+    tap_ok "stale TUNERTUNE (0xB5): got STALL as expected"
 } || {
     tap_fail "stale TUNERTUNE (0xB5): unexpected result" "$output"
 }
 
 output=$(run_cmd raw 0xB8) && {
-    tap_ok "stale TUNERSTDBY (0xB8): expected STALL"
+    tap_ok "stale TUNERSTDBY (0xB8): got STALL as expected"
 } || {
     tap_fail "stale TUNERSTDBY (0xB8): unexpected result" "$output"
 }
 
-# ---- 8. Streaming test ----
+# ==================================================================
+# 9. Streaming test via rx888_stream
+# ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
     tap_skip "stream: data capture" "streaming tests skipped"
     tap_skip "stream: byte count" "streaming tests skipped"
     tap_skip "stream: non-zero data" "streaming tests skipped"
 else
-    if ! command -v "$RX888_STREAM" &>/dev/null; then
-        tap_skip "stream: data capture" "rx888_stream not found in PATH"
-        tap_skip "stream: byte count" "rx888_stream not found in PATH"
-        tap_skip "stream: non-zero data" "rx888_stream not found in PATH"
+    CAPTURE="$TMPDIR/capture.raw"
+
+    # rx888_stream writes samples to stdout.  Capture N seconds' worth.
+    timeout $((STREAM_SECONDS + 10)) \
+        "$RX888_STREAM" -f "$FIRMWARE" -s "$SAMPLE_RATE" \
+        2>"$TMPDIR/stream.log" \
+        | head -c $((SAMPLE_RATE * 2 * STREAM_SECONDS)) \
+        > "$CAPTURE" &
+    STREAM_PID=$!
+
+    sleep "$STREAM_SECONDS"
+    kill "$STREAM_PID" 2>/dev/null || true
+    wait "$STREAM_PID" 2>/dev/null || true
+
+    BYTE_COUNT=$(stat -c%s "$CAPTURE" 2>/dev/null || echo 0)
+
+    # 9a: did we get any data?
+    if [[ "$BYTE_COUNT" -gt 0 ]]; then
+        tap_ok "stream: data capture ($BYTE_COUNT bytes in ${STREAM_SECONDS}s)"
     else
-        TMPFILE=$(mktemp /tmp/fw_test_stream.XXXXXX)
-        trap "rm -f '$TMPFILE'" EXIT
+        tap_fail "stream: data capture (0 bytes received)" \
+                 "$(tail -5 "$TMPDIR/stream.log" 2>/dev/null || echo '(no log)')"
+    fi
 
-        # Run rx888_stream for N seconds, capturing raw samples
-        timeout $((STREAM_SECONDS + 5)) \
-            "$RX888_STREAM" -s "$SAMPLE_RATE" 2>/dev/null \
-            | head -c $((SAMPLE_RATE * 2 * STREAM_SECONDS)) \
-            > "$TMPFILE" &
-        STREAM_PID=$!
+    # 9b: byte count in the right ballpark?
+    EXPECTED=$((SAMPLE_RATE * 2 * STREAM_SECONDS))
+    LOW=$((EXPECTED * 50 / 100))
+    if [[ "$BYTE_COUNT" -ge "$LOW" ]]; then
+        PERCENT=$((BYTE_COUNT * 100 / EXPECTED))
+        tap_ok "stream: byte count ${PERCENT}% of expected ($BYTE_COUNT / $EXPECTED)"
+    else
+        tap_fail "stream: byte count too low ($BYTE_COUNT < $LOW expected)"
+    fi
 
-        sleep "$STREAM_SECONDS"
-        kill "$STREAM_PID" 2>/dev/null || true
-        wait "$STREAM_PID" 2>/dev/null || true
-
-        BYTE_COUNT=$(stat -c%s "$TMPFILE" 2>/dev/null || echo 0)
-
-        # Test 8a: did we get any data at all?
-        if [[ "$BYTE_COUNT" -gt 0 ]]; then
-            tap_ok "stream: data capture ($BYTE_COUNT bytes in ${STREAM_SECONDS}s)"
-        else
-            tap_fail "stream: data capture (0 bytes received)"
-        fi
-
-        # Test 8b: is the byte count in the right ballpark?
-        # Expected: sample_rate * 2 bytes/sample * seconds
-        EXPECTED=$((SAMPLE_RATE * 2 * STREAM_SECONDS))
-        LOW=$((EXPECTED * 50 / 100))    # 50% of expected (generous lower bound)
-        if [[ "$BYTE_COUNT" -ge "$LOW" ]]; then
-            PERCENT=$((BYTE_COUNT * 100 / EXPECTED))
-            tap_ok "stream: byte count ${PERCENT}% of expected ($BYTE_COUNT / $EXPECTED)"
-        else
-            tap_fail "stream: byte count too low ($BYTE_COUNT < $LOW expected)"
-        fi
-
-        # Test 8c: data is not all zeros
-        NONZERO=$(od -An -tx1 -N 4096 "$TMPFILE" | tr -d ' \n0' | wc -c)
-        if [[ "$NONZERO" -gt 0 ]]; then
-            tap_ok "stream: non-zero data present"
-        else
-            tap_fail "stream: first 4096 bytes are all zero (ADC not sampling?)"
-        fi
-
-        rm -f "$TMPFILE"
+    # 9c: data is not all zeros
+    NONZERO=$(od -An -tx1 -N 4096 "$CAPTURE" | tr -d ' \n0' | wc -c)
+    if [[ "$NONZERO" -gt 0 ]]; then
+        tap_ok "stream: non-zero data present"
+    else
+        tap_fail "stream: first 4096 bytes are all zero (ADC not sampling?)"
     fi
 fi
 
 # ---- Summary ----
 
+echo "#"
 echo "# $PASS_COUNT passed, $FAIL_COUNT failed out of $TEST_NUM tests"
+
 if [[ $FAIL_COUNT -gt 0 ]]; then
     exit 1
 fi
