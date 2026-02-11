@@ -20,10 +20,7 @@ enum FX3Command {
     I2CRFX3       = 0xAF,   /* Read data from I2C bus */
     RESETFX3      = 0xB1,   /* Reset FX3 to bootloader */
     STARTADC      = 0xB2,   /* Start ADC clock at specified frequency */
-    TUNERINIT     = 0xB4,   /* Initialize R828D tuner */
-    TUNERTUNE     = 0xB5,   /* Tune to frequency (UINT64) */
     SETARGFX3     = 0xB6,   /* Set argument by index/value */
-    TUNERSTDBY    = 0xB8,   /* Tuner standby */
     READINFODEBUG = 0xBA,   /* Read debug output / send debug input */
 };
 
@@ -67,10 +64,6 @@ enum RadioModel {
 };
 
 enum ArgumentList {
-    R82XX_ATTENUATOR = 1,    /* R8xx LNA/mixer gain (0-29) */
-    R82XX_VGA        = 2,    /* R8xx VGA gain (0-15) */
-    R82XX_SIDEBAND   = 3,    /* R8xx sideband (0/1) */
-    R82XX_HARMONIC   = 4,    /* R8xx harmonic (0/1) */
     DAT31_ATT        = 10,   /* DAT-31 attenuator (0-63) */
     AD8340_VGA       = 11,   /* AD8340 VGA (0-255) */
 };

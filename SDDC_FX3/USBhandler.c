@@ -12,7 +12,6 @@
 
 #include "Application.h"
 
-#include "tuner_r82xx.h"
 #include "Si5351.h"
 
 #include "radio.h"
@@ -36,14 +35,6 @@ extern uint16_t  FWconfig;       			    // Firmware config hb.lb
 extern CyBool_t flagdebug;
 extern volatile uint16_t debtxtlen;
 extern uint8_t bufdebug[MAXLEN_D_USB];
-
-// r820xx data
-struct r82xx_priv tuner;
-struct r82xx_config tuner_config;
-
-extern int set_all_gains(struct r82xx_priv *priv, UINT8 gain_index);
-extern int set_vga_gain(struct r82xx_priv *priv, UINT8 gain_index);
-extern uint8_t m_gain_index;
 
 
 
@@ -82,16 +73,11 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 			DebugPrint(4, "\t0x%x", * (uint32_t *) pdata);
 			break;
 
-		case TUNERTUNE:
-			DebugPrint(4, "%d", *(uint64_t *)pdata);
-			break;
 
-		case TUNERINIT:
 		case STARTADC:
 			DebugPrint(4, "%d", * (uint32_t *) pdata);
 			break;
 
-		case TUNERSTDBY:
 		case STARTFX3:
 		case STOPFX3:
 		case RESETFX3:
@@ -105,30 +91,6 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 	}
 }
 #endif
-
-void r820_initialize(uint32_t freq)
-{
-	memset(&tuner_config, 0, sizeof(tuner_config));
-	memset(&tuner, 0, sizeof(tuner));
-
-	tuner_config.vco_curr_min = 0xff;
-	tuner_config.vco_curr_max = 0xff;
-	tuner_config.vco_algo = 0;
-
-	tuner_config.xtal = freq;
-	tuner_config.i2c_addr = R828D_I2C_ADDR;
-	tuner_config.rafael_chip = CHIP_R828D;
-
-	si5351aSetFrequencyB(tuner_config.xtal);
-
-	tuner.cfg = &tuner_config;
-
-	uint32_t bw;
-	r82xx_init(&tuner);
-	r82xx_set_bandwidth(&tuner, 8*1000*1000, 0, &bw, 1);
-
-	return;
-}
 
 /* Callback to handle the USB setup requests. */
 CyBool_t
@@ -255,53 +217,11 @@ CyFxSlFifoApplnUSBSetupCB (
 						isHandled = CyTrue;
 					}
 					break;
-
-			case TUNERINIT:
-					{
-						if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
-						{
-							uint32_t freq;
-							freq = *(uint32_t *) &glEp0Buffer[0];
-							r820_initialize(freq);
-							vendorRqtCnt++;
-							isHandled = CyTrue;
-						}
-					}
-					break;
-
-			case TUNERSTDBY:
-					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
-					{
-						r82xx_standby(&tuner);
-						si5351aSetFrequencyB(0);
-						isHandled = CyTrue;
-					}
-					break;
-
-			case TUNERTUNE:
-					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
-					{
-						uint64_t freq;
-						freq = *(uint64_t *) &glEp0Buffer[0];
-						r82xx_set_freq64(&tuner, freq);
-						isHandled = CyTrue;
-					}
-					break;
-
 			case SETARGFX3:
 				{
 					int rc = -1;
 					CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					switch(wIndex) {
-						case R82XX_ATTENUATOR:
-							rc = set_all_gains(&tuner, wValue);
-							break;
-						case R82XX_VGA:
-							rc = set_vga_gain(&tuner, wValue);
-							break;
-						case R82XX_SIDEBAND:
-							rc = r82xx_set_sideband(&tuner, wValue);
-							break;
 						case DAT31_ATT:
 							rx888r2_SetAttenuator(wValue);
 							rc = 0;

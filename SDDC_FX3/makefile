@@ -44,8 +44,7 @@ USBSOURCE= cyfxtx.c		\
 	USBhandler.c
 
 DRIVERSRC=\
-	Si5351.c		\
-	tuner_r82xx.c
+	Si5351.c
 
 RADIOSRC= \
 	rx888r2.c

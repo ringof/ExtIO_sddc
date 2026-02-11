@@ -11,8 +11,9 @@
  */
 #include "Application.h"
 
-#include "tuner_r82xx.h"
 #include "Si5351.h"
+
+#define R828D_I2C_ADDR		0x74
 
 #include "radio.h"
 
