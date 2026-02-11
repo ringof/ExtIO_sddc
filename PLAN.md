@@ -1,157 +1,89 @@
-# Plan: Extricate RX888mk2 Firmware from Multi-Radio Codebase
+# SDDC_FX3 Firmware — Project Plan
 
-## Goal
-Strip the SDDC_FX3 firmware down to RX888mk2-only (aka rx888r2), removing all
-other hardware variants and unused driver code. Produce a firmware that builds
-cleanly and is byte-for-byte functionally identical for the RX888r2 hardware
-path, so it can be tested on real hardware between steps.
+## Completed Work
 
-## Baseline
-- Build verified: `make all` produces `SDDC_FX3.img` (146KB) with zero errors
-- Toolchain: `arm-none-eabi-gcc 13.2.1` + FX3 SDK 1.3.4
-- Code size: 136KB text (76% of 180KB code region)
+The following was completed in the initial cleanup phase:
 
-## What RX888r2 Actually Uses
-From the dispatch in `USBhandler.c` and `RunApplication.c`, the rx888r2 path calls:
-- `rx888r2_GpioInitialize()`, `rx888r2_GpioSet()`, `rx888r2_SetAttenuator()`, `rx888r2_SetGain()`
-- `Si5351` (clock gen): `Si5351init()`, `si5351aSetFrequencyA()`, `si5351aSetFrequencyB()`
-- `tuner_r82xx` (R828D tuner): `r820_initialize()`, `r82xx_set_freq64()`, `r82xx_standby()`, `set_all_gains()`, `set_vga_gain()`, `r82xx_set_sideband()`
-- `I2cTransfer()` for I2C bus operations
-- All the USB/GPIF/DMA infrastructure
-
-## What RX888r2 Does NOT Use
-| Module | Linked Size | Used By |
-|--------|-------------|---------|
-| `adf4351.c` | 6.3KB | RX999, RXLUCY only |
-| `rd5815.c` | 7.8KB | RX888r3 only |
-| `pcal6408a.c` | 1.5KB | RXLUCY only |
-| `rx999.c` | 5.7KB | RX999 only |
-| `rx888r3.c` | 3.8KB | RX888r3 only |
-| `rxlucy.c` | 3.7KB | RXLUCY only |
-| `hf103.c` | 2.5KB | HF103 only |
-| `bbrf103.c` | 2.1KB | BBRF103 only |
-| `rx888.c` | 2.1KB | RX888 (v1) only |
-| **Total removable** | **~35KB** | |
-
-Note: despite `--gc-sections`, all of these are linked into the final image
-because the switch/case dispatch in `USBhandler.c` and `RunApplication.c`
-references every variant's functions.
+- Removed all non-RX888r2 radio variants (HF103, BBRF103, RX888v1, RX888r3,
+  RX999, RXLUCY) and their drivers (ADF4351, RD5815, PCAL6408A)
+- Simplified dispatch in RunApplication.c and USBhandler.c to RX888r2-only
+- Internalized Interface.h into a self-contained protocol.h
+- Cleaned up top-level orphaned files (stale .c copies, SDDC_FX3.h blob)
+- Build verified: `make clean && make all` produces SDDC_FX3.img cleanly
 
 ---
 
-## Execution Steps
+## Phase 2: License Cleanup & Continued Project Hygiene
 
-Each step produces a buildable, testable firmware. After each step you can
-pull the branch and flash the .img to verify it on hardware.
+### Step 1: Remove GPL-licensed R82xx Tuner Driver
 
-### Step 1: Remove other radio source files and drivers from the build
+**Problem:** The R82xx tuner driver (`tuner_r82xx.c`, `tuner_r82xx.h`) is
+licensed under GPL v2+, which is incompatible with the proprietary Cypress SDK
+that gets linked into the same binary. Removing the tuner capability eliminates
+this conflict. See `docs/LICENSE_ANALYSIS.md` for the full analysis.
 
-**Files to delete:**
-- `radio/bbrf103.c`, `radio/hf103.c`, `radio/rx888.c`
-- `radio/rx888r3.c`, `radio/rx999.c`, `radio/rxlucy.c`
-- `driver/adf4351.c`, `driver/adf4351.h`
-- `driver/rd5815.c`, `driver/rd5815.h`
-- `pcal6408a.c`, `pcal6408a.h`
+**Key finding:** The R82xx driver is NOT needed for hardware detection. The
+detection code in `RunApplication.c` only does a raw I2C probe at address
+`0x74` — it never calls any R82xx driver function.
 
-**Files to edit:**
-- `makefile`: Remove deleted files from `RADIOSRC`, `DRIVERSRC`
-- `radio/radio.h`: Remove declarations for deleted radio modules
-- `Application.h`: Remove `#include "adf4351.h"`, remove declarations for
-  deleted radio functions, remove `extern adf4350_init_param adf4351_init_params`
+#### Files to delete:
+- `SDDC_FX3/driver/tuner_r82xx.c`
+- `SDDC_FX3/driver/tuner_r82xx.h`
 
-**Build test:** `make clean && make all` must succeed.
+#### SDDC_FX3/makefile:
+- Remove `tuner_r82xx.c` from `DRIVERSRC`
 
-**Expected result:** Same functional firmware for RX888r2, but ~35KB smaller
-image because the dead code switch cases now reference nothing.
+#### SDDC_FX3/RunApplication.c:
+- Remove `#include "tuner_r82xx.h"`
+- Add local define: `#define R828D_I2C_ADDR 0x74` (for HW detection only)
+- Hardware detection logic is otherwise unchanged
 
-### Step 2: Simplify dispatch to RX888r2-only
+#### SDDC_FX3/USBhandler.c:
+- Remove `#include "tuner_r82xx.h"`
+- Remove global tuner state (`struct r82xx_priv tuner`, `struct r82xx_config
+  tuner_config`, extern declarations for gain functions)
+- Remove `r820_initialize()` function
+- Remove `TUNERINIT` (0xB4) command handler
+- Remove `TUNERTUNE` (0xB5) command handler
+- Remove `TUNERSTDBY` (0xB8) command handler
+- In `SETARGFX3` (0xB6): remove cases for `R82XX_ATTENUATOR` (1),
+  `R82XX_VGA` (2), `R82XX_SIDEBAND` (3). **Keep** `DAT31_ATT` (10) and
+  `AD8340_VGA` (11)
 
-**`RunApplication.c` changes:**
-- Remove the multi-stage hardware detection cascade (Si5351 fail → HF103/RXLUCY,
-  R820T probe → BBRF103/RX888, R828D probe → RX888r2, RD5815 → RX888r3,
-  fallback → RX999)
-- Replace with: init Si5351, probe R828D, if found set `HWconfig = RX888r2`,
-  else set `HWconfig = NORADIO` and log error
-- Remove the `switch(HWconfig)` for GpioInitialize — just call
-  `rx888r2_GpioInitialize()` directly
-- Remove GPIO50/GPIO45/GPIO52/GPIO53 sense pin setup (only used by other variants)
+#### SDDC_FX3/protocol.h:
+- Remove from `FX3Command` enum: `TUNERINIT`, `TUNERTUNE`, `TUNERSTDBY`
+- Remove from `ArgumentList` enum: `R82XX_ATTENUATOR`, `R82XX_VGA`,
+  `R82XX_SIDEBAND`, `R82XX_HARMONIC`
+- **Keep** `SETARGFX3` (still used for DAT31_ATT and AD8340_VGA)
+- **Keep** `DAT31_ATT` and `AD8340_VGA`
 
-**`USBhandler.c` changes:**
-- `GPIOFX3`: Remove switch, call `rx888r2_GpioSet()` directly
-- `TUNERINIT`: Remove switch, call `r820_initialize()` directly
-- `TUNERSTDBY`: Remove switch, call `r82xx_standby()` + `si5351aSetFrequencyB(0)` directly
-- `TUNERTUNE`: Remove switch, call `r82xx_set_freq64()` directly
-- `SETARGFX3`/`DAT31_ATT`: Remove switch, call `rx888r2_SetAttenuator()` directly
-- `SETARGFX3`/`AD8340_VGA`: Remove switch, call `rx888r2_SetGain()` directly
-- `SETARGFX3`/`PRESELECTOR`: Remove entirely (RX888r2 has no preselector)
-- `SETARGFX3`/`VHF_ATTENUATOR`: Remove entirely (RX888r2 has no VHF attenuator)
+#### Compatibility:
+- An older host driver sending tuner commands will receive USB STALL
+  (`isHandled = CyFalse`), which is safe — no crash, just a failed request
+- Host-side software should be updated to stop sending tuner commands
 
-**`USBdescriptor.c` changes:**
-- Remove product string descriptors for other hardware variants
-- Remove the `switch(HWconfig)` in `SetUSBdescriptors()`, just set the RX888r2
-  product string
-
-**`Application.h` changes:**
-- Remove all radio function declarations except rx888r2
-- Remove detect GPIO defines for other variants (GPIO50, GPIO52, GPIO53, GPIO45)
-
-**Build test:** `make clean && make all` must succeed.
-**Hardware test:** Flash and verify on RX888mk2. All host software operations
-(tune, gain, attenuator, start/stop streaming) should work identically.
-
-### Step 3: Internalize Interface.h
-
-**Current state:** `Application.h` includes `../Interface.h`, the only file
-shared with the (dead) host application code.
-
-**Change:** Copy the relevant definitions from `Interface.h` directly into
-`Application.h` (or a new `protocol.h` inside `SDDC_FX3/`). Remove the
-`#include "../Interface.h"` reference. This makes the firmware directory
-fully self-contained.
-
-Trim to only what the firmware uses:
-- `FX3Command` enum (keep all — firmware responds to all of these)
-- `GPIOPin` enum (keep only the pins RX888r2 uses: SHDWN, DITH, RANDO,
-  BIAS_HF, BIAS_VHF, LED_YELLOW, LED_RED, LED_BLUE, PGA_EN, VHF_EN)
-- `RadioModel` enum (keep only NORADIO and RX888r2, or keep all for
-  backward-compatible TESTFX3 response)
-- `ArgumentList` enum (keep R82XX_ATTENUATOR, R82XX_VGA, R82XX_SIDEBAND,
-  DAT31_ATT, AD8340_VGA. Remove PRESELECTOR, VHF_ATTENUATOR, R82XX_HARMONIC)
-- `FIRMWARE_VER_*` (keep)
-- `_DEBUG_USB_` / `MAXLEN_D_USB` (keep)
-
-**Build test:** `make clean && make all` must succeed.
-
-### Step 4: Clean up top-level junk
-
-**Files to delete from repo root (not part of firmware, not used by anything):**
-- `SDDC_FX3.h` — orphaned 738KB firmware binary blob, nothing includes it
-- `DebugConsole.c` — stale copy of SDDC_FX3/DebugConsole.c at repo root
-- `USBhandler.c` — stale copy at repo root
-- `StartStopApplication.c` — stale copy at repo root
-- `HWSDRtable.h` — documentation file, not used in any build
-
-These are not part of the firmware build (the makefile never references
-parent directory `.c` files), but removing them eliminates confusion.
-
-**Build test:** `make clean && make all` must succeed (trivially — these
-files were never compiled).
+#### Build test:
+`make clean && make all` must succeed.
 
 ---
 
-## What Is NOT Changed (and Why)
+### Step 2: (reserved — further cleanup TBD)
 
-- **`cyfxtx.c`** — FX3 RTOS glue, heap management, exception handlers.
-  Required as-is.
-- **`DebugConsole.c`** — Debug infrastructure. Useful for development.
-- **`Support.c`** — Utility functions used throughout. Keep.
-- **`StartStopApplication.c`** — USB endpoint/DMA setup. Hardware-independent.
-- **`StartUP.c`** — CPU init. Hardware-independent.
-- **`i2cmodule.c`** — I2C bus driver. Used by Si5351, R82xx, hardware detect.
-- **`Si5351.c`** — Clock generator. Used by RX888r2 for ADC clock.
-- **`tuner_r82xx.c`** — R828D tuner driver. Core to RX888r2 VHF path.
-- **`SDDC_GPIF.h`** — Auto-generated GPIF state machine. Do not hand-edit.
-- **`SDK/`** — Vendor SDK. Do not modify.
+### Step 3: (reserved — further cleanup TBD)
+
+---
+
+## Post-Cleanup License Summary
+
+After completing Step 1, the firmware binary contains only:
+
+| Component | License | Distribution |
+|-----------|---------|-------------|
+| Application code | MIT (Oscar Steila 2017-2020, David Goncalves 2024-2026) | Freely distributable |
+| Cypress FX3 SDK | Cypress SLA | Object code distributable royalty-free with Cypress IC products (§1.3) |
+| ThreadX RTOS | Sublicensed via Cypress SLA §6.2 | Covered under SDK distribution rights |
+
+No copyleft obligations. Clean licensing posture.
 
 ---
 
@@ -159,6 +91,5 @@ files were never compiled).
 
 After each step:
 1. `make clean && make all` — must produce `SDDC_FX3.img` with zero errors
-2. `arm-none-eabi-size SDDC_FX3.elf` — track text/data/bss shrinkage
-3. (User) Flash to RX888mk2 and test: USB enumeration, TESTFX3 response,
-   start/stop ADC streaming, tuner init/tune/standby, attenuator, VGA gain
+2. `arm-none-eabi-size SDDC_FX3.elf` — track text/data/bss changes
+3. (User) Flash to RX888mk2 and test core functionality
