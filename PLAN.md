@@ -67,7 +67,119 @@ detection code in `RunApplication.c` only does a raw I2C probe at address
 
 ---
 
-### Step 2: (reserved — further cleanup TBD)
+### Step 2: Build Hardware Test Tools
+
+**Goal:** Create test tools in `tests/` that can exercise every firmware
+vendor command over USB, plus validate streaming performance. These tools
+run on the Linux host against real RX888mk2 hardware.
+
+**Reference codebase:**
+[rx888_tools](https://github.com/ringof/rx888_tools) — specifically
+`rx888_stream.c` — is a proven host-side streamer that works with the
+stock firmware. We borrow its USB control transfer patterns and protocol
+constants.
+
+#### Analysis of rx888_stream vs. Firmware Protocol
+
+rx888_stream's initialization sequence (in order):
+
+| # | Host call | FX3 command | Firmware handler |
+|---|-----------|-------------|-----------------|
+| 1 | `rx888_stop_stream()` | STOPFX3 (0xAB) | Stop GPIF, flush EP — OK |
+| 2 | `rx888_gpio(gpio_bits)` | GPIOFX3 (0xAD) | `rx888r2_GpioSet()` — OK |
+| 3 | `rx888_set_arg(DAT31_ATT, att)` | SETARGFX3 (0xB6), wIndex=10 | `rx888r2_SetAttenuator()` — OK |
+| 4 | `rx888_set_arg(AD8340_VGA, gain)` | SETARGFX3 (0xB6), wIndex=11 | `rx888r2_SetGain()` — OK |
+| 5 | `rx888_cmd_u32(STARTADC, rate)` | STARTADC (0xB2) | `si5351aSetFrequencyA()` — OK |
+| 6 | `rx888_start_stream()` | STARTFX3 (0xAA) | Start GPIF/DMA — OK |
+| 7 | `rx888_cmd_u32(TUNERSTDBY, 0)` | TUNERSTDBY (0xB8) | See note below |
+
+**Compatibility finding — TUNERSTDBY after R82xx removal:**
+rx888_stream sends TUNERSTDBY as a best-effort "put VHF tuner to sleep"
+after starting the HF stream. In the current firmware this calls
+`r82xx_standby()` + `si5351aSetFrequencyB(0)`. After R82xx removal,
+this command will hit the `default:` case and return USB STALL.
+rx888_stream treats this as non-fatal (the comment says "best-effort")
+so HF streaming is unaffected. The `si5351aSetFrequencyB(0)` side-effect
+(turning off the tuner reference clock) is irrelevant without a tuner.
+
+**Other commands not used by rx888_stream but present in firmware:**
+
+| Command | Code | Notes |
+|---------|------|-------|
+| TESTFX3 | 0xAC | Device identification (returns HWconfig, FW version). Used by other host tools. |
+| I2CWFX3 | 0xAE | Raw I2C write. Useful for diagnostics. |
+| I2CRFX3 | 0xAF | Raw I2C read. Useful for diagnostics. |
+| RESETFX3 | 0xB1 | Reboot FX3 to bootloader. |
+| READINFODEBUG | 0xBA | Debug console over USB. |
+| TUNERINIT | 0xB4 | R82xx init — will be removed. |
+| TUNERTUNE | 0xB5 | R82xx tune — will be removed. |
+
+#### Test Tool #1: `fx3_cmd` — Vendor Command Exerciser
+
+A small C program using libusb-1.0 that sends individual vendor commands
+and reports success/failure. Borrows the `ctrl_write_u32()` and
+`ctrl_write_buf()` patterns from rx888_stream.
+
+**Subcommands:**
+```
+fx3_cmd test              # TESTFX3: read HWconfig + FW version
+fx3_cmd gpio <bits>       # GPIOFX3: set GPIO word
+fx3_cmd adc <freq_hz>     # STARTADC: set ADC clock
+fx3_cmd att <0-63>        # SETARGFX3/DAT31_ATT
+fx3_cmd vga <0-255>       # SETARGFX3/AD8340_VGA
+fx3_cmd start             # STARTFX3: start streaming
+fx3_cmd stop              # STOPFX3: stop streaming
+fx3_cmd i2cr <addr> <reg> <len>   # I2CRFX3: read I2C
+fx3_cmd i2cw <addr> <reg> <data>  # I2CWFX3: write I2C
+fx3_cmd reset             # RESETFX3: reboot to bootloader
+```
+
+Each subcommand prints a one-line PASS/FAIL result with the USB status.
+
+**Files:**
+- `tests/fx3_cmd.c` — single-file C program
+- `tests/Makefile` — builds `fx3_cmd`, links against libusb-1.0
+
+**Dependencies:** `libusb-1.0-0-dev` (same as rx888_stream)
+
+#### Test Tool #2: `fw_test.sh` — Automated Firmware Test Script
+
+A shell script that uses `fx3_cmd` and `rx888_stream` to run a full
+test sequence against real hardware:
+
+```
+tests/fw_test.sh [--firmware path/to/SDDC_FX3.img] [--stream-seconds 5]
+```
+
+**Test sequence:**
+1. **Device probe** — `fx3_cmd test`: verify HWconfig == 0x04 (RX888r2),
+   firmware version matches expected
+2. **GPIO test** — `fx3_cmd gpio`: set known pattern, read back via
+   `fx3_cmd test` (vendorRqtCnt increments)
+3. **ADC clock test** — `fx3_cmd adc 64000000`: set 64 MHz clock, verify ACK
+4. **Attenuator sweep** — `fx3_cmd att 0` through `fx3_cmd att 63`: verify
+   all values accepted
+5. **VGA sweep** — `fx3_cmd vga 0` through `fx3_cmd vga 255`: verify
+   all values accepted
+6. **Streaming test** — run `rx888_stream -s 64000000` for N seconds,
+   capture to file, verify:
+   - Exit code 0 (clean shutdown)
+   - Byte count matches expected rate (±5%)
+   - Data is not all-zero (ADC is actually sampling)
+7. **Stale command test** (post-R82xx removal) — `fx3_cmd` sends
+   TUNERINIT, TUNERTUNE, TUNERSTDBY; verify each returns STALL
+   (LIBUSB_ERROR_PIPE) without crashing the device, and that a
+   subsequent `fx3_cmd test` still works
+
+**Output:** TAP format (Test Anything Protocol) for easy integration
+with CI or manual review.
+
+#### Build and Dependency Requirements
+
+```
+sudo apt install libusb-1.0-0-dev
+cd tests && make
+```
 
 ### Step 3: (reserved — further cleanup TBD)
 
@@ -92,4 +204,5 @@ No copyleft obligations. Clean licensing posture.
 After each step:
 1. `make clean && make all` — must produce `SDDC_FX3.img` with zero errors
 2. `arm-none-eabi-size SDDC_FX3.elf` — track text/data/bss changes
-3. (User) Flash to RX888mk2 and test core functionality
+3. Flash to RX888mk2 and run `tests/fw_test.sh` for automated validation
+4. Manual spot-check: run `rx888_stream` pipeline, verify signal in SDR app
