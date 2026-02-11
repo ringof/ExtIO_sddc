@@ -203,6 +203,12 @@ CyFxSlFifoApplnUSBSetupCB (
 
     	isHandled = CyFalse;
 
+    	/* Reject oversized EP0 data before any GetEP0Data call. */
+    	if (wLength > CYFX_SDRAPP_MAX_EP0LEN) {
+    		CyU3PUsbStall(0, CyTrue, CyFalse);
+    		return CyTrue;
+    	}
+
     	switch (bRequest)
     	 {
 			case GPIOFX3:

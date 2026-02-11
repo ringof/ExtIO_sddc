@@ -303,6 +303,29 @@ static int do_raw(libusb_device_handle *h, uint8_t code)
     return 0;
 }
 
+/* Send a vendor request with wLength > 64 — must STALL if firmware
+ * validates EP0 buffer bounds (issue #6). */
+static int do_ep0_overflow(libusb_device_handle *h)
+{
+    uint8_t buf[128];
+    memset(buf, 0, sizeof(buf));
+
+    int r = libusb_control_transfer(
+        h,
+        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        GPIOFX3, 0, 0, buf, sizeof(buf), CTRL_TIMEOUT_MS);
+    if (r == LIBUSB_ERROR_PIPE) {
+        printf("PASS ep0_overflow: STALL on wLength=%d (> 64)\n", (int)sizeof(buf));
+        return 0;
+    }
+    if (r < 0) {
+        printf("FAIL ep0_overflow: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("FAIL ep0_overflow: accepted wLength=%d (expected STALL)\n", (int)sizeof(buf));
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
@@ -324,6 +347,7 @@ static void usage(const char *prog)
         "  i2cw <addr> <reg> <byte>...  I2C write (hex addresses, hex data)\n"
         "  reset                        Reboot FX3 to bootloader\n"
         "  raw <code>                   Send raw vendor request (hex)\n"
+        "  ep0_overflow                 Test EP0 wLength bounds check\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -414,6 +438,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "raw") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_raw(h, (uint8_t)parse_num(argv[2]));
+
+    } else if (strcmp(cmd, "ep0_overflow") == 0) {
+        rc = do_ep0_overflow(h);
 
     } else {
         fprintf(stderr, "error: unknown command '%s'\n", cmd);

@@ -171,8 +171,8 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # ---- Test Plan ----
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
-#      + 3 stale commands + optional streaming (3 checks)
-PLANNED=12
+#      + 3 stale commands + 1 ep0_overflow + optional streaming (3 checks)
+PLANNED=13
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -317,7 +317,18 @@ output=$(run_cmd raw 0xB8) && {
 }
 
 # ==================================================================
-# 9. Streaming test via rx888_stream
+# 9. EP0 wLength overflow check (issue #6)
+# ==================================================================
+# Send a vendor request with wLength > 64 — firmware must STALL.
+
+output=$(run_cmd ep0_overflow) && {
+    tap_ok "ep0_overflow: STALL on oversized wLength"
+} || {
+    tap_fail "ep0_overflow: accepted oversized wLength (buffer overflow risk)" "$output"
+}
+
+# ==================================================================
+# 10. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
