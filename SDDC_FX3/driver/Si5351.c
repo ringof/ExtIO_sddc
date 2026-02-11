@@ -88,10 +88,8 @@ void setupPLL(UINT8 pll, UINT8 mult, UINT32 num, UINT32 denom)
 
 	// the actual multiplier is  mult + num / denom
 
-	P1 = (UINT32)(128 * ((float)num / (float)denom));
-	P1 = (UINT32)(128 * (UINT32)(mult)+P1 - 512);
-	P2 = (UINT32)(128 * ((float)num / (float)denom));
-	P2 = (UINT32)(128 * num - denom * P2);
+	P1 = 128 * (UINT32)mult + (128 * num) / denom - 512;
+	P2 = 128 * num - denom * ((128 * num) / denom);
 	P3 = denom;
 
 	data[0] = (P3 & 0x0000FF00) >> 8;
@@ -140,7 +138,6 @@ void si5351aSetFrequencyA(UINT32 freq)
 	UINT32 pllFreq;
 	UINT32 xtalFreq = SI5351_FREQ;
 	UINT32 l;
-	double f;
 	UINT8 mult;
 	UINT32 num;
 	UINT32 denom;
@@ -175,11 +172,9 @@ void si5351aSetFrequencyA(UINT32 freq)
 #endif
 	mult = pllFreq / xtalFreq;		// Determine the multiplier to get to the required pllFrequency
 	l = pllFreq % xtalFreq;			// It has three parts:
-	f = (double)l;					// mult is an integer that must be in the range 15..90
-	f *= 1048575;					// num and denom are the fractional parts, the numerator and denominator
-	f /= xtalFreq;					// each is 20 bits (range 0..1048575)
-	num = (UINT32)f;				// the actual multiplier is  mult + num / denom
-	denom = 1048575;				// For simplicity we set the denominator to the maximum 1048575
+									// mult is an integer that must be in the range 15..90
+	num = (UINT32)((uint64_t)l * 1048575 / xtalFreq);	// num and denom are the fractional parts
+	denom = 1048575;				// each is 20 bits (range 0..1048575)
 									// Set up PLL A with the calculated multiplication ratio
 	setupPLL(SI_SYNTH_PLL_A, mult, num, denom);
 	// Set up MultiSynth divider 0, with the calculated divider.
@@ -203,7 +198,6 @@ void si5351aSetFrequencyB(UINT32 freq2)
 	UINT32 pllFreq;
 	UINT32 xtalFreq = SI5351_FREQ;
 	UINT32 l;
-	double f;
 	UINT8 mult;
 	UINT32 num;
 	UINT32 denom;
@@ -238,11 +232,9 @@ void si5351aSetFrequencyB(UINT32 freq2)
 #endif
 	mult = pllFreq / xtalFreq;		// Determine the multiplier to get to the required pllFrequency
 	l = pllFreq % xtalFreq;			// It has three parts:
-	f = (double)l;							// mult is an integer that must be in the range 15..90
-	f *= 1048575;					// num and denom are the fractional parts, the numerator and denominator
-	f /= xtalFreq;					// each is 20 bits (range 0..1048575)
-	num = (UINT32)f;				// the actual multiplier is  mult + num / denom
-	denom = 1048575;				// For simplicity we set the denominator to the maximum 1048575
+									// mult is an integer that must be in the range 15..90
+	num = (UINT32)((uint64_t)l * 1048575 / xtalFreq);	// num and denom are the fractional parts
+	denom = 1048575;				// each is 20 bits (range 0..1048575)
 
 									// Set up PLL B with the calculated multiplication ratio
 	setupPLL(SI_SYNTH_PLL_B, mult, num, denom);
