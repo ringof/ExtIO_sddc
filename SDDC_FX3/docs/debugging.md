@@ -157,7 +157,7 @@ GPIF State = 0
 ## 3. TraceSerial -- Vendor Request Logger
 
 When `TRACESERIAL` is defined in `Application.h` (default), the
-`TraceSerial()` function in `USBhandler.c` logs every EP0 vendor
+`TraceSerial()` function in `USBHandler.c` logs every EP0 vendor
 request to the debug output after it is processed.
 
 ### What Gets Logged
@@ -308,7 +308,7 @@ Options:
 | File | Debug role |
 |------|-----------|
 | `DebugConsole.c` | UART init, USB debug buffer, printf formatter, console command parser, `ConsoleAccumulateChar()` |
-| `USBhandler.c` | `READINFODEBUG` EP0 handler, `TraceSerial()` vendor request logger |
+| `USBHandler.c` | `READINFODEBUG` EP0 handler, `TraceSerial()` vendor request logger |
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |

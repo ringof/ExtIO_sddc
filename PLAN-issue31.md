@@ -55,27 +55,27 @@ Each rename below lists **every** occurrence found by a full-repo grep.
 
 | File | Line | Context |
 |------|------|---------|
-| `SDDC_FX3/USBhandler.c` | 332 | Function definition |
-| `SDDC_FX3/USBhandler.c` | 401 | `CyU3PUsbRegisterEventCallback(USBEvent_Callback)` |
+| `SDDC_FX3/USBHandler.c` | 332 | Function definition |
+| `SDDC_FX3/USBHandler.c` | 401 | `CyU3PUsbRegisterEventCallback(USBEvent_Callback)` |
 | `docs/diagnostics_side_channel.md` | 85 | Table: `Increment in USBEvent_Callback on EP_UNDERRUN` |
 | `docs/architecture.md` | 377 | Prose: `**USBEvent_Callback** -- called for USB bus events` |
 | `docs/architecture.md` | 465 | Diagram: `SET_CONFIGURATION triggers USBEvent_Callback` |
 | `PLAN.md` | 97 | Table row (plan file) |
 
-**NOTE:** The issue mentions `StartUP.c` but this function does NOT appear there.
-It is registered in `USBhandler.c:401` inside `InitializeUSB()`.
+**NOTE:** The issue mentions `StartUp.c` but this function does NOT appear there.
+It is registered in `USBHandler.c:401` inside `InitializeUSB()`.
 
 ### 6. `LPMRequest_Callback` → `LPMRequestCallback`
 
 | File | Line | Context |
 |------|------|---------|
-| `SDDC_FX3/USBhandler.c` | 374 | Function definition |
-| `SDDC_FX3/USBhandler.c` | 402 | `CyU3PUsbRegisterLPMRequestCallback(LPMRequest_Callback)` |
+| `SDDC_FX3/USBHandler.c` | 374 | Function definition |
+| `SDDC_FX3/USBHandler.c` | 402 | `CyU3PUsbRegisterLPMRequestCallback(LPMRequest_Callback)` |
 | `docs/architecture.md` | 379 | Prose: `**LPMRequest_Callback** -- called when...` |
 | `PLAN.md` | 83 | Table: `Commented-out DebugPrint in LPMRequest_Callback` |
 | `PLAN.md` | 98 | Table row (plan file) |
 
-**NOTE:** Same as above — not in `StartUP.c`.
+**NOTE:** Same as above — not in `StartUp.c`.
 
 ---
 
@@ -87,7 +87,7 @@ It is registered in `USBhandler.c:401` inside `InitializeUSB()`.
 | `SDDC_FX3/driver/Si5351.c` | `setupPLL` → `SetupPLL` (×3), `setupMultisynth` → `SetupMultisynth` (×3), `Si5351init` → `Si5351Init` (×1) |
 | `SDDC_FX3/driver/Si5351.h` | `Si5351init` → `Si5351Init` (×1) |
 | `SDDC_FX3/RunApplication.c` | `Si5351init` → `Si5351Init` (×2, including debug string) |
-| `SDDC_FX3/USBhandler.c` | `USBEvent_Callback` → `USBEventCallback` (×2), `LPMRequest_Callback` → `LPMRequestCallback` (×2) |
+| `SDDC_FX3/USBHandler.c` | `USBEvent_Callback` → `USBEventCallback` (×2), `LPMRequest_Callback` → `LPMRequestCallback` (×2) |
 | `tests/fx3_cmd.c` | `Pib_error_cb` → `PibErrorCallback` (×2, comments only) |
 | `docs/diagnostics_side_channel.md` | `Pib_error_cb` → `PibErrorCallback` (×2), `USBEvent_Callback` → `USBEventCallback` (×1) |
 | `docs/wedge_detection.md` | `Pib_error_cb` → `PibErrorCallback` (×2) |
@@ -171,7 +171,7 @@ verifies no accidental code breakage).
   one registration call). No header declaration.
 
 - **Low risk**: `USBEvent_Callback` and `LPMRequest_Callback` are used only in
-  USBhandler.c (definition + one registration call each). No header declarations.
+  USBHandler.c (definition + one registration call each). No header declarations.
 
 - **Zero functional risk from docs/test changes**: All doc and test changes are
   in comments or markdown prose — they cannot affect compilation or runtime behavior.

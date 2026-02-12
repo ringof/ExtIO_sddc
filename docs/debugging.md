@@ -63,7 +63,7 @@ Debug-over-USB is off by default. It is enabled by the host sending:
 TESTFX3 (0xAC) with wValue=1
 ```
 
-This sets `flagdebug = true` (`USBhandler.c:276`). All subsequent `DebugPrint2USB` calls then buffer output instead of returning immediately.
+This sets `flagdebug = true` (`USBHandler.c:276`). All subsequent `DebugPrint2USB` calls then buffer output instead of returning immediately.
 
 ### Output flow
 
@@ -95,17 +95,17 @@ This mirrors the UART input path exactly -- same `ConsoleInBuffer`, same `ParseC
 
 2. **Overflow backpressure is just a sleep.** `DebugConsole.c:245` -- when the buffer is full, `DebugPrint2USB` sleeps 100 ms then checks again. If it is still full, the message is silently dropped. There is no retry loop and no indication.
 
-3. **READINFODEBUG null-terminates at `len-1`, truncating the last character.** `USBhandler.c:304`:
+3. **READINFODEBUG null-terminates at `len-1`, truncating the last character.** `USBHandler.c:304`:
    ```c
    glEp0Buffer[len-1] = 0;
    ```
    `len` is the formatted text length. This overwrites the last character of the message with a null terminator, so every debug read loses one byte.
 
-4. **STALL-as-"empty" is unconventional.** When there is no debug data (`debtxtlen == 0`), the handler stalls EP0 (`USBhandler.c:312`). This is not an error -- it signals "no data yet." But from the host's perspective, a STALL is an error condition. The host must treat STALL as "poll again later" rather than "fatal error," which is non-standard and can trigger warning messages in verbose USB logging.
+4. **STALL-as-"empty" is unconventional.** When there is no debug data (`debtxtlen == 0`), the handler stalls EP0 (`USBHandler.c:312`). This is not an error -- it signals "no data yet." But from the host's perspective, a STALL is an error condition. The host must treat STALL as "poll again later" rather than "fatal error," which is non-standard and can trigger warning messages in verbose USB logging.
 
 5. **Single-character input protocol.** Each `READINFODEBUG` call can only carry one character (in `wValue`). Typing a 6-character command like `"stack\r"` requires 6 separate USB control transfers. It works, but it is slow.
 
-6. **The `debtxtlen` reset-then-send sequence is not atomic.** At `USBhandler.c:301-305`:
+6. **The `debtxtlen` reset-then-send sequence is not atomic.** At `USBHandler.c:301-305`:
    ```c
    uint16_t len = debtxtlen;
    memcpy(glEp0Buffer, bufdebug, len);
@@ -119,7 +119,7 @@ This mirrors the UART input path exactly -- same `ConsoleInBuffer`, same `ParseC
 
 ## TraceSerial (vendor request logger)
 
-Guarded by `#ifdef TRACESERIAL` (defined in `Application.h`). Called at `USBhandler.c:325` after every vendor request is handled:
+Guarded by `#ifdef TRACESERIAL` (defined in `Application.h`). Called at `USBHandler.c:325` after every vendor request is handled:
 
 ```c
 TraceSerial(bRequest, (uint8_t *)&glEp0Buffer[0], wValue, wIndex);
@@ -139,7 +139,7 @@ It skips `READINFODEBUG` (to avoid recursive tracing of the debug poll itself), 
 
 ## TESTFX3 (device info / debug toggle)
 
-`USBhandler.c:270-279` -- returns 4 bytes via EP0:
+`USBHandler.c:270-279` -- returns 4 bytes via EP0:
 
 | Byte | Contents |
 |------|----------|

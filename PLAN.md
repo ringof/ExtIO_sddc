@@ -4,7 +4,7 @@
 
 ### Phase 1: Variant Removal & Initial Cleanup
 - Removed all non-RX888r2 radio variants and their drivers
-- Simplified dispatch in RunApplication.c and USBhandler.c to RX888r2-only
+- Simplified dispatch in RunApplication.c and USBHandler.c to RX888r2-only
 - Internalized Interface.h into self-contained protocol.h
 - Cleaned up top-level orphaned files
 - Removed GPL-licensed R82xx tuner driver and all tuner commands
@@ -62,7 +62,7 @@ mask, and latch pin.
 | `RunApplication.c:71,92` | ConfGPIO wrappers say "output" for input configs | Change to "input" / "input with pull-up" |
 | `Support.c:179` | CheckStatusSilent says "displays and stall" | Rewrite to match actual blink-and-reset behavior |
 | `i2cmodule.c:26` | Says "100KHz" bitrate | Change to "400KHz" to match `I2C_BITRATE` |
-| `StartUP.c:44` | Says "GPIF can be '100MHz'" | Change to "~201MHz" (403MHz / clkDiv=2) |
+| `StartUp.c:44` | Says "GPIF can be '100MHz'" | Change to "~201MHz" (403MHz / clkDiv=2) |
 | `Si5351.c:109` | References nonexistent "si5351a.h header file" | Remove or update reference |
 | `docs/debugging.md:167` | MsgParsing label 2 says "free" | Update to describe PIB error info |
 | `rx888r2.c:87` | `SetGain` comment says "ATT_LE latched" | Fix to "VGA_LE" (copy-paste from SetAttenuator) |
@@ -80,7 +80,7 @@ mask, and latch pin.
 | `i2cmodule.h:9` | Unused `#define I2C_ACTIVE` macro |
 | `i2cmodule.c:50-51` | Commented-out `DebugPrint` call |
 | `RunApplication.c:224` | Commented-out `for (Count = 0; ...)` loop |
-| `USBhandler.c:382` | Commented-out `DebugPrint` in LPMRequest_Callback |
+| `USBHandler.c:382` | Commented-out `DebugPrint` in LPMRequest_Callback |
 
 **Files:** 4 files as listed above
 
@@ -94,8 +94,8 @@ mask, and latch pin.
 | `setupPLL` | `SetupPLL` | driver/Si5351.c (static) |
 | `setupMultisynth` | `SetupMultisynth` | driver/Si5351.c (static) |
 | `Si5351init` | `Si5351Init` | driver/Si5351.c, driver/Si5351.h, RunApplication.c |
-| `USBEvent_Callback` | `USBEventCallback` | USBhandler.c, StartUP.c |
-| `LPMRequest_Callback` | `LPMRequestCallback` | USBhandler.c, StartUP.c |
+| `USBEvent_Callback` | `USBEventCallback` | USBHandler.c, StartUp.c |
+| `LPMRequest_Callback` | `LPMRequestCallback` | USBHandler.c, StartUp.c |
 
 The `rx888r2_*` prefix is intentional namespacing for the radio driver —
 leave those as-is.
@@ -107,25 +107,25 @@ leave those as-is.
 ### Step 5: Move duplicate defines to protocol.h
 
 **Problem:** `FX3_CMD_BASE`, `FX3_CMD_COUNT`, and `SETARGFX3_LIST_COUNT` are
-defined identically in both `DebugConsole.c` and `USBhandler.c`.
+defined identically in both `DebugConsole.c` and `USBHandler.c`.
 
 **Change:**
 - Move all three defines into `protocol.h` (single source of truth)
-- Remove the duplicates from `DebugConsole.c` and `USBhandler.c`
+- Remove the duplicates from `DebugConsole.c` and `USBHandler.c`
 - Move `FX3CommandName[]` and `SETARGFX3List[]` arrays from `DebugConsole.c`
-  to `USBhandler.c` (where they're consumed via extern) or to a shared location
+  to `USBHandler.c` (where they're consumed via extern) or to a shared location
 
 **Also:** Fix `i2cmodule.h` circular include — it includes `Application.h`
 which includes `i2cmodule.h`. Change `i2cmodule.h` to include only
 `cyu3types.h` (the only Cypress type it actually needs).
 
-**Files:** `protocol.h`, `DebugConsole.c`, `USBhandler.c`, `i2cmodule.h`
+**Files:** `protocol.h`, `DebugConsole.c`, `USBHandler.c`, `i2cmodule.h`
 
 ---
 
-### Step 6: Consolidate GPIO LED setup (StartUP.c + Support.c)
+### Step 6: Consolidate GPIO LED setup (StartUp.c + Support.c)
 
-**Problem:** `IndicateError()` in `StartUP.c:17-33` and `ErrorBlinkAndReset()`
+**Problem:** `IndicateError()` in `StartUp.c:17-33` and `ErrorBlinkAndReset()`
 in `Support.c:27-50` both configure `GPIO_LED_BLUE_PIN` with identical
 `CyU3PGpioSimpleConfig_t` initialization.
 
@@ -133,7 +133,7 @@ in `Support.c:27-50` both configure `GPIO_LED_BLUE_PIN` with identical
 - Extract a shared `ConfigureLedGpio()` helper (or have `IndicateError` call
   `ErrorBlinkAndReset` directly if appropriate)
 
-**Files:** `StartUP.c`, `Support.c`
+**Files:** `StartUp.c`, `Support.c`
 
 ---
 
@@ -141,9 +141,9 @@ in `Support.c:27-50` both configure `GPIO_LED_BLUE_PIN` with identical
 
 | Current | Renamed |
 |---------|---------|
-| `USBdescriptor.c` | `USBDescriptor.c` |
-| `USBhandler.c` | `USBHandler.c` |
-| `StartUP.c` | `StartUp.c` |
+| `USBDescriptor.c` | `USBDescriptor.c` |
+| `USBHandler.c` | `USBHandler.c` |
+| `StartUp.c` | `StartUp.c` |
 
 **Change:**
 - `git mv` each file

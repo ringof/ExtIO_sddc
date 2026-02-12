@@ -2,8 +2,8 @@
 
 ## Problem
 
-1. **Duplicate defines**: `FX3_CMD_BASE`, `FX3_CMD_COUNT`, and `SETARGFX3_LIST_COUNT` are defined identically in both `DebugConsole.c` (lines 61–62, 69) and `USBhandler.c` (lines 49–51).
-2. **Scattered extern declarations**: `FX3CommandName[]` is defined in `DebugConsole.c` and declared `extern` in `USBhandler.c` with no shared header.
+1. **Duplicate defines**: `FX3_CMD_BASE`, `FX3_CMD_COUNT`, and `SETARGFX3_LIST_COUNT` are defined identically in both `DebugConsole.c` (lines 61–62, 69) and `USBHandler.c` (lines 49–51).
+2. **Scattered extern declarations**: `FX3CommandName[]` is defined in `DebugConsole.c` and declared `extern` in `USBHandler.c` with no shared header.
 3. **Circular include**: `Application.h` includes `i2cmodule.h`, which includes `Application.h` back.
 
 ## Changes (4 files)
@@ -39,7 +39,7 @@ Currently `TRACESERIAL` is defined on line 32, *after* `protocol.h` is included 
 
 Delete lines 61–62 (`FX3_CMD_BASE`, `FX3_CMD_COUNT`) and line 69 (`SETARGFX3_LIST_COUNT`). Keep the array definitions — they are the single canonical source of truth, now sized by the defines from `protocol.h`.
 
-### 4. `USBhandler.c` — remove local defines *and* extern declarations
+### 4. `USBHandler.c` — remove local defines *and* extern declarations
 
 Delete lines 47–51 (`extern const char*` + three `#define`s). These are now supplied by `protocol.h`.
 

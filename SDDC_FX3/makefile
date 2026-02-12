@@ -38,10 +38,10 @@ USBSOURCE= cyfxtx.c		\
 	i2cmodule.c		\
 	RunApplication.c	\
 	StartStopApplication.c	\
-	StartUP.c		\
+	StartUp.c		\
 	Support.c		\
-	USBdescriptor.c	\
-	USBhandler.c
+	USBDescriptor.c	\
+	USBHandler.c
 
 DRIVERSRC=\
 	Si5351.c

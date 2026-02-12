@@ -352,12 +352,12 @@ the behavior:
 
 | Application responsibility | Files in this firmware |
 |---------------------------|----------------------|
-| **`main()`**: clock config, I/O matrix, start RTOS | `StartUP.c` |
+| **`main()`**: clock config, I/O matrix, start RTOS | `StartUp.c` |
 | **`CyFxApplicationDefine()`**: create threads and resources | `RunApplication.c` |
 | **Application thread**: hardware detection, init, main loop | `RunApplication.c` |
-| **USB setup callback**: handle vendor requests | `USBhandler.c` |
-| **USB event callback**: handle connect/disconnect/reset | `USBhandler.c` |
-| **USB descriptors**: device identity, endpoints, strings | `USBdescriptor.c` |
+| **USB setup callback**: handle vendor requests | `USBHandler.c` |
+| **USB event callback**: handle connect/disconnect/reset | `USBHandler.c` |
+| **USB descriptors**: device identity, endpoints, strings | `USBDescriptor.c` |
 | **Start/stop streaming**: configure GPIF, DMA, endpoints | `StartStopApplication.c` |
 | **GPIF configuration**: state machine definition | `SDDC_GPIF.h` (generated) |
 | **Hardware drivers**: clock synth, attenuator, VGA, GPIOs | `driver/Si5351.c`, `radio/rx888r2.c` |
@@ -390,7 +390,7 @@ thread.
 
 ## Firmware boot and initialization sequence
 
-### Stage 1: CPU startup (`StartUP.c:main`)
+### Stage 1: CPU startup (`StartUp.c:main`)
 
 ```
 Power on / USB reset
@@ -766,12 +766,12 @@ every vendor command through `fx3_cmd`.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `SDDC_FX3/StartUP.c` | 85 | ARM entry point, clock config, I/O matrix, RTOS start |
+| `SDDC_FX3/StartUp.c` | 85 | ARM entry point, clock config, I/O matrix, RTOS start |
 | `SDDC_FX3/RunApplication.c` | 284 | Application thread, hardware detection, main loop |
-| `SDDC_FX3/USBhandler.c` | 423 | USB setup callback (all vendor commands), USB init |
+| `SDDC_FX3/USBHandler.c` | 423 | USB setup callback (all vendor commands), USB init |
 | `SDDC_FX3/StartStopApplication.c` | 163 | GPIF/DMA/endpoint configuration, start/stop streaming |
 | `SDDC_FX3/DebugConsole.c` | 330 | UART init, debug buffer, console parser, USB debug |
-| `SDDC_FX3/USBdescriptor.c` | 300 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
+| `SDDC_FX3/USBDescriptor.c` | 300 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
 | `SDDC_FX3/Support.c` | 193 | Error code lookup, status checking, error LED blink |
 | `SDDC_FX3/i2cmodule.c` | 90 | I2C master init and transfer functions |
 | `SDDC_FX3/driver/Si5351.c` | 256 | Si5351 clock synthesizer: PLL setup, frequency calculation |
