@@ -106,7 +106,7 @@ void setupPLL(UINT8 pll, UINT8 mult, UINT32 num, UINT32 denom)
 
 //
 // Set up MultiSynth with integer divider and R divider
-// R divider is the bit value which is OR'ed onto the appropriate register, it is a #define in si5351a.h
+// R divider is the bit value which is OR'ed onto the appropriate register, it is a #define in this file
 //
 void setupMultisynth(UINT8 synth, UINT32 divider, UINT8 rDiv)
 {
@@ -179,7 +179,7 @@ void si5351aSetFrequencyA(UINT32 freq)
 	setupPLL(SI_SYNTH_PLL_A, mult, num, denom);
 	// Set up MultiSynth divider 0, with the calculated divider.
 	// The final R division stage can divide by a power of two, from 1..128.
-	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see si5351a.h header file)
+	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see top of this file)
 	// If you want to output frequencies below 1MHz, you have to use the
 	// final R division stage
 	setupMultisynth(SI_SYNTH_MS_0, divider, rdiv);
@@ -240,7 +240,7 @@ void si5351aSetFrequencyB(UINT32 freq2)
 	setupPLL(SI_SYNTH_PLL_B, mult, num, denom);
 	// Set up MultiSynth divider 0, with the calculated divider.
 	// The final R division stage can divide by a power of two, from 1..128.
-	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see si5351a.h header file)
+	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see top of this file)
 	// If you want to output frequencies below 1MHz, you have to use the
 	// final R division stage
 

@@ -84,7 +84,7 @@ void rx888r2_SetGain(uint8_t value)
 	uint8_t bits = 8;
 	const uint8_t mask = 0x80;
 	uint8_t i,b;
-	CyU3PGpioSetValue (GPIO_VGA_LE, 0);    // ATT_LE latched
+	CyU3PGpioSetValue (GPIO_VGA_LE, 0);    // VGA_LE latched
 	CyU3PGpioSetValue (GPIO_ATT_CLK, 0);   // ATT_CLK
 	for( i = bits ; i >0; i--)
 	{

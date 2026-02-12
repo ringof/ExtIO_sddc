@@ -23,7 +23,7 @@ I2cInit ()
     status = CyU3PI2cInit ();
     if (status != CY_U3P_SUCCESS) return status;
 
-    /* Start the I2C master block. The bit rate is set at 100KHz.
+    /* Start the I2C master block. The bit rate is set at 400KHz.
      * The data transfer is done via DMA. */
     CyU3PMemSet ((uint8_t *)&i2cConfig, 0, sizeof(i2cConfig));
     i2cConfig.bitRate    = I2C_BITRATE;

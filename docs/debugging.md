@@ -158,20 +158,20 @@ The debug enable/disable is a side effect of a query command. A host that sends 
 
 ## MsgParsing event dispatch
 
-`RunApplication.c:122-141` -- decodes the 32-bit queue event by label (top 8 bits):
+`RunApplication.c:MsgParsing` -- decodes the 32-bit queue event by label (top 8 bits):
 
 | Label | Action |
 |-------|--------|
 | 0 | Print USB event name from `EventName[]` |
 | 1 | Print vendor request bytes (not currently posted by any code) |
-| 2 | Print "free" (not currently posted by any code) |
+| 2 | Print PIB error code (not currently posted by any code) |
 | 0x0A (`USER_COMMAND_AVAILABLE`) | Call `ParseCommand()` |
 
 ### Known issues
 
 1. **`EventName[]` has no bounds check.** `RunApplication.c:129` indexes `EventName[(uint8_t)qevent]`. The array has 23 entries (indices 0-22). USB events are SDK-defined `CyU3PUsbEventType_t` values. If the SDK delivers an event type >= 23, this is an out-of-bounds read. In practice the SDK values map to 0-22, but there is no guard.
 
-2. **Labels 1 and 2 are dead code.** Nothing in the firmware posts events with label=1 or label=2. The format string for label 2 has a `%d` specifier but the argument is cast to `(uint8_t)`, which works by promotion but is misleading. The "free" string suggests this was a placeholder never completed.
+2. **Labels 1 and 2 are dead code.** Nothing in the firmware posts events with label=1 or label=2.
 
 ---
 

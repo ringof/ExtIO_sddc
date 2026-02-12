@@ -41,7 +41,7 @@ int main (void)
     CyU3PReturnStatus_t Status;
     CyU3PSysClockConfig_t clkCfg;
 
-    // The default clock runs at 384MHz, adjust it up to 403MHz so that GPIF can be "100MHz"
+    // The default clock runs at 384MHz, adjust it up to 403MHz so that GPIF can be ~201MHz
 	clkCfg.setSysClk400 = CyTrue;   /* FX3 device's master clock is set to a frequency > 400 MHz */
 	clkCfg.cpuClkDiv = 2;           /* CPU clock divider */
 	clkCfg.dmaClkDiv = 2;           /* DMA clock divider */

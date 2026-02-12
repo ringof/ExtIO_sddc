@@ -176,7 +176,7 @@ void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status)
 
 
 void CheckStatusSilent(char* StringPtr, CyU3PReturnStatus_t Status)
-// displays and stall on an un-successful system call
+// logs error and blinks/resets on an un-successful system call
 {
 	if (glDebugTxEnabled)				// Need to wait until ConsoleOut is enabled
 	{
