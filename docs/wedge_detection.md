@@ -91,7 +91,7 @@ stops reading), not the clock loss itself.
 **Current state:** The callback is enabled (issue #10, resolved):
 ```c
 // StartStopApplication.c:129
-CyU3PPibRegisterCallback(Pib_error_cb, CYU3P_PIB_INTR_ERROR);
+CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 ```
 
 The callback body (`StartStopApplication.c:38-44`) logs the error code
@@ -242,7 +242,7 @@ Detect stall (any of the mechanisms above)
 
 The recovery logic belongs in `RunApplication.c:ApplicationThread()`
 inside the existing 100 ms polling loop.  The PIB error callback
-(`StartStopApplication.c:Pib_error_cb`) should post an event to
+(`StartStopApplication.c:PibErrorCallback`) should post an event to
 `EventAvailable` for deferred handling by the application thread,
 since DMA and GPIF APIs cannot be safely called from interrupt
 context.

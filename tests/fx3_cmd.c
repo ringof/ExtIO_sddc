@@ -589,11 +589,11 @@ static int do_test_debug_poll(libusb_device_handle *h)
 
 /* Issue #10: Provoke a PIB error by starting GPIF streaming and
  * deliberately not reading the bulk endpoint.  The GPIF buffers
- * overflow, Pib_error_cb fires, and MsgParsing prints "PIB error 0x..."
+ * overflow, PibErrorCallback fires, and MsgParsing prints "PIB error 0x..."
  * to the debug output.  We poll READINFODEBUG looking for that string.
  *
  * This validates the entire PIB error reporting chain:
- *   GPIF overflow → Pib_error_cb → EventAvailable queue →
+ *   GPIF overflow → PibErrorCallback → EventAvailable queue →
  *   MsgParsing → DebugPrint → READINFODEBUG poll
  */
 static int do_test_pib_overflow(libusb_device_handle *h)

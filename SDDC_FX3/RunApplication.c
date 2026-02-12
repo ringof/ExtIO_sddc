@@ -135,10 +135,10 @@ void ApplicationThread ( uint32_t input)
     	DebugPrint(4, "I2cInit failed to initialize. Error code: %d.", Status);
 	else
 	{
-		Status = Si5351init();
+		Status = Si5351Init();
 		if (Status != CY_U3P_SUCCESS)
 		{
-			DebugPrint(4, "Si5351init failed to initialize. Error code: %d.", Status);
+			DebugPrint(4, "Si5351Init failed to initialize. Error code: %d.", Status);
 		}
 		else
 		{

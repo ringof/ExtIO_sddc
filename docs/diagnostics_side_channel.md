@@ -80,9 +80,9 @@ as a vendor request response.
 |-------|--------|-----------|
 | `dma_buf_count` | `glDMACount` in `StartStopApplication.c` | Yes, exists |
 | `timestamp_ms` | `CyU3PGetTime()` from ThreadX | Yes, SDK API |
-| `pib_overrun_count` | Increment in `Pib_error_cb` on `WR_OVERRUN` | Needs callback enabled |
-| `pib_underrun_count` | Increment in `Pib_error_cb` on `RD_UNDERRUN` | Needs callback enabled |
-| `usb_ep_underrun` | Increment in `USBEvent_Callback` on `EP_UNDERRUN` | Needs counter added |
+| `pib_overrun_count` | Increment in `PibErrorCallback` on `WR_OVERRUN` | Needs callback enabled |
+| `pib_underrun_count` | Increment in `PibErrorCallback` on `RD_UNDERRUN` | Needs callback enabled |
+| `usb_ep_underrun` | Increment in `USBEventCallback` on `EP_UNDERRUN` | Needs counter added |
 | `usb_phy_errors` | `CyU3PUsbGetErrorCounts(&phy, &link)` | Yes, SDK API |
 | `usb_link_errors` | Same API, second output | Yes, SDK API |
 | `gpif_state` | `CyU3PGpifGetSMState(&state)` | Yes, SDK API |

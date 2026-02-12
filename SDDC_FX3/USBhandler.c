@@ -329,7 +329,7 @@ CyFxSlFifoApplnUSBSetupCB (
 
 
 /* This is the callback function to handle the USB events. */
-void USBEvent_Callback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
+void USBEventCallback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
 {
 	uint32_t event = evtype;
 	CyU3PQueueSend(&EventAvailable, &event, CYU3P_NO_WAIT);
@@ -371,7 +371,7 @@ void USBEvent_Callback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
    This application does not have any state in which we should not allow U1/U2 transitions; and therefore
    the function always return CyTrue.
  */
-CyBool_t  LPMRequest_Callback ( CyU3PUsbLinkPowerMode link_mode)
+CyBool_t  LPMRequestCallback ( CyU3PUsbLinkPowerMode link_mode)
 {
 	return CyTrue;
 }
@@ -398,8 +398,8 @@ CyU3PReturnStatus_t InitializeUSB(uint8_t hwconfig)
 
   // Setup callbacks to handle the setup requests, USB Events and LPM Requests (for USB 3.0)
     CyU3PUsbRegisterSetupCallback(CyFxSlFifoApplnUSBSetupCB, CyTrue);
-    CyU3PUsbRegisterEventCallback(USBEvent_Callback);
-    CyU3PUsbRegisterLPMRequestCallback( LPMRequest_Callback );
+    CyU3PUsbRegisterEventCallback(USBEventCallback);
+    CyU3PUsbRegisterLPMRequestCallback( LPMRequestCallback );
 
     // Driver needs all of the descriptors so it can supply them to the host when requested
     Status = SetUSBdescriptors(hwconfig);

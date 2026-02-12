@@ -50,7 +50,7 @@
 #define SI5351_PLLB_SOURCE              (1<<3)
 #define SI5351_PLLA_SOURCE              (1<<2)
 
-CyU3PReturnStatus_t Si5351init()
+CyU3PReturnStatus_t Si5351Init()
 {
 	CyU3PReturnStatus_t status;
 	status = I2cTransferW1 ( SI5351_CRYSTAL_LOAD , SI5351_ADDR, 0x52);
@@ -79,7 +79,7 @@ CyU3PReturnStatus_t Si5351init()
 // num is 0..1,048,575 (0xFFFFF)
 // denom is 0..1,048,575 (0xFFFFF)
 //
-void setupPLL(UINT8 pll, UINT8 mult, UINT32 num, UINT32 denom)
+void SetupPLL(UINT8 pll, UINT8 mult, UINT32 num, UINT32 denom)
 {
 	UINT32 P1;					// PLL config register P1
 	UINT32 P2;					// PLL config register P2
@@ -108,7 +108,7 @@ void setupPLL(UINT8 pll, UINT8 mult, UINT32 num, UINT32 denom)
 // Set up MultiSynth with integer divider and R divider
 // R divider is the bit value which is OR'ed onto the appropriate register, it is a #define in this file
 //
-void setupMultisynth(UINT8 synth, UINT32 divider, UINT8 rDiv)
+void SetupMultisynth(UINT8 synth, UINT32 divider, UINT8 rDiv)
 {
 	UINT32 P1;	// Synth config register P1
 	UINT32 P2;	// Synth config register P2
@@ -176,13 +176,13 @@ void si5351aSetFrequencyA(UINT32 freq)
 	num = (UINT32)((uint64_t)l * 1048575 / xtalFreq);	// num and denom are the fractional parts
 	denom = 1048575;				// each is 20 bits (range 0..1048575)
 									// Set up PLL A with the calculated multiplication ratio
-	setupPLL(SI_SYNTH_PLL_A, mult, num, denom);
+	SetupPLL(SI_SYNTH_PLL_A, mult, num, denom);
 	// Set up MultiSynth divider 0, with the calculated divider.
 	// The final R division stage can divide by a power of two, from 1..128.
 	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see top of this file)
 	// If you want to output frequencies below 1MHz, you have to use the
 	// final R division stage
-	setupMultisynth(SI_SYNTH_MS_0, divider, rdiv);
+	SetupMultisynth(SI_SYNTH_MS_0, divider, rdiv);
 	// Reset the PLL. This causes a glitch in the output. For small changes to
 	// the parameters, you don't need to reset the PLL, and there is no glitch
 	I2cTransferW1 (SI_PLL_RESET , SI5351_ADDR, 0x20);//pllA
@@ -237,14 +237,14 @@ void si5351aSetFrequencyB(UINT32 freq2)
 	denom = 1048575;				// each is 20 bits (range 0..1048575)
 
 									// Set up PLL B with the calculated multiplication ratio
-	setupPLL(SI_SYNTH_PLL_B, mult, num, denom);
+	SetupPLL(SI_SYNTH_PLL_B, mult, num, denom);
 	// Set up MultiSynth divider 0, with the calculated divider.
 	// The final R division stage can divide by a power of two, from 1..128.
 	// represented by constants SI_R_DIV1 to SI_R_DIV128 (see top of this file)
 	// If you want to output frequencies below 1MHz, you have to use the
 	// final R division stage
 
-	setupMultisynth(SI_SYNTH_MS_2, divider, rdiv);
+	SetupMultisynth(SI_SYNTH_MS_2, divider, rdiv);
 	// Reset the PLL. This causes a glitch in the output. For small changes to
 	// the parameters, you don't need to reset the PLL, and there is no glitch
 	I2cTransferW1 ( SI_PLL_RESET, SI5351_ADDR, 0x80) ; //pllB

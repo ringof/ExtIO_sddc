@@ -374,9 +374,9 @@ USB stack thread context (not application thread context):
 - **`CyFxSlFifoApplnUSBSetupCB`** -- called for every USB SETUP packet
   that the SDK doesn't handle automatically (vendor requests, some
   standard requests).  Runs in USB thread context.
-- **`USBEvent_Callback`** -- called for USB bus events (connect,
+- **`USBEventCallback`** -- called for USB bus events (connect,
   disconnect, reset, SET_CONFIGURATION).
-- **`LPMRequest_Callback`** -- called when the USB 3.0 host requests a
+- **`LPMRequestCallback`** -- called when the USB 3.0 host requests a
   link power state transition (U0 -> U1/U2).
 - **`DmaCallback`** -- called on DMA buffer events (producer complete,
   consumer complete).
@@ -462,7 +462,7 @@ ApplicationThread()
 ```
 Host enumerates device
   │
-  ├─ SET_CONFIGURATION triggers USBEvent_Callback
+  ├─ SET_CONFIGURATION triggers USBEventCallback
   │    └─ StartApplication()
   │         ├─ Initialize PIB clock (system clock / 2)
   │         ├─ Configure EP1 IN bulk endpoint (1024 B, burst 16)

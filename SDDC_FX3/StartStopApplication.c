@@ -35,7 +35,7 @@ CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U 
 
 extern CyU3PQueue EventAvailable;
 
-void Pib_error_cb(CyU3PPibIntrType cbType, uint16_t cbArg) {
+void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
 		uint32_t evt = (2 << 24) | cbArg;
@@ -121,7 +121,7 @@ void StartApplication ( void ) {
     CheckStatus("CyU3PDmaMultiChannelSetXfer", Status);
 
     /* callback to see if there is any overflow of data on the GPIF II side*/
-    CyU3PPibRegisterCallback(Pib_error_cb, CYU3P_PIB_INTR_ERROR);
+    CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 
 	// Load, configure and start the GPIF state machine
     Status = StartGPIF();
