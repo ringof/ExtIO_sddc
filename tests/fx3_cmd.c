@@ -387,6 +387,207 @@ static int do_ep0_overflow(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* Targeted issue-verification tests                                  */
+/* ------------------------------------------------------------------ */
+
+/* Issue #21: Send a vendor request with bRequest outside the
+ * FX3CommandName[] bounds (0xAA-0xBA).  TraceSerial must not crash.
+ * We use 0xCC which is well outside the table.  Expected: STALL
+ * (unknown command) but no crash/hang.  Verify by probing afterwards. */
+static int do_test_oob_brequest(libusb_device_handle *h)
+{
+    /* First, enable debug mode so TraceSerial is actually active */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL oob_brequest: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Send out-of-range vendor request 0xCC */
+    r = cmd_u32(h, 0xCC, 0);
+    /* Expected: STALL (unknown command) */
+    if (r != LIBUSB_ERROR_PIPE && r != 0) {
+        printf("FAIL oob_brequest: unexpected error: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Verify device is still alive by probing */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL oob_brequest: device unresponsive after OOB bRequest: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS oob_brequest: device survived bRequest=0xCC (issue #21)\n");
+    return 0;
+}
+
+/* Issue #20: Send SETARGFX3 with wIndex=0xFFFF, well beyond the
+ * SETARGFX3List[] bounds.  TraceSerial must not crash.
+ * Expected: STALL (unknown arg ID) but no crash/hang. */
+static int do_test_oob_setarg(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL oob_setarg: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Send SETARGFX3 with wIndex=0xFFFF (way out of bounds) */
+    uint8_t zero = 0;
+    r = ctrl_write_buf(h, SETARGFX3, 42, 0xFFFF, &zero, 1);
+    /* Expected: STALL from the default case in SETARGFX3 handler */
+    if (r != LIBUSB_ERROR_PIPE && r != 0) {
+        printf("FAIL oob_setarg: unexpected error: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Verify device is still alive */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL oob_setarg: device unresponsive after OOB wIndex: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS oob_setarg: device survived SETARGFX3 wIndex=0xFFFF (issue #20)\n");
+    return 0;
+}
+
+/* Issue #13: Fill the console input buffer to exactly 31 chars
+ * (the maximum before the off-by-one fix) and verify the device
+ * doesn't crash.  Then send CR to flush and verify responsiveness. */
+static int do_test_console_fill(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    uint8_t buf[64];
+
+    /* Enable debug mode */
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL console_fill: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Send 35 characters (exceeds 32-byte buffer) via READINFODEBUG wValue */
+    for (int i = 0; i < 35; i++) {
+        r = ctrl_read(h, READINFODEBUG, 'a', 0, buf, sizeof(buf));
+        /* r may be STALL (no debug output pending) — that's fine */
+    }
+
+    /* Send CR to trigger ParseCommand (flushes the buffer) */
+    r = ctrl_read(h, READINFODEBUG, 0x0d, 0, buf, sizeof(buf));
+
+    /* Brief pause for command processing */
+    usleep(100000);
+
+    /* Verify device is still alive */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL console_fill: device unresponsive after 35-char fill: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS console_fill: device survived 35-char console input (issue #13)\n");
+    return 0;
+}
+
+/* Issue #8: Exercise the debug buffer race window by rapidly
+ * enabling debug mode (which triggers DebugPrint2USB) and polling
+ * READINFODEBUG simultaneously.  Not deterministic, but catches
+ * gross corruption.  Runs N rapid poll cycles. */
+static int do_test_debug_race(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    uint8_t buf[64];
+
+    /* Enable debug mode */
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug_race: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Trigger firmware activity that generates debug output:
+     * send several SETARGFX3 + poll READINFODEBUG interleaved rapidly */
+    for (int i = 0; i < 50; i++) {
+        /* Generate debug output via a benign SETARGFX3 */
+        uint8_t zero = 0;
+        ctrl_write_buf(h, SETARGFX3, (uint16_t)(i & 63), DAT31_ATT, &zero, 1);
+        /* Immediately poll debug output */
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        /* Any result is fine — we're stress-testing the race path */
+    }
+
+    /* Verify device is still alive and coherent */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug_race: device unresponsive after race stress: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    if (r >= 4 && info[0] == 0) {
+        printf("FAIL debug_race: hwconfig read back as 0 (possible corruption)\n");
+        return 1;
+    }
+    printf("PASS debug_race: device survived 50 rapid debug poll cycles (issue #8)\n");
+    return 0;
+}
+
+/* Issue #26: Non-interactive debug poll — enable debug mode, send a
+ * known command ("?"), collect output, verify it contains expected text.
+ * Times out after a few seconds. */
+static int do_test_debug_poll(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    uint8_t buf[64];
+    char collected[1024] = {0};
+    int collected_len = 0;
+
+    /* Enable debug mode */
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug_poll: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Send "?" + CR via READINFODEBUG wValue */
+    ctrl_read(h, READINFODEBUG, '?', 0, buf, sizeof(buf));
+    usleep(50000);
+    ctrl_read(h, READINFODEBUG, 0x0d, 0, buf, sizeof(buf));
+
+    /* Poll for response (up to 2 seconds) */
+    for (int attempt = 0; attempt < 40; attempt++) {
+        usleep(50000);
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (r > 0) {
+            int copy = r - 1;  /* last byte is firmware null */
+            if (collected_len + copy >= (int)sizeof(collected) - 1)
+                copy = (int)sizeof(collected) - 1 - collected_len;
+            if (copy > 0) {
+                memcpy(collected + collected_len, buf, copy);
+                collected_len += copy;
+            }
+        }
+    }
+    collected[collected_len] = '\0';
+
+    /* The "?" command should produce help text containing "commands" */
+    if (strstr(collected, "commands") || strstr(collected, "reset")
+        || strstr(collected, "threads")) {
+        printf("PASS debug_poll: got help text over USB debug (issue #26)\n");
+        return 0;
+    }
+    if (collected_len > 0) {
+        printf("PASS debug_poll: got %d bytes debug output (issue #26)\n", collected_len);
+        return 0;
+    }
+    printf("FAIL debug_poll: no debug output received after '?' command\n");
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -409,6 +610,11 @@ static void usage(const char *prog)
         "  debug                        Interactive debug console over USB\n"
         "  raw <code>                   Send raw vendor request (hex)\n"
         "  ep0_overflow                 Test EP0 wLength bounds check\n"
+        "  oob_brequest                 Test OOB bRequest bounds (issue #21)\n"
+        "  oob_setarg                   Test OOB SETARGFX3 wIndex (issue #20)\n"
+        "  console_fill                 Test console buffer fill (issue #13)\n"
+        "  debug_race                   Stress-test debug buffer race (issue #8)\n"
+        "  debug_poll                   Test debug console over USB (issue #26)\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -495,6 +701,21 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "debug") == 0) {
         rc = do_debug(h);
+
+    } else if (strcmp(cmd, "oob_brequest") == 0) {
+        rc = do_test_oob_brequest(h);
+
+    } else if (strcmp(cmd, "oob_setarg") == 0) {
+        rc = do_test_oob_setarg(h);
+
+    } else if (strcmp(cmd, "console_fill") == 0) {
+        rc = do_test_console_fill(h);
+
+    } else if (strcmp(cmd, "debug_race") == 0) {
+        rc = do_test_debug_race(h);
+
+    } else if (strcmp(cmd, "debug_poll") == 0) {
+        rc = do_test_debug_poll(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);

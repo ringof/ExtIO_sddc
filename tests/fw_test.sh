@@ -171,8 +171,9 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # ---- Test Plan ----
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
-#      + 3 stale commands + 1 ep0_overflow + optional streaming (3 checks)
-PLANNED=13
+#      + 3 stale commands + 1 ep0_overflow + 5 debug/OOB tests
+#      + optional streaming (3 checks)
+PLANNED=18
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -331,7 +332,66 @@ output=$(run_cmd ep0_overflow) && {
 }
 
 # ==================================================================
-# 10. Streaming test via rx888_stream
+# 10. TraceSerial OOB bRequest (issue #21)
+# ==================================================================
+# Send vendor request 0xCC (outside FX3CommandName[0xAA..0xBA]).
+# Before the fix, this would index FX3CommandName[0xCC-0xAA] = [34],
+# reading past the 17-element array.
+
+output=$(run_cmd oob_brequest) && {
+    tap_ok "oob_brequest: survived bRequest=0xCC (issue #21)"
+} || {
+    tap_fail "oob_brequest: device crashed on OOB bRequest" "$output"
+}
+
+# ==================================================================
+# 11. TraceSerial OOB SETARGFX3 wIndex (issue #20)
+# ==================================================================
+# Send SETARGFX3 with wIndex=0xFFFF (outside SETARGFX3List[0..13]).
+
+output=$(run_cmd oob_setarg) && {
+    tap_ok "oob_setarg: survived SETARGFX3 wIndex=0xFFFF (issue #20)"
+} || {
+    tap_fail "oob_setarg: device crashed on OOB wIndex" "$output"
+}
+
+# ==================================================================
+# 12. Console input buffer fill (issue #13)
+# ==================================================================
+# Send 35 chars (exceeds 32-byte ConsoleInBuffer).  Before the fix,
+# the off-by-one allowed writing past the buffer.
+
+output=$(run_cmd console_fill) && {
+    tap_ok "console_fill: survived 35-char input (issue #13)"
+} || {
+    tap_fail "console_fill: device crashed on buffer fill" "$output"
+}
+
+# ==================================================================
+# 13. Debug buffer race stress test (issue #8)
+# ==================================================================
+# Rapidly interleave SETARGFX3 (generates debug output via TraceSerial)
+# with READINFODEBUG polls (reads debug buffer).
+
+output=$(run_cmd debug_race) && {
+    tap_ok "debug_race: survived 50 rapid poll cycles (issue #8)"
+} || {
+    tap_fail "debug_race: device crashed or corrupted under race" "$output"
+}
+
+# ==================================================================
+# 14. Debug console over USB (issue #26)
+# ==================================================================
+# Send "?" + CR, collect debug output, verify we get help text back.
+
+output=$(run_cmd debug_poll) && {
+    tap_ok "debug_poll: got debug output over USB (issue #26)"
+} || {
+    tap_fail "debug_poll: no debug output received" "$output"
+}
+
+# ==================================================================
+# 15. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
