@@ -39,6 +39,15 @@ CyBool_t flagdebug = false;
 volatile uint16_t debtxtlen = 0;
 uint8_t bufdebug[MAXLEN_D_USB];  // buffer debug string//
 
+void ConsoleAccumulateChar(char ch)
+{
+	char lower = ch | 0x20;
+	if (ConsoleInIndex < sizeof(ConsoleInBuffer) - 1) {
+		ConsoleInBuffer[ConsoleInIndex++] = lower;
+		ConsoleInBuffer[ConsoleInIndex] = '\0';
+	}
+}
+
 // For Debug and education display the name of the Event
 const char* EventName[] = {
 	    "CONNECT", "DISCONNECT", "SUSPEND", "RESUME", "RESET", "SET_CONFIGURATION", "SPEED",
@@ -47,15 +56,18 @@ const char* EventName[] = {
 	    "OTG_SRP", "EP_UNDERRUN", "LINK_RECOVERY", "USB3_LINKFAIL", "SS_COMP_ENTRY", "SS_COMP_EXIT"
 };
 
-#ifdef TRACESERIAL 
+#ifdef TRACESERIAL
 // For Debug and display the name of the FX3Command
-const char* FX3CommandName[] = {  // start 0xAA
+#define FX3_CMD_BASE   0xAA
+#define FX3_CMD_COUNT  17
+const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
 "STARTADC", "0xB3", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
 // For Debug and display the name of the FX3Command
-const char* SETARGFX3List[] = { 
+#define SETARGFX3_LIST_COUNT  14
+const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
 "DAT31_ATT","AD8340_VGA","PRESELECTOR","VHF_ATTENUATOR"
 };
@@ -240,14 +252,16 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 		va_start (argp, msg);
 		stat = MyDebugSNPrint (buf, &len, msg, argp);
 		va_end (argp);
-		if ( stat == CY_U3P_SUCCESS ) 
+		if ( stat == CY_U3P_SUCCESS )
 		{
 			if (debtxtlen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
-			if (debtxtlen+len < MAXLEN_D_USB) 
+			uint32_t intMask = CyU3PVicDisableAllInterrupts();
+			if (debtxtlen+len < MAXLEN_D_USB)
 			{
 				memcpy(&bufdebug[debtxtlen], buf, len);
-				debtxtlen = debtxtlen+len;		
-			}		
+				debtxtlen = debtxtlen+len;
+			}
+			CyU3PVicEnableInterrupts(intMask);
 		}
 }
 
@@ -271,9 +285,7 @@ void UartCallback(CyU3PUartEvt_t Event, CyU3PUartError_t Error)
 		}
 		else
 		{
-			ConsoleInBuffer[ConsoleInIndex] = InputChar | 0x20;		// Save character as lower case (for compares)
-			if (ConsoleInIndex++ < sizeof(ConsoleInBuffer)) ConsoleInBuffer[ConsoleInIndex] = 0;
-			else ConsoleInIndex--;
+			ConsoleAccumulateChar(InputChar);
 		}
 		CyU3PDmaChannelDiscardBuffer(&glUARTtoCPU_Handle);
 		CyU3PUartRxSetBlockXfer(1);

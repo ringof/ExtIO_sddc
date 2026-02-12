@@ -46,11 +46,13 @@ uint8_t  vendorRqtCnt = 0;
 
 extern const char* FX3CommandName[];
 extern const char* SETARGFX3List[];
+#define FX3_CMD_BASE       0xAA
+#define FX3_CMD_COUNT      17
+#define SETARGFX3_LIST_COUNT 14
 
 extern CyU3PQueue EventAvailable;	  	// Used for threads communications
 extern uint32_t Qevent __attribute__ ((aligned (32)));
-extern char ConsoleInBuffer[32];				// Buffer for user Console Input
-extern uint32_t ConsoleInIndex;				// Index into ConsoleIn buffer
+extern void ConsoleAccumulateChar(char ch);
 
 /* Trace function */
 void
@@ -58,11 +60,17 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 {
 	if ( bRequest != READINFODEBUG)
 	{
-		DebugPrint(4, "%s\t", FX3CommandName[bRequest - 0xAA]);
+		if (bRequest >= FX3_CMD_BASE && (bRequest - FX3_CMD_BASE) < FX3_CMD_COUNT)
+			DebugPrint(4, "%s\t", FX3CommandName[bRequest - FX3_CMD_BASE]);
+		else
+			DebugPrint(4, "0x%x\t", bRequest);
 		switch(bRequest)
 		{
 		case SETARGFX3:
-			DebugPrint(4, "%s\t%d", SETARGFX3List[wIndex],  wValue );
+			if (wIndex < SETARGFX3_LIST_COUNT)
+				DebugPrint(4, "%s\t%d", SETARGFX3List[wIndex],  wValue );
+			else
+				DebugPrint(4, "%d\t%d", wIndex, wValue);
 			break;
 
 		case GPIOFX3:
@@ -289,16 +297,16 @@ CyFxSlFifoApplnUSBSetupCB (
 						}
 						else
 						{
-							ConsoleInBuffer[ConsoleInIndex] = InputChar | 0x20;		// Save character as lower case (for compares)
-							if (ConsoleInIndex++ < sizeof(ConsoleInBuffer)) ConsoleInBuffer[ConsoleInIndex] = 0;
-							else ConsoleInIndex--;
+							ConsoleAccumulateChar(InputChar);
 						}
 					}
 					if (debtxtlen > 0)
 						{
+							uint32_t intMask = CyU3PVicDisableAllInterrupts();
 							uint16_t len = debtxtlen;
 							memcpy(glEp0Buffer, bufdebug, len);
 							debtxtlen=0;
+							CyU3PVicEnableInterrupts(intMask);
 							glEp0Buffer[len-1] = 0;
 							CyU3PUsbSendEP0Data (len, glEp0Buffer);
 							vendorRqtCnt++;
