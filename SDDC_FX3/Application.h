@@ -23,6 +23,7 @@
 #include "cyu3gpio.h"
 #include "cyu3usb.h"
 #include "cyu3uart.h"
+#include "cyu3vic.h"
 #include "cyu3externcstart.h"
 #include "i2cmodule.h"
 
