@@ -47,7 +47,7 @@ The main `ApplicationThread` loop polls the queue every 100 ms and calls `MsgPar
 
 1. **Currently unreachable for output.** `_DEBUG_USB_` is defined in `protocol.h`, so `DebugPrint` maps to `DebugPrint2USB`. All output calls go to the USB buffer, not the UART pins. The UART hardware is still initialized (and `UartCallback` still fires), so input works but output is invisible on the serial port. To use the UART path for output, `_DEBUG_USB_` must be undefined.
 
-2. **`stack` command has an unbounded scan.** `DebugConsole.c:99` -- `while (*DataPtr++ != 0xEFEFEFEF)` walks from the stack base looking for the first RTOS fill word. If the stack has been fully consumed (or the fill pattern was overwritten), this scans past the end of the allocation -- an unbounded read that could data-abort or return a misleading result.
+2. **~~`stack` command has an unbounded scan.~~** Fixed: `DebugConsole.c:113` now uses `while (*DataPtr == 0xEFEFEFEF) DataPtr++` to scan upward through intact fill pattern, correctly reporting free space.  The scan terminates at the first overwritten word (the stack high-water mark) rather than running past the allocation.
 
 3. **Second counter is dead code in USB-debug mode.** `RunApplication.c:235-240` -- the `Seconds` counter and its `glDMACount`-based increment are inside `#ifndef _DEBUG_USB_`, so they are compiled out. With `_DEBUG_USB_` defined, there is no periodic throughput indication on the console.
 

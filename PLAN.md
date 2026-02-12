@@ -164,7 +164,7 @@ tests, and `fx3_cmd` for individual command tests:
 tests/fw_test.sh --firmware path/to/SDDC_FX3.img [options]
 ```
 
-**Test sequence (15 tests):**
+**Test sequence (20 tests, 23 with streaming):**
 1. **Firmware upload** — `rx888_stream -f SDDC_FX3.img` uploads firmware;
    verify device appears at PID `0x00F1` via `lsusb`
 2. **Device probe** — `fx3_cmd test`: verify HWconfig == 0x04 (RX888r2),
@@ -176,7 +176,11 @@ tests/fw_test.sh --firmware path/to/SDDC_FX3.img [options]
 7. **Stop** — `fx3_cmd stop`: ensure clean state
 8. **Stale command tests** (post-R82xx removal) — `fx3_cmd raw 0xB4`,
    `0xB5`, `0xB8`: verify each returns STALL without crashing the device
-9. **Streaming test** — run `rx888_stream` for N seconds, capture to
+9. **EP0 overflow** — oversized control transfer is handled safely
+10. **Debug/OOB tests** — debug buffer race, poll, out-of-bounds
+11. **PIB overflow** — GPIF overflow produces debug output (issue #10)
+12. **Stack watermark** — free > 25% of 2048 bytes after init (issue #12)
+13. **Streaming test** (optional) — run `rx888_stream` for N seconds, capture to
    file, verify:
    - Data was received (non-zero byte count)
    - Byte count matches expected rate (within 50%)

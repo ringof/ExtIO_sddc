@@ -88,14 +88,15 @@ equivalents exist at offset +8):
 These catch the **secondary failure** (DMA congestion after the host
 stops reading), not the clock loss itself.
 
-**Current state:** The callback exists in the code but is commented out:
+**Current state:** The callback is enabled (issue #10, resolved):
 ```c
-// StartStopApplication.c:130
-//  CyU3PPibRegisterCallback(Pib_error_cb, CYU3P_PIB_INTR_ERROR);
+// StartStopApplication.c:129
+CyU3PPibRegisterCallback(Pib_error_cb, CYU3P_PIB_INTR_ERROR);
 ```
 
-The callback body (`StartStopApplication.c:38-43`) only prints the
-error -- it takes no recovery action.
+The callback body (`StartStopApplication.c:38-44`) logs the error code
+to the debug console and posts the event to the `EventAvailable` queue
+for host-side visibility.
 
 ### 2. DMA buffer count monitoring
 

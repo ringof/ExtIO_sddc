@@ -1,5 +1,9 @@
 # Firmware-Side Diagnostics for Host Streamer Software
 
+> **Status:** Design proposal — not yet implemented.  The counters,
+> `DIAGFX3` vendor command, and `fx3_diag_snapshot()` described below do
+> not exist in the current firmware.
+
 ## Overview
 
 The `glDMACount` variable, already incremented on every DMA buffer

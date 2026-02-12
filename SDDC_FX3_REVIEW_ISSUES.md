@@ -103,11 +103,11 @@ The original developer flagged this with `?!?!?!`. When an I2C write fails, `isH
 
 ---
 
-## Title: No wLength validation on EP0 vendor requests
+## Title: No wLength validation on EP0 vendor requests -- RESOLVED (issue #29)
 
 **File:** `SDDC_FX3/USBhandler.c` (multiple locations)
 
-**Severity:** Medium
+**Severity:** Medium — **Status: Fixed.** `wLength` is now clamped to `glEp0Buffer` size at the top of the vendor request handler.
 
 **Description:**
 
@@ -127,11 +127,11 @@ if (wLength > CYFX_SDRAPP_MAX_EP0LEN) {
 
 ---
 
-## Title: Race condition on debug-over-USB buffer
+## Title: Race condition on debug-over-USB buffer -- RESOLVED (issue #26)
 
 **File:** `SDDC_FX3/DebugConsole.c:245-250` and `SDDC_FX3/USBhandler.c:525-533`
 
-**Severity:** Medium
+**Severity:** Medium — **Status: Fixed.** Debug-over-USB now uses a proper ring buffer with atomic indices.
 
 **Description:**
 
@@ -248,11 +248,11 @@ If the Si5351 initializes but none of the known tuners (R820T, R828D, RD5815) re
 
 ---
 
-## Title: PIB error callback is disabled - silent GPIF data errors
+## Title: PIB error callback is disabled - silent GPIF data errors -- RESOLVED (issue #10)
 
-**File:** `SDDC_FX3/StartStopApplication.c:130`
+**File:** `SDDC_FX3/StartStopApplication.c:129`
 
-**Severity:** Low
+**Severity:** Low — **Status: Fixed.** `CyU3PPibRegisterCallback` is now enabled; the callback logs the error and posts to the `EventAvailable` queue.
 
 **Description:**
 
@@ -351,11 +351,11 @@ For example, `rx888r2_SetAttenuator`, `rx888r3_SetAttenuator`, and `rx999_SetAtt
 
 ---
 
-## Title: Thread stack size (1KB) may be insufficient
+## Title: Thread stack size (1KB) may be insufficient -- RESOLVED (issue #12)
 
 **File:** `SDDC_FX3/Application.h:35`
 
-**Severity:** Low (risk)
+**Severity:** Low (risk) — **Status: Fixed.** Stack increased to 2KB (`0x800`). Watermark scan in `DebugConsole.c` corrected to report accurate free space.
 
 **Description:**
 
