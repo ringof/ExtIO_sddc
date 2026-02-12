@@ -40,66 +40,42 @@ void *StackPtr[APP_THREADS];				// Stack allocated to each thread
 uint8_t HWconfig = NORADIO;       // Hardware config type BBRF103
 uint16_t FWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
 
-CyU3PReturnStatus_t
-ConfGPIOsimpleout( uint8_t gpioid)
-{
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
-
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyTrue;
-	      gpioConfig.driveHighEn = CyTrue;
-	      gpioConfig.inputEn = CyFalse;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-
-	 return apiRetStatus;
-}
+/* GPIO_OUTPUT: push-pull output, GPIO_INPUT: floating input,
+ * GPIO_INPUT_PU: input with internal pull-up. */
+#define GPIO_OUTPUT    0
+#define GPIO_INPUT     1
+#define GPIO_INPUT_PU  2
 
 CyU3PReturnStatus_t
-ConfGPIOsimpleinput( uint8_t gpioid)
+ConfGPIOSimple(uint8_t gpioid, uint8_t mode)
 {
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
+	CyU3PReturnStatus_t status;
+	CyU3PGpioSimpleConfig_t gpioConfig;
 
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyFalse;
-	      gpioConfig.driveHighEn = CyFalse;
-	      gpioConfig.inputEn = CyTrue;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-	      /* Adding internal pull-up resistor to GPIO 53 */
-	      CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_NONE);
-	 return apiRetStatus;
+	status = CyU3PDeviceGpioOverride(gpioid, CyTrue);
+	CheckStatusSilent("CyU3PDeviceGpioOverride", status);
+
+	gpioConfig.outValue    = CyFalse;
+	gpioConfig.inputEn     = (mode != GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.driveLowEn  = (mode == GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.driveHighEn = (mode == GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
+
+	status = CyU3PGpioSetSimpleConfig(gpioid, &gpioConfig);
+	CheckStatusSilent("CyU3PGpioSetSimpleConfig", status);
+
+	if (mode == GPIO_INPUT)
+		CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_NONE);
+	else if (mode == GPIO_INPUT_PU)
+		CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_WPU);
+
+	return status;
 }
 
-CyU3PReturnStatus_t
-ConfGPIOsimpleinputPU( uint8_t gpioid)
-{
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
-
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyFalse;
-	      gpioConfig.driveHighEn = CyFalse;
-	      gpioConfig.inputEn = CyTrue;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-	      CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_WPU);
-	 return apiRetStatus;
-}
+/* Legacy wrappers -- kept for existing call sites */
+CyU3PReturnStatus_t ConfGPIOsimpleout(uint8_t gpioid)   { return ConfGPIOSimple(gpioid, GPIO_OUTPUT); }
+CyU3PReturnStatus_t ConfGPIOsimpleinput(uint8_t gpioid)  { return ConfGPIOSimple(gpioid, GPIO_INPUT); }
+CyU3PReturnStatus_t ConfGPIOsimpleinputPU(uint8_t gpioid) { return ConfGPIOSimple(gpioid, GPIO_INPUT_PU); }
 
 void
 GpioInitClock()
