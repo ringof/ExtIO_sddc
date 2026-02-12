@@ -56,7 +56,6 @@
 #define false	CyFalse
 #define ReturnStatus_t CyU3PReturnStatus_t
 
-#define UINT64  uint32_t
 #define UINT32  uint32_t
 #define UINT16  uint16_t
 #define UINT8   uint8_t
