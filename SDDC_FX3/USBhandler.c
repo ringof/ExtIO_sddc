@@ -379,7 +379,6 @@ void USBEvent_Callback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
  */
 CyBool_t  LPMRequest_Callback ( CyU3PUsbLinkPowerMode link_mode)
 {
-	// DebugPrint (4, "LPMRequest_Callback link_mode %x \r\n", link_mode );
 	return CyTrue;
 }
 

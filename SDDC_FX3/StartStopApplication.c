@@ -42,11 +42,6 @@ void Pib_error_cb(CyU3PPibIntrType cbType, uint16_t cbArg) {
 		CyU3PQueueSend(&EventAvailable, &evt, CYU3P_NO_WAIT);
 	}
 }
-/*
-#define TH1_BUSY 7
-#define TH1_WAIT 8
-#define TH0_BUSY 5
-*/
 /* Callback funtion for the DMA event notification. */
 void DmaCallback (
         CyU3PDmaChannel   *chHandle, /* Handle to the DMA channel. */

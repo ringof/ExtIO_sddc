@@ -197,7 +197,6 @@ void ApplicationThread ( uint32_t input)
 			DebugPrint(4, "\r\nMAIN now running forever: ");
 			while(1)
 			{
-				//for (Count = 0; Count<10; Count++)
 				{
 					// Check for User Commands (and other CallBack Events) every 100msec
 					CyU3PThreadSleep(100);

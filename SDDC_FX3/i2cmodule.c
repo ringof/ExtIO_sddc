@@ -47,9 +47,6 @@ I2cTransfer (
         CyBool_t  isRead)
 {
 
-//	DebugPrint(4, "\r\nI2cTransfer %d, %d, %d, %d, %d",
-//			byteAddress, devAddr, byteCount, *buffer, isRead);
-
     CyU3PI2cPreamble_t preamble;
     CyU3PReturnStatus_t status = CY_U3P_SUCCESS;
     if (byteCount == 0)
