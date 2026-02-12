@@ -31,14 +31,14 @@ extern uint32_t glDMACount;
 
 // Global data owned by this module
 CyBool_t glIsApplnActive = CyFalse;     // Set true once device is enumerated
-CyU3PQueue EventAvailable;			  	// Used for thread communications
-uint32_t EventAvailableQueue[16] __attribute__ ((aligned (32)));// Queue for up to 16 uint32_t pointers
-uint32_t Qevent __attribute__ ((aligned (32)));
-CyU3PThread ThreadHandle[APP_THREADS];		// Handles to my Application Threads
-void *StackPtr[APP_THREADS];				// Stack allocated to each thread
+CyU3PQueue glEventAvailable;			  	// Used for thread communications
+uint32_t glEventAvailableQueue[16] __attribute__ ((aligned (32)));// Queue for up to 16 uint32_t pointers
+uint32_t glQevent __attribute__ ((aligned (32)));
+CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Threads
+void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
-uint8_t HWconfig = NORADIO;       // Hardware config type BBRF103
-uint16_t FWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
+uint8_t glHWconfig = NORADIO;       // Hardware config type BBRF103
+uint16_t glFWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
 
 /* GPIO_OUTPUT: push-pull output, GPIO_INPUT: floating input,
  * GPIO_INPUT_PU: input with internal pull-up. */
@@ -125,7 +125,7 @@ void ApplicationThread ( uint32_t input)
 	uint32_t nline;
 	CyBool_t measure;
     CyU3PReturnStatus_t Status;
-    HWconfig = 0;
+    glHWconfig = 0;
 
     GpioInitClock();
 
@@ -152,32 +152,32 @@ void ApplicationThread ( uint32_t input)
 
 				if (!measure)
 				{
-					HWconfig = RX888r2;
+					glHWconfig = RX888r2;
 					DebugPrint(4, "R828D detected. RX888r2 detected.");
 				}
 				else
 				{
-					HWconfig = NORADIO;
+					glHWconfig = NORADIO;
 					DebugPrint(4, "R828D detected but GPIO36 sense failed.");
 				}
 			}
 			else
 			{
-				HWconfig = NORADIO;
+				glHWconfig = NORADIO;
 				DebugPrint(4, "No R828D tuner detected.");
 			}
 			si5351aSetFrequencyB(0);
 		}
 	}
-    DebugPrint(4, "HWconfig: %d.", HWconfig);
+    DebugPrint(4, "HWconfig: %d.", glHWconfig);
 
-	if (HWconfig == RX888r2)
+	if (glHWconfig == RX888r2)
 	{
 		rx888r2_GpioInitialize();
 	}
 
     // Spin up the USB Connection
-	Status = InitializeUSB(HWconfig);
+	Status = InitializeUSB(glHWconfig);
 	CheckStatus("Initialize USB", Status);
 	if (Status == CY_U3P_SUCCESS)
 	    {
@@ -187,9 +187,9 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for USB CallBack Events every 100msec
 	    		CyU3PThreadSleep(100);
-				while( CyU3PQueueReceive(&EventAvailable, &Qevent, CYU3P_NO_WAIT)== 0)
+				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
-						MsgParsing(Qevent);
+						MsgParsing(glQevent);
 					}
 			}
 
@@ -201,10 +201,10 @@ void ApplicationThread ( uint32_t input)
 					// Check for User Commands (and other CallBack Events) every 100msec
 					CyU3PThreadSleep(100);
 					nline =0;
-					while( CyU3PQueueReceive(&EventAvailable, &Qevent, CYU3P_NO_WAIT)== 0)
+					while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
 						if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
-						MsgParsing(Qevent);
+						MsgParsing(glQevent);
 					}
 				}
 #ifndef _DEBUG_USB_  // second count in serial debug
@@ -233,16 +233,16 @@ void CyFxApplicationDefine (void) {
     CheckStatus("Initialize Debug Console", Status);
 
     // Create Queue used to transfer callback messages
-        Status = CyU3PQueueCreate(&EventAvailable, 1, &EventAvailableQueue, sizeof(EventAvailableQueue));
+        Status = CyU3PQueueCreate(&glEventAvailable, 1, &glEventAvailableQueue, sizeof(glEventAvailableQueue));
         CheckStatus("Create EventAvailableQueue", Status);
 
 
-    StackPtr[0] = CyU3PMemAlloc (FIFO_THREAD_STACK);
-    Status = CyU3PThreadCreate (&ThreadHandle[0],                  /* Slave FIFO app thread structure */
+    glStackPtr[0] = CyU3PMemAlloc (FIFO_THREAD_STACK);
+    Status = CyU3PThreadCreate (&glThreadHandle[0],                  /* Slave FIFO app thread structure */
                           "11:HF103_ADC2USB30",                     /* Thread ID and thread name */
                           ApplicationThread,                   /* Slave FIFO app thread entry function */
                           0,                                       /* No input parameter to thread */
-                          StackPtr[0],                                     /* Pointer to the allocated thread stack */
+                          glStackPtr[0],                                     /* Pointer to the allocated thread stack */
                           FIFO_THREAD_STACK,               /* App Thread stack size */
                           FIFO_THREAD_PRIORITY,            /* App Thread priority */
                           FIFO_THREAD_PRIORITY,            /* App Thread pre-emption threshold */

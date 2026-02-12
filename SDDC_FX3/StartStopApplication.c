@@ -28,18 +28,18 @@ extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
 void StartApplication(void);
 void StopApplication(void);
 
-const char* BusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
-char* CyFxGpifName = { "HF103.h" };
+const char* glBusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
+char* glCyFxGpifName = { "HF103.h" };
 
 CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U transfer. */
 
-extern CyU3PQueue EventAvailable;
+extern CyU3PQueue glEventAvailable;
 
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
 		uint32_t evt = (2 << 24) | cbArg;
-		CyU3PQueueSend(&EventAvailable, &evt, CYU3P_NO_WAIT);
+		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
 	}
 }
 /* Callback funtion for the DMA event notification. */
@@ -61,7 +61,7 @@ void DmaCallback (
 CyU3PReturnStatus_t StartGPIF(void)
 {
 	CyU3PReturnStatus_t Status;
-	DebugPrint(4, "\r\nGPIF file %s", CyFxGpifName);
+	DebugPrint(4, "\r\nGPIF file %s", glCyFxGpifName);
 	Status = CyU3PGpifLoad(&CyFxGpifConfig);
 	CheckStatus("GpifLoad", Status);
 	Status = CyU3PGpifSMStart (0, 0); //START, ALPHA_START);
@@ -76,7 +76,7 @@ void StartApplication ( void ) {
     CyU3PReturnStatus_t Status = CY_U3P_SUCCESS;
     CyU3PUSBSpeed_t usbSpeed = CyU3PUsbGetSpeed();
     // Display the enumerated device bus speed
-    DebugPrint(4, "\r\n@StartApplication, running at %sSpeed", BusSpeed[usbSpeed]);
+    DebugPrint(4, "\r\n@StartApplication, running at %sSpeed", glBusSpeed[usbSpeed]);
 
     // Start GPIF clocks, they need to be running before we attach a DMA channel to GPIF
     pibClock.clkDiv = 2;

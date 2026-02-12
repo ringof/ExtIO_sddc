@@ -23,14 +23,14 @@ extern void StopApplication(void);
 extern CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig);
 
 // Declare external data
-extern CyU3PQueue EventAvailable;			  	// Used for threads communications
+extern CyU3PQueue glEventAvailable;			  	// Used for threads communications
 extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
-extern uint8_t  HWconfig;       			    // Hardware config
-extern uint16_t  FWconfig;       			    // Firmware config hb.lb
+extern uint8_t  glHWconfig;       			    // Hardware config
+extern uint16_t  glFWconfig;       			    // Firmware config hb.lb
 
-extern CyBool_t flagdebug;
-extern volatile uint16_t debtxtlen;
-extern uint8_t bufdebug[MAXLEN_D_USB];
+extern CyBool_t glFlagDebug;
+extern volatile uint16_t glDebTxtLen;
+extern uint8_t glBufDebug[MAXLEN_D_USB];
 
 
 
@@ -40,12 +40,12 @@ extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
 CyU3PDmaChannel glGPIF2USB_Handle;
 uint8_t  *glEp0Buffer = 0;              /* Buffer used to handle vendor specific control requests. */
-uint8_t  vendorRqtCnt = 0;
+uint8_t  glVendorRqtCnt = 0;
 
 #ifdef TRACESERIAL
 
-extern CyU3PQueue EventAvailable;	  	// Used for threads communications
-extern uint32_t Qevent __attribute__ ((aligned (32)));
+extern CyU3PQueue glEventAvailable;	  	// Used for threads communications
+extern uint32_t glQevent __attribute__ ((aligned (32)));
 extern void ConsoleAccumulateChar(char ch);
 
 /* Trace function */
@@ -220,12 +220,12 @@ CyFxSlFifoApplnUSBSetupCB (
 					switch(wIndex) {
 						case DAT31_ATT:
 							rx888r2_SetAttenuator(wValue);
-							vendorRqtCnt++;
+							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
 						case AD8340_VGA:
 							rx888r2_SetGain(wValue);
-							vendorRqtCnt++;
+							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
 						default:
@@ -268,13 +268,13 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 
             		case TESTFX3:
-					glEp0Buffer[0] =  HWconfig;
-					glEp0Buffer[1] = (uint8_t) (FWconfig >> 8);
-					glEp0Buffer[2] = (uint8_t) FWconfig;
-					glEp0Buffer[3] = vendorRqtCnt;
+					glEp0Buffer[0] =  glHWconfig;
+					glEp0Buffer[1] = (uint8_t) (glFWconfig >> 8);
+					glEp0Buffer[2] = (uint8_t) glFWconfig;
+					glEp0Buffer[3] = glVendorRqtCnt;
 					CyU3PUsbSendEP0Data (4, glEp0Buffer);
-					flagdebug = (wValue == 1); // debug mode
-					vendorRqtCnt++;
+					glFlagDebug = (wValue == 1); // debug mode
+					glVendorRqtCnt++;
 					isHandled = CyTrue;
 					break;
 
@@ -286,24 +286,24 @@ CyFxSlFifoApplnUSBSetupCB (
 						char InputChar = (char) wValue;
 					 	if (InputChar  == 0x0d)
 						{
-							Qevent = USER_COMMAND_AVAILABLE << 24;
-							CyU3PQueueSend(&EventAvailable, &Qevent, CYU3P_NO_WAIT);
+							glQevent = USER_COMMAND_AVAILABLE << 24;
+							CyU3PQueueSend(&glEventAvailable, &glQevent, CYU3P_NO_WAIT);
 						}
 						else
 						{
 							ConsoleAccumulateChar(InputChar);
 						}
 					}
-					if (debtxtlen > 0)
+					if (glDebTxtLen > 0)
 						{
 							uint32_t intMask = CyU3PVicDisableAllInterrupts();
-							uint16_t len = debtxtlen;
-							memcpy(glEp0Buffer, bufdebug, len);
-							debtxtlen=0;
+							uint16_t len = glDebTxtLen;
+							memcpy(glEp0Buffer, glBufDebug, len);
+							glDebTxtLen=0;
 							CyU3PVicEnableInterrupts(intMask);
 							glEp0Buffer[len-1] = 0;
 							CyU3PUsbSendEP0Data (len, glEp0Buffer);
-							vendorRqtCnt++;
+							glVendorRqtCnt++;
 							isHandled = CyTrue;
 						}
 					else
@@ -332,7 +332,7 @@ CyFxSlFifoApplnUSBSetupCB (
 void USBEventCallback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
 {
 	uint32_t event = evtype;
-	CyU3PQueueSend(&EventAvailable, &event, CYU3P_NO_WAIT);
+	CyU3PQueueSend(&glEventAvailable, &event, CYU3P_NO_WAIT);
     switch (evtype)
     {
         case CY_U3P_USB_EVENT_SETCONF:
