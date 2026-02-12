@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
+#include <termios.h>
 #include <libusb-1.0/libusb.h>
 
 /* ------------------------------------------------------------------ */
@@ -45,6 +47,7 @@
 #define TUNERTUNE     0xB5
 #define SETARGFX3     0xB6
 #define TUNERSTDBY    0xB8
+#define READINFODEBUG 0xBA
 
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
@@ -307,6 +310,59 @@ static int do_raw(libusb_device_handle *h, uint8_t code)
     return 0;
 }
 
+/* Interactive debug console over USB.
+ * First sends TESTFX3 with wValue=1 to enable debug mode, then polls
+ * READINFODEBUG for output.  Typed characters are sent in wValue;
+ * CR triggers command execution on the FX3 side.  Ctrl-C exits. */
+static int do_debug(libusb_device_handle *h)
+{
+    /* Enable debug mode via TESTFX3 wValue=1 */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("debug: enabled (hwconfig=0x%02X fw=%d.%d)\n",
+           info[0], info[1], info[2]);
+    printf("debug: polling for output, type commands + Enter (Ctrl-C to quit)\n");
+    fflush(stdout);
+
+    /* Put stdin in non-blocking mode for character-at-a-time input */
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    newt.c_cc[VMIN] = 0;
+    newt.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    uint8_t buf[64];
+    for (;;) {
+        /* Check for typed character */
+        uint16_t send_char = 0;
+        char ch;
+        if (read(STDIN_FILENO, &ch, 1) == 1) {
+            if (ch == '\n') ch = '\r';
+            send_char = (uint8_t)ch;
+        }
+
+        /* Poll READINFODEBUG: wValue carries the typed char (0 = none) */
+        r = ctrl_read(h, READINFODEBUG, send_char, 0, buf, sizeof(buf));
+        if (r > 0) {
+            buf[r - 1] = '\0';  /* firmware null-terminates last byte */
+            printf("%s", (char *)buf);
+            fflush(stdout);
+        }
+        /* STALL (LIBUSB_ERROR_PIPE) means no data — normal */
+
+        usleep(50000);  /* 50ms poll interval */
+    }
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    return 0;
+}
+
 /* Send a vendor request with wLength > 64 — must STALL if firmware
  * validates EP0 buffer bounds (issue #6). */
 static int do_ep0_overflow(libusb_device_handle *h)
@@ -350,6 +406,7 @@ static void usage(const char *prog)
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
         "  i2cw <addr> <reg> <byte>...  I2C write (hex addresses, hex data)\n"
         "  reset                        Reboot FX3 to bootloader\n"
+        "  debug                        Interactive debug console over USB\n"
         "  raw <code>                   Send raw vendor request (hex)\n"
         "  ep0_overflow                 Test EP0 wLength bounds check\n"
         "\n"
@@ -435,6 +492,9 @@ int main(int argc, char **argv)
         for (int i = 0; i < ndata; i++)
             data[i] = (uint8_t)parse_num(argv[4 + i]);
         rc = do_i2cw(h, addr, reg, data, (uint16_t)ndata);
+
+    } else if (strcmp(cmd, "debug") == 0) {
+        rc = do_debug(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
