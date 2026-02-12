@@ -233,9 +233,9 @@ output=$(run_cmd test) && {
 # 3. GPIO test
 # ==================================================================
 
-# Set LEDs on, dither off, randomizer off
-output=$(run_cmd gpio 0x1C00) && {
-    tap_ok "gpio: set LED_YELLOW|LED_RED|LED_BLUE"
+# Set LED on, dither off, randomizer off
+output=$(run_cmd gpio 0x0800) && {
+    tap_ok "gpio: set LED_BLUE"
 } || {
     tap_fail "gpio: write failed" "$output"
 }

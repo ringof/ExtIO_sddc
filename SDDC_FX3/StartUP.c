@@ -12,24 +12,24 @@
 
 #include "Application.h"
 
-#define GPIO_LED_RED_PIN	21	/* FX3 GPIO pin for red LED (RX888mk2) */
+#define GPIO_LED_BLUE_PIN	21	/* FX3 GPIO pin for blue LED (RX888mk2) */
 
 void IndicateError(uint16_t ErrorCode)
 {
 	/*
-	 * Try to drive LED_RED via GPIO 21.  This is best-effort:
+	 * Try to drive LED_BLUE via GPIO 21.  This is best-effort:
 	 * if the GPIO block hasn't been clocked yet the calls will
 	 * fail silently, which is harmless.
 	 */
 	CyU3PGpioSimpleConfig_t gpioConfig;
 
-	CyU3PDeviceGpioOverride(GPIO_LED_RED_PIN, CyTrue);
+	CyU3PDeviceGpioOverride(GPIO_LED_BLUE_PIN, CyTrue);
 	gpioConfig.outValue    = (ErrorCode != 0) ? CyTrue : CyFalse;
 	gpioConfig.driveLowEn  = CyTrue;
 	gpioConfig.driveHighEn = CyTrue;
 	gpioConfig.inputEn     = CyFalse;
 	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
-	CyU3PGpioSetSimpleConfig(GPIO_LED_RED_PIN, &gpioConfig);
+	CyU3PGpioSetSimpleConfig(GPIO_LED_BLUE_PIN, &gpioConfig);
 }
 
 

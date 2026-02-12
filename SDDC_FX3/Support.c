@@ -14,13 +14,13 @@
 // Declare external data
 extern CyBool_t glDebugTxEnabled;
 
-#define GPIO_LED_RED_PIN	21	/* FX3 GPIO pin for red LED (RX888mk2) */
+#define GPIO_LED_BLUE_PIN	21	/* FX3 GPIO pin for blue LED (RX888mk2) */
 #define ERROR_BLINK_COUNT	10	/* Number of blinks before reset */
 #define ERROR_BLINK_MS		200	/* On/off time per blink in ms */
 
 /*
  * Best-effort LED blink followed by device reset.
- * Tries to configure GPIO_LED_RED as output and blink it.
+ * Tries to configure GPIO_LED_BLUE as output and blink it.
  * If the GPIO clock isn't started yet the config calls fail
  * silently and we proceed straight to the reset.
  */
@@ -30,19 +30,19 @@ static void ErrorBlinkAndReset(void)
 	int i;
 
 	/* Try to grab the pin and configure as output */
-	CyU3PDeviceGpioOverride(GPIO_LED_RED_PIN, CyTrue);
+	CyU3PDeviceGpioOverride(GPIO_LED_BLUE_PIN, CyTrue);
 	gpioConfig.outValue    = CyFalse;
 	gpioConfig.driveLowEn  = CyTrue;
 	gpioConfig.driveHighEn = CyTrue;
 	gpioConfig.inputEn     = CyFalse;
 	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
-	CyU3PGpioSetSimpleConfig(GPIO_LED_RED_PIN, &gpioConfig);
+	CyU3PGpioSetSimpleConfig(GPIO_LED_BLUE_PIN, &gpioConfig);
 
 	for (i = 0; i < ERROR_BLINK_COUNT; i++)
 	{
-		CyU3PGpioSetValue(GPIO_LED_RED_PIN, CyTrue);
+		CyU3PGpioSetValue(GPIO_LED_BLUE_PIN, CyTrue);
 		CyU3PThreadSleep(ERROR_BLINK_MS);
-		CyU3PGpioSetValue(GPIO_LED_RED_PIN, CyFalse);
+		CyU3PGpioSetValue(GPIO_LED_BLUE_PIN, CyFalse);
 		CyU3PThreadSleep(ERROR_BLINK_MS);
 	}
 
