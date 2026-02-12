@@ -12,8 +12,6 @@
 
 #include "Application.h"
 
-#define GPIO_LED_BLUE_PIN	21	/* FX3 GPIO pin for blue LED (RX888mk2) */
-
 void IndicateError(uint16_t ErrorCode)
 {
 	/*

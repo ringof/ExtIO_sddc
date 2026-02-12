@@ -77,6 +77,7 @@ extern void DebugPrint2USB ( uint8_t priority, char *msg, ...);
 
 // radio detect gpios
 #define GPIO36			(36) // sense RX888R2
+#define GPIO_LED_BLUE_PIN	21	/* FX3 GPIO pin for blue LED (RX888mk2) */
 
 typedef struct outxio_t
 {
