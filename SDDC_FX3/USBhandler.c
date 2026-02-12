@@ -44,12 +44,6 @@ uint8_t  vendorRqtCnt = 0;
 
 #ifdef TRACESERIAL
 
-extern const char* FX3CommandName[];
-extern const char* SETARGFX3List[];
-#define FX3_CMD_BASE       0xAA
-#define FX3_CMD_COUNT      17
-#define SETARGFX3_LIST_COUNT 14
-
 extern CyU3PQueue EventAvailable;	  	// Used for threads communications
 extern uint32_t Qevent __attribute__ ((aligned (32)));
 extern void ConsoleAccumulateChar(char ch);

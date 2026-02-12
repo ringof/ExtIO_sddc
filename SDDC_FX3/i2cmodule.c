@@ -82,5 +82,5 @@ CyU3PReturnStatus_t I2cTransferW1(  // Write one byte only
 {
 	uint8_t   byteCount = 1;
 	uint8_t   ldata = data;
-	return I2cTransfer (byteAddress, devAddr, byteCount, &ldata, false);
+	return I2cTransfer (byteAddress, devAddr, byteCount, &ldata, CyFalse);
 }

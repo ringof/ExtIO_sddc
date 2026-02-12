@@ -3,7 +3,6 @@
 
 #include "cyu3types.h"
 #include "cyu3usbconst.h"
-#include "Application.h"
 
 /* I2C Data rate */
 #define I2C_BITRATE        (400000)

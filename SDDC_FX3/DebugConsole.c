@@ -58,15 +58,12 @@ const char* EventName[] = {
 
 #ifdef TRACESERIAL
 // For Debug and display the name of the FX3Command
-#define FX3_CMD_BASE   0xAA
-#define FX3_CMD_COUNT  17
 const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
 "STARTADC", "0xB3", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
-// For Debug and display the name of the FX3Command
-#define SETARGFX3_LIST_COUNT  14
+// For Debug and display the name of the SETARGFX3 argument
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
 "DAT31_ATT","AD8340_VGA","PRESELECTOR","VHF_ATTENUATOR"

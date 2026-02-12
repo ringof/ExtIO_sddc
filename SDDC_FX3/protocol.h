@@ -68,3 +68,13 @@ enum ArgumentList {
 
 #define _DEBUG_USB_
 #define MAXLEN_D_USB (100)
+
+/* Debug trace: command-name lookup tables */
+#define FX3_CMD_BASE           0xAA
+#define FX3_CMD_COUNT          17
+#define SETARGFX3_LIST_COUNT   14
+
+#ifdef TRACESERIAL
+extern const char *FX3CommandName[FX3_CMD_COUNT];
+extern const char *SETARGFX3List[SETARGFX3_LIST_COUNT];
+#endif

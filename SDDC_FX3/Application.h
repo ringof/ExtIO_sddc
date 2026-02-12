@@ -27,9 +27,8 @@
 #include "cyu3externcstart.h"
 #include "i2cmodule.h"
 
-#include "protocol.h"
-
 #define TRACESERIAL		/* enable the trace to serial port*/
+#include "protocol.h"
 
 #define FIFO_DMA_RX_SIZE        (0)	                  /* DMA transfer size is set to infinite */
 #define FIFO_THREAD_STACK       (0x800)               /* application thread stack size */
