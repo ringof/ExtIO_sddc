@@ -168,6 +168,10 @@ static int do_test(libusb_device_handle *h)
         printf("FAIL test: %s\n", libusb_strerror(r));
         return 1;
     }
+    if (r < 4) {
+        printf("FAIL test: short reply (%d bytes, expected 4)\n", r);
+        return 1;
+    }
     uint8_t hwconfig   = buf[0];
     uint8_t fw_major   = buf[1];
     uint8_t fw_minor   = buf[2];

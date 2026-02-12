@@ -199,7 +199,7 @@ CyFxSlFifoApplnUSBSetupCB (
 							else
 							{
 								CyU3PDebugPrint (4, "I2cwrite Error %d\n", apiRetStatus);
-								isHandled = CyTrue; // ?!?!?!
+								isHandled = CyFalse;
 							}
 						}
 					break;
