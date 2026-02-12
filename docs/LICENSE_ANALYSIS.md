@@ -74,7 +74,7 @@ conflict (see §2 above).
 - **Hardware detection** — R828D I2C probe at `0x74` still identifies the
   RX888mk2 (`RunApplication.c` uses a local `R828D_I2C_ADDR` define)
 - **HF direct-sampling path** — ADC clock, GPIO control, DAT-31 attenuator,
-  AD8340 VGA are all unaffected
+  AD8370 VGA are all unaffected
 - **I2C passthrough** — `I2CWFX3`/`I2CRFX3` commands remain, allowing a
   host-side driver to control the R828D tuner over I2C if desired
 - **Backward compatibility** — old clients sending removed tuner commands

@@ -51,7 +51,7 @@
 
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
-#define AD8340_VGA    11
+#define AD8370_VGA    11
 
 /* Timeouts */
 #define CTRL_TIMEOUT_MS  1000
@@ -219,7 +219,7 @@ static int do_att(libusb_device_handle *h, uint16_t val)
 
 static int do_vga(libusb_device_handle *h, uint16_t val)
 {
-    int r = set_arg(h, AD8340_VGA, val);
+    int r = set_arg(h, AD8370_VGA, val);
     if (r < 0) {
         printf("FAIL vga %u: %s\n", val, libusb_strerror(r));
         return 1;
@@ -800,7 +800,7 @@ static void usage(const char *prog)
         "  gpio <bits>                  Set GPIO word (hex or decimal)\n"
         "  adc <freq_hz>               Set ADC clock frequency (STARTADC)\n"
         "  att <0-63>                   Set DAT-31 attenuator\n"
-        "  vga <0-255>                  Set AD8340 VGA gain\n"
+        "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"

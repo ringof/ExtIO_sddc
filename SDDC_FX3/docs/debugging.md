@@ -180,7 +180,7 @@ The `SETARGFX3List[]` maps `wIndex` to human-readable names:
 |--------|------|
 | 0--9 | `"0"` through `"9"` (unused/reserved) |
 | 10 | `DAT31_ATT` (DAT-31 attenuator, 0--63) |
-| 11 | `AD8340_VGA` (AD8340 VGA gain, 0--255) |
+| 11 | `AD8370_VGA` (AD8370 VGA gain, 0--255) |
 | 12 | `PRESELECTOR` |
 | 13 | `VHF_ATTENUATOR` |
 | >= 14 | Out of bounds -- logged as `<index>  <value>` |
@@ -247,7 +247,7 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd gpio <bits>` | Set GPIO control word | -- |
 | `fx3_cmd adc <freq>` | Set ADC clock frequency | -- |
 | `fx3_cmd att <0-63>` | Set DAT-31 attenuator | -- |
-| `fx3_cmd vga <0-255>` | Set AD8340 VGA gain | -- |
+| `fx3_cmd vga <0-255>` | Set AD8370 VGA gain | -- |
 | `fx3_cmd start` / `stop` | Start/stop GPIF streaming | -- |
 | `fx3_cmd i2cr <addr> <reg> <len>` | I2C read | -- |
 | `fx3_cmd i2cw <addr> <reg> <byte>...` | I2C write | -- |

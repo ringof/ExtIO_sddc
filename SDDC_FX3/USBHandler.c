@@ -223,7 +223,7 @@ CyFxSlFifoApplnUSBSetupCB (
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
-						case AD8340_VGA:
+						case AD8370_VGA:
 							rx888r2_SetGain(wValue);
 							glVendorRqtCnt++;
 							isHandled = CyTrue;

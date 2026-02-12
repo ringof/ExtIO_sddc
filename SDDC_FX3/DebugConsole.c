@@ -66,7 +66,7 @@ const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 // For Debug and display the name of the SETARGFX3 argument
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
-"DAT31_ATT","AD8340_VGA","PRESELECTOR","VHF_ATTENUATOR"
+"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR"
 };
 #endif
 

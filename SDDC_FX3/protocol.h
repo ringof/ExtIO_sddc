@@ -63,7 +63,7 @@ enum RadioModel {
 
 enum ArgumentList {
     DAT31_ATT        = 10,   /* DAT-31 attenuator (0-63) */
-    AD8340_VGA       = 11,   /* AD8340 VGA (0-255) */
+    AD8370_VGA       = 11,   /* AD8370 VGA (0-255) */
 };
 
 #define _DEBUG_USB_
