@@ -31,7 +31,7 @@
 #define TRACESERIAL		/* enable the trace to serial port*/
 
 #define FIFO_DMA_RX_SIZE        (0)	                  /* DMA transfer size is set to infinite */
-#define FIFO_THREAD_STACK       (0x400)               /* application thread stack size */
+#define FIFO_THREAD_STACK       (0x800)               /* application thread stack size */
 #define FIFO_THREAD_PRIORITY    (8)                   /* application thread priority */
 #define CY_FX_EP_CONSUMER       (0x81)   				  /* EP 1 IN */
 #define PING_PRODUCER_SOCKET	(CY_U3P_PIB_SOCKET_0)
