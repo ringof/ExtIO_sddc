@@ -53,47 +53,37 @@ void rx888r2_GpioInitialize()
 }
 
 /*
-    PE4304
-	direct GPIO output implementation  64 step 0.5 dB
-*/
-void rx888r2_SetAttenuator(uint8_t value)
+ * Bit-bang SPI shift-out: clock `bits` MSB-first from `value` on
+ * GPIO_ATT_DATA / GPIO_ATT_CLK, then pulse `latch_pin` high.
+ */
+static void GpioShiftOut(uint8_t latch_pin, uint8_t value, uint8_t bits)
 {
-	uint8_t bits = 6;
-	const uint8_t mask = 0x20;
-	uint8_t i,b;
-	CyU3PGpioSetValue (GPIO_ATT_LE, 0);    // ATT_LE latched
-	CyU3PGpioSetValue (GPIO_ATT_CLK, 0);   // ATT_CLK
-	for( i = bits ; i >0; i--)
+	uint8_t mask = 1 << (bits - 1);
+	uint8_t i, b;
+
+	CyU3PGpioSetValue (latch_pin, 0);
+	CyU3PGpioSetValue (GPIO_ATT_CLK, 0);
+	for (i = bits; i > 0; i--)
 	{
 		b = (value & mask) != 0;
-		CyU3PGpioSetValue (GPIO_ATT_DATA, b); // ATT_DATA
+		CyU3PGpioSetValue (GPIO_ATT_DATA, b);
 		CyU3PGpioSetValue (GPIO_ATT_CLK, 1);
 		value = value << 1;
 		CyU3PGpioSetValue (GPIO_ATT_CLK, 0);
 	}
-	CyU3PGpioSetValue (GPIO_ATT_LE, 1);    // ATT_LE latched
-	CyU3PGpioSetValue (GPIO_ATT_LE, 0);    // ATT_LE latched
+	CyU3PGpioSetValue (latch_pin, 1);
 }
 
-/*
-    AD8370
-	direct GPIO output implementation 128 step 0.5 dB
-*/
+/* PE4304 — 64 step, 0.5 dB */
+void rx888r2_SetAttenuator(uint8_t value)
+{
+	GpioShiftOut(GPIO_ATT_LE, value, 6);
+	CyU3PGpioSetValue (GPIO_ATT_LE, 0);
+}
+
+/* AD8370 — 128 step, 0.5 dB */
 void rx888r2_SetGain(uint8_t value)
 {
-	uint8_t bits = 8;
-	const uint8_t mask = 0x80;
-	uint8_t i,b;
-	CyU3PGpioSetValue (GPIO_VGA_LE, 0);    // VGA_LE latched
-	CyU3PGpioSetValue (GPIO_ATT_CLK, 0);   // ATT_CLK
-	for( i = bits ; i >0; i--)
-	{
-		b = (value & mask) != 0;
-		CyU3PGpioSetValue (GPIO_ATT_DATA, b); // ATT_DATA
-		CyU3PGpioSetValue (GPIO_ATT_CLK, 1);
-		value = value << 1;
-		CyU3PGpioSetValue (GPIO_ATT_CLK, 0);
-	}
-	CyU3PGpioSetValue (GPIO_VGA_LE, 1);    // ATT_LE latched
-	CyU3PGpioSetValue (GPIO_ATT_DATA, 0); // ATT_DATA
+	GpioShiftOut(GPIO_VGA_LE, value, 8);
+	CyU3PGpioSetValue (GPIO_ATT_DATA, 0);
 }
