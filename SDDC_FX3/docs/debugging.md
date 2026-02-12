@@ -63,7 +63,7 @@ endpoint (EP0).  Each control transfer is bidirectional:
 |-----------|---------|
 | `0x00` | No input character -- just polling for output |
 | `0x0D` | Carriage return -- triggers command execution |
-| Any other | ASCII character accumulated into `ConsoleInBuffer[32]` (lowercased) |
+| Any other | ASCII character accumulated into `glConsoleInBuffer[32]` (lowercased) |
 
 Characters are accumulated one per control transfer.  The 32-byte
 input buffer silently stops accepting characters when full; sending CR
@@ -73,8 +73,8 @@ flushes and executes the command.
 
 | Condition | Data phase |
 |-----------|-----------|
-| `debtxtlen > 0` | Firmware copies `bufdebug[]` (up to 100 bytes of ASCII) to the data phase, resets `debtxtlen` to 0 |
-| `debtxtlen == 0` | Firmware STALLs EP0 to signal "no data available" |
+| `glDebTxtLen > 0` | Firmware copies `glBufDebug[]` (up to 100 bytes of ASCII) to the data phase, resets `glDebTxtLen` to 0 |
+| `glDebTxtLen == 0` | Firmware STALLs EP0 to signal "no data available" |
 
 The last byte of the data phase is a NUL terminator placed by the
 firmware.  Usable text length is `actual_transfer_length - 1`.
@@ -84,15 +84,15 @@ firmware.  Usable text length is `actual_transfer_length - 1`.
 USB debug output requires two conditions:
 
 1. `glIsApplnActive == CyTrue` (device is enumerated and configured)
-2. `flagdebug == true`
+2. `glFlagDebug == true`
 
-**`flagdebug` starts as `false`.**  The host enables it by sending:
+**`glFlagDebug` starts as `false`.**  The host enables it by sending:
 
 ```
 TESTFX3 (0xAC) with wValue=1
 ```
 
-This returns the normal 4-byte device info AND sets `flagdebug = true`
+This returns the normal 4-byte device info AND sets `glFlagDebug = true`
 as a side effect.  Sending `TESTFX3` with `wValue=0` disables debug
 mode again.
 
@@ -104,10 +104,10 @@ host is polling.
 
 | Item | Detail |
 |------|--------|
-| Buffer | `bufdebug[100]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
-| Fill counter | `debtxtlen` (declared `volatile uint16_t`) |
+| Buffer | `glBufDebug[100]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
+| Fill counter | `glDebTxtLen` (declared `volatile uint16_t`) |
 | Formatter | `MyDebugSNPrint()` -- simplified printf supporting `%d`, `%x`, `%s`, `%u`, `%c` |
-| Overflow | If `debtxtlen + len > MAXLEN_D_USB`, sleeps 100ms and retries once.  If still full, the message is dropped. |
+| Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, sleeps 100ms and retries once.  If still full, the message is dropped. |
 | Synchronization | Writer (`DebugPrint2USB`, application thread) and reader (`READINFODEBUG` handler, USB callback context) use `CyU3PVicDisableAllInterrupts()`/`CyU3PVicEnableInterrupts()` to protect buffer access |
 
 ---
@@ -255,7 +255,7 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd ep0_overflow` | Send wLength > 64 -- must STALL | #6 |
 | `fx3_cmd oob_brequest` | Send bRequest=0xCC (outside FX3CommandName bounds) | #21 |
 | `fx3_cmd oob_setarg` | Send SETARGFX3 wIndex=0xFFFF (outside SETARGFX3List bounds) | #20 |
-| `fx3_cmd console_fill` | Send 35 chars to 32-byte ConsoleInBuffer | #13 |
+| `fx3_cmd console_fill` | Send 35 chars to 32-byte glConsoleInBuffer | #13 |
 | `fx3_cmd debug_race` | 50 rapid interleaved SETARGFX3 + READINFODEBUG polls | #8 |
 | `fx3_cmd debug_poll` | Send `?` + CR, verify help text comes back | #26 |
 | `fx3_cmd pib_overflow` | Start streaming without reading EP1, verify PIB error in debug output | #10 |

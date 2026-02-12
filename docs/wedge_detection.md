@@ -95,7 +95,7 @@ CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 ```
 
 The callback body (`StartStopApplication.c:38-44`) logs the error code
-to the debug console and posts the event to the `EventAvailable` queue
+to the debug console and posts the event to the `glEventAvailable` queue
 for host-side visibility.
 
 ### 2. DMA buffer count monitoring
@@ -243,7 +243,7 @@ Detect stall (any of the mechanisms above)
 The recovery logic belongs in `RunApplication.c:ApplicationThread()`
 inside the existing 100 ms polling loop.  The PIB error callback
 (`StartStopApplication.c:PibErrorCallback`) should post an event to
-`EventAvailable` for deferred handling by the application thread,
+`glEventAvailable` for deferred handling by the application thread,
 since DMA and GPIF APIs cannot be safely called from interrupt
 context.
 
@@ -252,9 +252,9 @@ context.
 The host can be informed of a recovery event through:
 
 1. **TESTFX3 response** -- the 4-byte status response could encode
-   a "recovered from stall" flag in an unused bit of `FWconfig` or
-   `vendorRqtCnt`
-2. **Debug-over-USB** -- if `flagdebug` is enabled, the recovery
+   a "recovered from stall" flag in an unused bit of `glFWconfig` or
+   `glVendorRqtCnt`
+2. **Debug-over-USB** -- if `glFlagDebug` is enabled, the recovery
    message appears in the `READINFODEBUG` buffer
 3. **Stream gap** -- the host will observe a gap in the bulk transfer
    stream, which it can interpret as a recovery event

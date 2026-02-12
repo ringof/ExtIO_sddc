@@ -302,7 +302,7 @@ loop.  It:
 ### RTOS primitives used by this firmware
 
 **Message queue (`CyU3PQueue`):**
-`EventAvailable` -- a 16-element queue of `uint32_t` events.  USB
+`glEventAvailable` -- a 16-element queue of `uint32_t` events.  USB
 callbacks, DMA callbacks, and the debug input path post events here.
 The application thread consumes them in `MsgParsing()`.  Events are
 packed as `(label << 24) | data`, where label identifies the source
@@ -383,7 +383,7 @@ USB stack thread context (not application thread context):
 
 Because callbacks run in USB thread context, they must not block or
 perform lengthy operations.  The firmware posts events to the
-`EventAvailable` queue for deferred processing by the application
+`glEventAvailable` queue for deferred processing by the application
 thread.
 
 ---
@@ -418,7 +418,7 @@ ThreadX calls CyFxApplicationDefine()
   │
   ├─ Initialize debug console (UART at 115200, DMA receive channel)
   │
-  ├─ Create EventAvailable message queue (16 x uint32_t)
+  ├─ Create glEventAvailable message queue (16 x uint32_t)
   │
   └─ Create application thread (priority 8, 1 KB stack)
        → ApplicationThread() starts running
@@ -440,8 +440,8 @@ ApplicationThread()
   │    ├─ Enable Si5351 CLK2 at 16 MHz (VHF tuner reference)
   │    ├─ Probe R828D tuner at I2C address 0x74
   │    ├─ Read GPIO36 (hardware sense pin)
-  │    │    GPIO36 low → RX888r2 confirmed (HWconfig = 0x04)
-  │    │    GPIO36 high → no radio detected (HWconfig = 0x00)
+  │    │    GPIO36 low → RX888r2 confirmed (glHWconfig = 0x04)
+  │    │    GPIO36 high → no radio detected (glHWconfig = 0x00)
   │    └─ Disable Si5351 CLK2
   │
   ├─ Initialize rx888r2 GPIOs (if RX888r2 detected)
@@ -472,7 +472,7 @@ Host enumerates device
   │         └─ glIsApplnActive = true
   │
   └─ Application thread enters main loop
-       └─ Every 100 ms: poll EventAvailable queue, process events
+       └─ Every 100 ms: poll glEventAvailable queue, process events
 ```
 
 ---
@@ -490,7 +490,7 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 |----------|------|-----|--------|--------|------|-------------|
 | 0xAA | STARTFX3 | OUT | -- | -- | 4 B | Start GPIF streaming; assert software input, reset and start DMA |
 | 0xAB | STOPFX3 | OUT | -- | -- | 4 B | Stop GPIF streaming; de-assert software input, reset DMA, flush EP |
-| 0xAC | TESTFX3 | IN | debug | -- | 4 B | Query device info; returns [HWconfig, FW_major, FW_minor, vendorRqtCnt]; wValue=1 enables debug mode |
+| 0xAC | TESTFX3 | IN | debug | -- | 4 B | Query device info; returns [glHWconfig, FW_major, FW_minor, glVendorRqtCnt]; wValue=1 enables debug mode |
 | 0xAD | GPIOFX3 | OUT | -- | -- | 4 B | Set GPIO state; payload is a 32-bit bitmask interpreted by `rx888r2_GpioSet()` |
 | 0xAE | I2CWFX3 | OUT | I2C addr | reg addr | N B | Write N bytes to I2C device at wValue, register wIndex |
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
@@ -621,11 +621,11 @@ default):
 
 | | UART serial | Debug-over-USB |
 |---|---|---|
-| Output | Physical UART TX pin at 115200 baud | `bufdebug[100]` buffer, polled via READINFODEBUG |
+| Output | Physical UART TX pin at 115200 baud | `glBufDebug[100]` buffer, polled via READINFODEBUG |
 | Input | UART RX via DMA callback | READINFODEBUG wValue carries one character per transfer |
 | Activation | Always on when `_DEBUG_USB_` is not defined | Host must send TESTFX3 with wValue=1 |
 
-Both paths feed into the same `ConsoleInBuffer[32]` and trigger the same
+Both paths feed into the same `glConsoleInBuffer[32]` and trigger the same
 `ParseCommand()` on carriage return (0x0D).  All input is forced to
 lowercase (`| 0x20`).
 

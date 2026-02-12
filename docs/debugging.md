@@ -9,10 +9,10 @@ There are two independent debug channels, selected at compile time by `_DEBUG_US
 | Active when | `_DEBUG_USB_` is **not** defined | `_DEBUG_USB_` **is** defined (current default) |
 | `DebugPrint` maps to | `CyU3PDebugPrint` (SDK UART driver) | `DebugPrint2USB` (custom EP0 buffer) |
 | Input path | `UartCallback` via DMA, char-at-a-time | `READINFODEBUG` EP0 handler, `wValue` carries one char |
-| Output path | UART TX DMA to physical serial pin | `bufdebug[]` buffer, polled by host via `READINFODEBUG` |
+| Output path | UART TX DMA to physical serial pin | `glBufDebug[]` buffer, polled by host via `READINFODEBUG` |
 | Command dispatch | `UartCallback` -> queue -> `MsgParsing` -> `ParseCommand` | `READINFODEBUG` handler -> queue -> `MsgParsing` -> `ParseCommand` |
 
-Both paths feed characters into the same `ConsoleInBuffer[32]` and trigger the same `ParseCommand()` on carriage return. The `TraceSerial()` function (guarded by `#ifdef TRACESERIAL`) is an additional layer that logs every vendor request to whatever output channel is active.
+Both paths feed characters into the same `glConsoleInBuffer[32]` and trigger the same `ParseCommand()` on carriage return. The `TraceSerial()` function (guarded by `#ifdef TRACESERIAL`) is an additional layer that logs every vendor request to whatever output channel is active.
 
 ---
 
@@ -27,8 +27,8 @@ Both paths feed characters into the same `ConsoleInBuffer[32]` and trigger the s
 ```
 Physical UART RX -> DMA PROD event -> UartCallback()
   -> echo char back to terminal
-  -> accumulate into ConsoleInBuffer[] (forced lowercase via | 0x20)
-  -> on CR (0x0d): post USER_COMMAND_AVAILABLE to EventAvailable queue
+  -> accumulate into glConsoleInBuffer[] (forced lowercase via | 0x20)
+  -> on CR (0x0d): post USER_COMMAND_AVAILABLE to glEventAvailable queue
 ```
 
 The main `ApplicationThread` loop polls the queue every 100 ms and calls `MsgParsing()` -> `ParseCommand()`.
@@ -63,18 +63,18 @@ Debug-over-USB is off by default. It is enabled by the host sending:
 TESTFX3 (0xAC) with wValue=1
 ```
 
-This sets `flagdebug = true` (`USBHandler.c:276`). All subsequent `DebugPrint2USB` calls then buffer output instead of returning immediately.
+This sets `glFlagDebug = true` (`USBHandler.c:276`). All subsequent `DebugPrint2USB` calls then buffer output instead of returning immediately.
 
 ### Output flow
 
 ```
 DebugPrint2USB()
   -> MyDebugSNPrint() formats into local buf[100]
-  -> memcpy into bufdebug[] (append at debtxtlen offset)
+  -> memcpy into glBufDebug[] (append at glDebTxtLen offset)
 
 Host polls READINFODEBUG (0xBA) with wValue=0:
-  -> if debtxtlen > 0: memcpy bufdebug -> glEp0Buffer, send via EP0, reset debtxtlen
-  -> if debtxtlen == 0: STALL (signals "nothing to read")
+  -> if glDebTxtLen > 0: memcpy glBufDebug -> glEp0Buffer, send via EP0, reset glDebTxtLen
+  -> if glDebTxtLen == 0: STALL (signals "nothing to read")
 ```
 
 ### Input flow (remote console)
@@ -82,16 +82,16 @@ Host polls READINFODEBUG (0xBA) with wValue=0:
 The host can also send characters to the firmware console via `READINFODEBUG` with `wValue = character`:
 
 ```
-READINFODEBUG with wValue='t' -> stores 't' in ConsoleInBuffer
+READINFODEBUG with wValue='t' -> stores 't' in glConsoleInBuffer
 READINFODEBUG with wValue='?' -> stores '?'
 READINFODEBUG with wValue=0x0D -> posts USER_COMMAND_AVAILABLE to queue
 ```
 
-This mirrors the UART input path exactly -- same `ConsoleInBuffer`, same `ParseCommand()`.
+This mirrors the UART input path exactly -- same `glConsoleInBuffer`, same `ParseCommand()`.
 
 ### Known issues
 
-1. **Race condition on `bufdebug`/`debtxtlen`.** The writer (`DebugPrint2USB`, app thread context) and reader (`READINFODEBUG`, USB callback context) share `bufdebug[]` with no lock. The `volatile` on `debtxtlen` prevents compiler reordering but not torn reads/writes of the buffer contents mid-`memcpy`.
+1. **Race condition on `glBufDebug`/`glDebTxtLen`.** The writer (`DebugPrint2USB`, app thread context) and reader (`READINFODEBUG`, USB callback context) share `glBufDebug[]` with no lock. The `volatile` on `glDebTxtLen` prevents compiler reordering but not torn reads/writes of the buffer contents mid-`memcpy`.
 
 2. **Overflow backpressure is just a sleep.** `DebugConsole.c:245` -- when the buffer is full, `DebugPrint2USB` sleeps 100 ms then checks again. If it is still full, the message is silently dropped. There is no retry loop and no indication.
 
@@ -101,19 +101,19 @@ This mirrors the UART input path exactly -- same `ConsoleInBuffer`, same `ParseC
    ```
    `len` is the formatted text length. This overwrites the last character of the message with a null terminator, so every debug read loses one byte.
 
-4. **STALL-as-"empty" is unconventional.** When there is no debug data (`debtxtlen == 0`), the handler stalls EP0 (`USBHandler.c:312`). This is not an error -- it signals "no data yet." But from the host's perspective, a STALL is an error condition. The host must treat STALL as "poll again later" rather than "fatal error," which is non-standard and can trigger warning messages in verbose USB logging.
+4. **STALL-as-"empty" is unconventional.** When there is no debug data (`glDebTxtLen == 0`), the handler stalls EP0 (`USBHandler.c:312`). This is not an error -- it signals "no data yet." But from the host's perspective, a STALL is an error condition. The host must treat STALL as "poll again later" rather than "fatal error," which is non-standard and can trigger warning messages in verbose USB logging.
 
 5. **Single-character input protocol.** Each `READINFODEBUG` call can only carry one character (in `wValue`). Typing a 6-character command like `"stack\r"` requires 6 separate USB control transfers. It works, but it is slow.
 
-6. **The `debtxtlen` reset-then-send sequence is not atomic.** At `USBHandler.c:301-305`:
+6. **The `glDebTxtLen` reset-then-send sequence is not atomic.** At `USBHandler.c:301-305`:
    ```c
-   uint16_t len = debtxtlen;
-   memcpy(glEp0Buffer, bufdebug, len);
-   debtxtlen=0;                    // reset AFTER copy
+   uint16_t len = glDebTxtLen;
+   memcpy(glEp0Buffer, glBufDebug, len);
+   glDebTxtLen=0;                    // reset AFTER copy
    glEp0Buffer[len-1] = 0;
    CyU3PUsbSendEP0Data (len, glEp0Buffer);
    ```
-   If `DebugPrint2USB` appends to `bufdebug` between the `memcpy` and `debtxtlen=0`, that new data is lost. The reset should happen before the copy, or under a lock.
+   If `DebugPrint2USB` appends to `glBufDebug` between the `memcpy` and `glDebTxtLen=0`, that new data is lost. The reset should happen before the copy, or under a lock.
 
 ---
 
@@ -143,12 +143,12 @@ It skips `READINFODEBUG` (to avoid recursive tracing of the debug poll itself), 
 
 | Byte | Contents |
 |------|----------|
-| 0 | `HWconfig` (e.g., 0x04 = RX888r2) |
-| 1 | `FWconfig` high byte |
-| 2 | `FWconfig` low byte |
-| 3 | `vendorRqtCnt` (rolling 8-bit counter of vendor requests) |
+| 0 | `glHWconfig` (e.g., 0x04 = RX888r2) |
+| 1 | `glFWconfig` high byte |
+| 2 | `glFWconfig` low byte |
+| 3 | `glVendorRqtCnt` (rolling 8-bit counter of vendor requests) |
 
-Side effect: `wValue == 1` enables debug mode (`flagdebug = true`); any other `wValue` disables it.
+Side effect: `wValue == 1` enables debug mode (`glFlagDebug = true`); any other `wValue` disables it.
 
 ### Known issue
 
@@ -179,7 +179,7 @@ The debug enable/disable is a side effect of a query command. A host that sends 
 
 | Area | Issue | Severity |
 |------|-------|----------|
-| USB debug buffer | Race condition on `bufdebug`/`debtxtlen` (no locking) | High |
+| USB debug buffer | Race condition on `glBufDebug`/`glDebTxtLen` (no locking) | High |
 | USB debug buffer | Non-atomic reset-then-send loses appended data | High |
 | `READINFODEBUG` | Last byte truncated by null terminator at `len-1` | Low |
 | `READINFODEBUG` | EP0 STALL used to signal "no data" (non-standard) | Low |
