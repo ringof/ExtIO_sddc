@@ -105,14 +105,16 @@ void ParseCommand(void)
     {
 		char* ThreadName;
 		DebugPrint(4, "stack:\r\n");
-		// Note that StackSize is in bytes but RTOS fill pattern is a uint32
+		// Stack grows downward from top of allocation.  Bottom retains
+		// the RTOS 0xEFEFEFEF fill pattern; scan upward to find the
+		// high-water mark where the fill ends.
 		uint32_t* StackStartPtr = StackPtr[0];
 		uint32_t* DataPtr = StackStartPtr;
-		while (*DataPtr++ != 0xEFEFEFEF) ;
+		while (*DataPtr == 0xEFEFEFEF) DataPtr++;
 		CyU3PThreadInfoGet(&ThreadHandle[0], &ThreadName, 0, 0, 0);
 		ThreadName += 3;	// Skip numeric ID
 		DebugPrint(4, "Stack free in %s is %d/%d\r\n\r\n", ThreadName,
-				FIFO_THREAD_STACK - ((DataPtr - StackStartPtr)<<2), FIFO_THREAD_STACK);
+				(DataPtr - StackStartPtr)<<2, FIFO_THREAD_STACK);
     }
 	else if (!strcmp("reset", ConsoleInBuffer))
 	{

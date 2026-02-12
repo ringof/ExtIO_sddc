@@ -172,8 +172,8 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 ep0_overflow + 5 debug/OOB tests
-#      + 1 PIB overflow + optional streaming (3 checks)
-PLANNED=19
+#      + 1 PIB overflow + 1 stack check + optional streaming (3 checks)
+PLANNED=20
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -403,7 +403,19 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 16. Streaming test via rx888_stream
+# 16. Stack watermark check (issue #12)
+# ==================================================================
+# Query the "stack" debug command and verify adequate headroom
+# after the thread has run through initialization.
+
+output=$(run_cmd stack_check) && {
+    tap_ok "stack_check: adequate stack headroom at 2KB (issue #12)"
+} || {
+    tap_fail "stack_check: insufficient stack headroom" "$output"
+}
+
+# ==================================================================
+# 17. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then

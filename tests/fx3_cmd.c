@@ -692,6 +692,100 @@ static int do_test_pib_overflow(libusb_device_handle *h)
     return 1;
 }
 
+/* Issue #12: Query the "stack" debug command and parse the high-water
+ * mark to verify adequate headroom.  The firmware reports:
+ *   "Stack free in <name> is <free>/<total>"
+ * We PASS if free > 25% of total (i.e. comfortable margin at 2KB).
+ */
+static int do_test_stack_check(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    uint8_t buf[64];
+    char collected[1024] = {0};
+    int collected_len = 0;
+
+    /* 1. Enable debug mode */
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL stack_check: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Drain stale output */
+    for (int i = 0; i < 10; i++) {
+        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        usleep(20000);
+    }
+
+    /* 3. Send "stack" + CR */
+    const char *cmd = "stack";
+    for (const char *p = cmd; *p; p++) {
+        ctrl_read(h, READINFODEBUG, (uint16_t)*p, 0, buf, sizeof(buf));
+        usleep(10000);
+    }
+    ctrl_read(h, READINFODEBUG, 0x0d, 0, buf, sizeof(buf));
+
+    /* 4. Poll for response (up to 3 seconds) */
+    for (int attempt = 0; attempt < 60; attempt++) {
+        usleep(50000);
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (r > 0) {
+            int copy = r - 1;
+            if (collected_len + copy >= (int)sizeof(collected) - 1)
+                copy = (int)sizeof(collected) - 1 - collected_len;
+            if (copy > 0) {
+                memcpy(collected + collected_len, buf, copy);
+                collected_len += copy;
+            }
+            /* Early exit once we see the complete line */
+            if (strstr(collected, "Stack free"))
+                break;
+        }
+    }
+    collected[collected_len] = '\0';
+
+    /* 5. Parse "Stack free in <name> is <free>/<total>" */
+    int free_bytes = -1, total_bytes = -1;
+    char *p = strstr(collected, "Stack free");
+    if (p) {
+        char *is = strstr(p, " is ");
+        if (is) {
+            if (sscanf(is + 4, "%d/%d", &free_bytes, &total_bytes) != 2) {
+                free_bytes = total_bytes = -1;
+            }
+        }
+    }
+
+    if (free_bytes < 0 || total_bytes <= 0) {
+        printf("FAIL stack_check: could not parse stack response\n");
+        if (collected_len > 0) {
+            collected[collected_len < 200 ? collected_len : 200] = '\0';
+            printf("#   debug output: %s\n", collected);
+        }
+        return 1;
+    }
+
+    /* 6. Verify total matches expected 2KB and free > 25% */
+    int used = total_bytes - free_bytes;
+    int margin_pct = (free_bytes * 100) / total_bytes;
+
+    if (total_bytes != 2048) {
+        printf("FAIL stack_check: expected 2048 total, got %d (issue #12)\n",
+               total_bytes);
+        return 1;
+    }
+
+    if (margin_pct < 25) {
+        printf("FAIL stack_check: only %d/%d bytes free (%d%%) — insufficient margin (issue #12)\n",
+               free_bytes, total_bytes, margin_pct);
+        return 1;
+    }
+
+    printf("PASS stack_check: %d/%d used, %d/%d free (%d%% margin) (issue #12)\n",
+           used, total_bytes, free_bytes, total_bytes, margin_pct);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
@@ -721,6 +815,7 @@ static void usage(const char *prog)
         "  debug_race                   Stress-test debug buffer race (issue #8)\n"
         "  debug_poll                   Test debug console over USB (issue #26)\n"
         "  pib_overflow                 Provoke + detect PIB error (issue #10)\n"
+        "  stack_check                  Query stack watermark, verify headroom (issue #12)\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -825,6 +920,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "pib_overflow") == 0) {
         rc = do_test_pib_overflow(h);
+
+    } else if (strcmp(cmd, "stack_check") == 0) {
+        rc = do_test_stack_check(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
