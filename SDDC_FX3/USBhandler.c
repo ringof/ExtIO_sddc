@@ -21,10 +21,6 @@ extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
 extern void StopApplication(void);
 extern CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig);
-extern void WriteAttenuator(uint8_t value);
-
-void si5351aSetFrequencyA(UINT32 freq);
-void si5351aSetFrequencyB(UINT32 freq2);
 
 // Declare external data
 extern CyU3PQueue EventAvailable;			  	// Used for threads communications

@@ -90,10 +90,4 @@ typedef struct outxio_t
 CyU3PReturnStatus_t ConfGPIOsimpleout( uint8_t gpioid);
 CyU3PReturnStatus_t ConfGPIOsimpleinput( uint8_t gpioid);
 
-// rx888r2
-void rx888r2_GpioSet(uint32_t mdata);
-void rx888r2_GpioInitialize();
-void rx888r2_SetAttenuator(uint8_t value);
-void rx888r2_SetGain(uint8_t value);
-
 #endif // _INCLUDED_APPLICATION_H_
