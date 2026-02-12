@@ -132,7 +132,7 @@ void MsgParsing(uint32_t qevent)
 			DebugPrint(4, "\r\nVendor request = %x  %x  %x\r\n", (uint8_t)( qevent >> 16), (uint8_t) (qevent >> 8) , (uint8_t) qevent );
 			break;
 		case 2:
-			DebugPrint(4, "\r\nfree \r\n", (uint8_t) qevent );
+			DebugPrint(4, "\r\nPIB error 0x%x\r\n", (uint16_t) qevent);
 			break;
 		case USER_COMMAND_AVAILABLE:
 			ParseCommand();

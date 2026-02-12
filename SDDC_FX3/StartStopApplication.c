@@ -13,7 +13,6 @@
 
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
-extern uint32_t Qevent __attribute__ ((aligned (32)));
 uint32_t glDMACount;
 
 // Declare external functions
@@ -34,15 +33,15 @@ char* CyFxGpifName = { "HF103.h" };
 
 CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U transfer. */
 
-/*
+extern CyU3PQueue EventAvailable;
+
 void Pib_error_cb(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
-	Qevent =( 1<<25 |  cbArg );
-	CyU3PQueueSend(&EventAvailable, &Qevent, CYU3P_NO_WAIT);
+		uint32_t evt = (2 << 24) | cbArg;
+		CyU3PQueueSend(&EventAvailable, &evt, CYU3P_NO_WAIT);
 	}
 }
-*/
 /*
 #define TH1_BUSY 7
 #define TH1_WAIT 8
@@ -127,7 +126,7 @@ void StartApplication ( void ) {
     CheckStatus("CyU3PDmaMultiChannelSetXfer", Status);
 
     /* callback to see if there is any overflow of data on the GPIF II side*/
-  //  CyU3PPibRegisterCallback(Pib_error_cb,CYU3P_PIB_INTR_ERROR);
+    CyU3PPibRegisterCallback(Pib_error_cb, CYU3P_PIB_INTR_ERROR);
 
 	// Load, configure and start the GPIF state machine
     Status = StartGPIF();
