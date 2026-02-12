@@ -298,23 +298,26 @@ output=$(run_cmd stop) && {
 # These should STALL.  The "raw" subcommand treats STALL as PASS.
 # After each, verify the device is still responsive.
 
-output=$(run_cmd raw 0xB4) && {
+output=$("$FX3_CMD" raw 0xB4 2>&1) || true
+if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERINIT (0xB4): got STALL as expected"
-} || {
-    tap_fail "stale TUNERINIT (0xB4): unexpected result" "$output"
-}
+else
+    tap_fail "stale TUNERINIT (0xB4): command accepted (not removed?)" "$output"
+fi
 
-output=$(run_cmd raw 0xB5) && {
+output=$("$FX3_CMD" raw 0xB5 2>&1) || true
+if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERTUNE (0xB5): got STALL as expected"
-} || {
-    tap_fail "stale TUNERTUNE (0xB5): unexpected result" "$output"
-}
+else
+    tap_fail "stale TUNERTUNE (0xB5): command accepted (not removed?)" "$output"
+fi
 
-output=$(run_cmd raw 0xB8) && {
+output=$("$FX3_CMD" raw 0xB8 2>&1) || true
+if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERSTDBY (0xB8): got STALL as expected"
-} || {
-    tap_fail "stale TUNERSTDBY (0xB8): unexpected result" "$output"
-}
+else
+    tap_fail "stale TUNERSTDBY (0xB8): command accepted (not removed?)" "$output"
+fi
 
 # ==================================================================
 # 9. EP0 wLength overflow check (issue #6)
