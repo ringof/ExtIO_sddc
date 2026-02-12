@@ -298,11 +298,13 @@ CyFxSlFifoApplnUSBSetupCB (
 						{
 							uint32_t intMask = CyU3PVicDisableAllInterrupts();
 							uint16_t len = glDebTxtLen;
+							if (len > CYFX_SDRAPP_MAX_EP0LEN - 1)
+								len = CYFX_SDRAPP_MAX_EP0LEN - 1;
 							memcpy(glEp0Buffer, glBufDebug, len);
 							glDebTxtLen=0;
 							CyU3PVicEnableInterrupts(intMask);
-							glEp0Buffer[len-1] = 0;
-							CyU3PUsbSendEP0Data (len, glEp0Buffer);
+							glEp0Buffer[len] = '\0';
+							CyU3PUsbSendEP0Data (len + 1, glEp0Buffer);
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 						}
