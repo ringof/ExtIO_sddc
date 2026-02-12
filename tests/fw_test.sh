@@ -172,8 +172,8 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 ep0_overflow + 5 debug/OOB tests
-#      + optional streaming (3 checks)
-PLANNED=18
+#      + 1 PIB overflow + optional streaming (3 checks)
+PLANNED=19
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -391,7 +391,19 @@ output=$(run_cmd debug_poll) && {
 }
 
 # ==================================================================
-# 15. Streaming test via rx888_stream
+# 15. PIB error detection (issue #10)
+# ==================================================================
+# Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
+# Verify the debug console reports "PIB error".
+
+output=$(run_cmd pib_overflow) && {
+    tap_ok "pib_overflow: PIB error detected in debug output (issue #10)"
+} || {
+    tap_fail "pib_overflow: no PIB error reported" "$output"
+}
+
+# ==================================================================
+# 16. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then

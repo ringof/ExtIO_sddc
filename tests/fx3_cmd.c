@@ -587,6 +587,111 @@ static int do_test_debug_poll(libusb_device_handle *h)
     return 1;
 }
 
+/* Issue #10: Provoke a PIB error by starting GPIF streaming and
+ * deliberately not reading the bulk endpoint.  The GPIF buffers
+ * overflow, Pib_error_cb fires, and MsgParsing prints "PIB error 0x..."
+ * to the debug output.  We poll READINFODEBUG looking for that string.
+ *
+ * This validates the entire PIB error reporting chain:
+ *   GPIF overflow → Pib_error_cb → EventAvailable queue →
+ *   MsgParsing → DebugPrint → READINFODEBUG poll
+ */
+static int do_test_pib_overflow(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    uint8_t buf[64];
+    char collected[4096] = {0};
+    int collected_len = 0;
+    int found_pib_error = 0;
+
+    /* 1. Enable debug mode */
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL pib_overflow: enable debug mode: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Drain any stale debug output */
+    for (int i = 0; i < 10; i++) {
+        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        usleep(20000);
+    }
+
+    /* 3. Configure ADC at 64 MHz — high enough to overwhelm quickly */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL pib_overflow: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 4. Start streaming — GPIF begins pushing data to EP1 IN */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL pib_overflow: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 5. Don't read EP1 IN.  Just poll debug output for ~5 seconds.
+     *    The 4 × 16 KB DMA buffers fill in < 1 ms at 64 MS/s,
+     *    so PIB errors should appear almost immediately. */
+    for (int attempt = 0; attempt < 100; attempt++) {
+        usleep(50000);  /* 50ms poll interval */
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (r > 0) {
+            int copy = r - 1;  /* strip NUL terminator */
+            if (collected_len + copy >= (int)sizeof(collected) - 1)
+                copy = (int)sizeof(collected) - 1 - collected_len;
+            if (copy > 0) {
+                memcpy(collected + collected_len, buf, copy);
+                collected_len += copy;
+            }
+            /* Check for the PIB error signature as we go */
+            if (strstr(collected, "PIB error")) {
+                found_pib_error = 1;
+                break;
+            }
+        }
+    }
+    collected[collected_len] = '\0';
+
+    /* 6. Stop streaming */
+    cmd_u32(h, STOPFX3, 0);
+
+    /* Allow device to settle */
+    usleep(200000);
+
+    /* 7. Verify device is still alive */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL pib_overflow: device unresponsive after test: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    if (found_pib_error) {
+        /* Extract the first PIB error line for reporting */
+        char *p = strstr(collected, "PIB error");
+        char excerpt[64] = {0};
+        if (p) {
+            int n = 0;
+            while (p[n] && p[n] != '\r' && p[n] != '\n' && n < 60) n++;
+            memcpy(excerpt, p, n);
+        }
+        printf("PASS pib_overflow: detected \"%s\" in debug output (issue #10)\n",
+               excerpt);
+        return 0;
+    }
+
+    printf("FAIL pib_overflow: no PIB error detected in %d bytes of debug output\n",
+           collected_len);
+    if (collected_len > 0) {
+        /* Show what we did get, truncated */
+        collected[collected_len < 200 ? collected_len : 200] = '\0';
+        printf("#   debug output: %s\n", collected);
+    }
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
@@ -615,6 +720,7 @@ static void usage(const char *prog)
         "  console_fill                 Test console buffer fill (issue #13)\n"
         "  debug_race                   Stress-test debug buffer race (issue #8)\n"
         "  debug_poll                   Test debug console over USB (issue #26)\n"
+        "  pib_overflow                 Provoke + detect PIB error (issue #10)\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -716,6 +822,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "debug_poll") == 0) {
         rc = do_test_debug_poll(h);
+
+    } else if (strcmp(cmd, "pib_overflow") == 0) {
+        rc = do_test_pib_overflow(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);

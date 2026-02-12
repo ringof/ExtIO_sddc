@@ -258,6 +258,7 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd console_fill` | Send 35 chars to 32-byte ConsoleInBuffer | #13 |
 | `fx3_cmd debug_race` | 50 rapid interleaved SETARGFX3 + READINFODEBUG polls | #8 |
 | `fx3_cmd debug_poll` | Send `?` + CR, verify help text comes back | #26 |
+| `fx3_cmd pib_overflow` | Start streaming without reading EP1, verify PIB error in debug output | #10 |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
 ### 5.2 `fw_test.sh` -- Automated TAP Test Suite
@@ -267,7 +268,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 18 tests (21 with streaming) in TAP format:
+Runs 19 tests (22 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -285,7 +286,8 @@ Runs 18 tests (21 with streaming) in TAP format:
 | 16 | Console buffer fill | 35-char input survives (issue #13) |
 | 17 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 18 | Debug console over USB | `?` command returns help text (issue #26) |
-| 19--21 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 19 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 20--22 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
