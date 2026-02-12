@@ -53,6 +53,24 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
+### USB buffer memory
+
+The streaming test submits many large USB transfers concurrently. Linux
+limits per-device USB buffer memory to 16 MB by default, which is not
+enough and will cause `LIBUSB_ERROR_NO_MEM` failures. Raise (or
+disable) the limit before running the tests:
+
+```
+sudo sh -c 'echo 0 > /sys/module/usbcore/parameters/usbfs_memory_mb'
+```
+
+To make this persistent across reboots, create
+`/etc/modprobe.d/usbcore.conf`:
+
+```
+options usbcore usbfs_memory_mb=0
+```
+
 This builds `fx3_cmd` (vendor command exerciser) and `rx888_stream`
 (from the [rx888_tools](https://github.com/ringof/rx888_tools) submodule),
 uploads the firmware, and runs an automated test suite.
