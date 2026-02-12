@@ -214,23 +214,25 @@ CyFxSlFifoApplnUSBSetupCB (
 					}
 					break;
 			case SETARGFX3:
-				{
-					int rc = -1;
 					CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					switch(wIndex) {
 						case DAT31_ATT:
 							rx888r2_SetAttenuator(wValue);
-							rc = 0;
+							vendorRqtCnt++;
+							isHandled = CyTrue;
 							break;
 						case AD8340_VGA:
 							rx888r2_SetGain(wValue);
-							rc = 0;
+							vendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
+						default:
+							/* Data phase already ACKed; stall status to
+							   signal the unrecognized wIndex to the host. */
+							CyU3PUsbStall(0, CyTrue, CyFalse);
+							isHandled = CyTrue;
 							break;
 					}
-					vendorRqtCnt++;
-					if (rc == 0)
-						isHandled = CyTrue;
-				}
 				break;
 
     	 	case STARTFX3:
