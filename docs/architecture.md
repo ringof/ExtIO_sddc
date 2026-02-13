@@ -496,6 +496,7 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 4 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
+| 0xB3 | GETSTATS | IN | 0 | 0 | 19 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), EP underruns (4) |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | 1 B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255) |
 | 0xBA | READINFODEBUG | IN | char | -- | 100 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 
@@ -768,20 +769,20 @@ every vendor command through `fx3_cmd`.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `SDDC_FX3/StartUp.c` | 85 | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | 284 | Application thread, hardware detection, main loop |
-| `SDDC_FX3/USBHandler.c` | 423 | USB setup callback (all vendor commands), USB init |
+| `SDDC_FX3/StartUp.c` | 82 | ARM entry point, clock config, I/O matrix, RTOS start |
+| `SDDC_FX3/RunApplication.c` | 262 | Application thread, hardware detection, main loop |
+| `SDDC_FX3/USBHandler.c` | 449 | USB setup callback (all vendor commands), USB init |
 | `SDDC_FX3/StartStopApplication.c` | 163 | GPIF/DMA/endpoint configuration, start/stop streaming |
-| `SDDC_FX3/DebugConsole.c` | 330 | UART init, debug buffer, console parser, USB debug |
-| `SDDC_FX3/USBDescriptor.c` | 300 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
-| `SDDC_FX3/Support.c` | 193 | Error code lookup, status checking, error LED blink |
+| `SDDC_FX3/DebugConsole.c` | 341 | UART init, debug buffer, console parser, USB debug |
+| `SDDC_FX3/USBDescriptor.c` | 299 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
+| `SDDC_FX3/Support.c` | 185 | Error code lookup, status checking, error LED blink |
 | `SDDC_FX3/i2cmodule.c` | 90 | I2C master init and transfer functions |
-| `SDDC_FX3/driver/Si5351.c` | 256 | Si5351 clock synthesizer: PLL setup, frequency calculation |
-| `SDDC_FX3/radio/rx888r2.c` | 99 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
-| `SDDC_FX3/Application.h` | 101 | Central header: includes, defines, prototypes |
-| `SDDC_FX3/protocol.h` | 73 | USB protocol: vendor request codes, GPIO enums, arguments |
-| `SDDC_FX3/SDDC_GPIF.h` | 174 | Generated GPIF II state machine configuration |
+| `SDDC_FX3/driver/Si5351.c` | 283 | Si5351 clock synthesizer: PLL setup, frequency calculation |
+| `SDDC_FX3/radio/rx888r2.c` | 88 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
+| `SDDC_FX3/Application.h` | 94 | Central header: includes, defines, prototypes |
+| `SDDC_FX3/protocol.h` | 81 | USB protocol: vendor request codes, GPIO enums, arguments |
+| `SDDC_FX3/SDDC_GPIF.h` | 173 | Generated GPIF II state machine configuration |
 | `SDDC_FX3/cyfxtx.c` | -- | Cypress SDK memory and TX runtime support |
 | `SDDC_FX3/cyfx_gcc_startup.S` | -- | ARM GCC startup assembly (vectors, stack init) |
-| `tests/fx3_cmd.c` | 456 | Host-side vendor command exerciser (libusb) |
-| `tests/fw_test.sh` | ~300 | TAP test harness for automated firmware testing |
+| `tests/fx3_cmd.c` | 1104 | Host-side vendor command exerciser and test harness (libusb) |
+| `tests/fw_test.sh` | 539 | TAP test harness for automated firmware testing |
