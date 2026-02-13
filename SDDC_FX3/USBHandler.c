@@ -33,6 +33,7 @@ extern volatile uint16_t glDebTxtLen;
 extern uint8_t glBufDebug[MAXLEN_D_USB];
 extern uint32_t glCounter[20];
 extern uint16_t glLastPibArg;
+extern uint32_t glDMACount;
 
 
 
