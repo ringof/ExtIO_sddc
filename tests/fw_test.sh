@@ -173,10 +173,11 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
-#      + 2 GETSTATS (readout + I2C) + 1 PIB overflow + 1 GETSTATS PIB
+#      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL
+#      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=25
+PLANNED=26
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -452,7 +453,19 @@ output=$(run_cmd stats_i2c) && {
 }
 
 # ==================================================================
-# 18. PIB error detection (issue #10)
+# 18. GETSTATS PLL lock status
+# ==================================================================
+# After test 4 set the ADC clock, the Si5351 PLL should be locked.
+# Verify SYS_INIT is clear and PLL A is locked via GETSTATS byte [19].
+
+output=$(run_cmd stats_pll) && {
+    tap_ok "stats_pll: Si5351 PLL locked, SYS_INIT clear"
+} || {
+    tap_fail "stats_pll: PLL not locked or SYS_INIT set" "$output"
+}
+
+# ==================================================================
+# 19. PIB error detection (issue #10)
 # ==================================================================
 # Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
 # Verify the debug console reports "PIB error".
@@ -466,7 +479,7 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 19. GETSTATS PIB error counter
+# 20. GETSTATS PIB error counter
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
@@ -477,7 +490,7 @@ output=$(run_cmd stats_pib) && {
 }
 
 # ==================================================================
-# 20. Streaming test via rx888_stream
+# 21. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
