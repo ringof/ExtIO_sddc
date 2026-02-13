@@ -965,6 +965,277 @@ static int do_test_stats_pll(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* GPIF wedge / stop-start tests                                      */
+/* ------------------------------------------------------------------ */
+
+/* EP1 IN (bulk consumer endpoint) */
+#define EP1_IN  0x81
+
+/* Try to read some bulk data from EP1 IN.  Returns the number of bytes
+ * actually received, or a negative libusb error code.  A timeout (no
+ * data within timeout_ms) returns 0. */
+static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
+{
+    uint8_t *buf = malloc(len);
+    if (!buf) return LIBUSB_ERROR_NO_MEM;
+    int transferred = 0;
+    int r = libusb_bulk_transfer(h, EP1_IN, buf, len, &transferred, timeout_ms);
+    free(buf);
+    if (r == LIBUSB_ERROR_TIMEOUT) return transferred;  /* partial is OK */
+    if (r < 0) return r;
+    return transferred;
+}
+
+/* Stop GPIF then verify the SM state via GETSTATS.
+ *
+ * Sequences: STARTADC(32 MHz) -> STARTFX3 -> brief stream -> STOPFX3
+ * -> GETSTATS.  The GPIF state should be 0 (RESET) after a proper
+ * GpifDisable, or 1 (IDLE) if the SM stopped gracefully.
+ *
+ * On the current (broken) firmware the SM is still running or stuck
+ * in a BUSY/WAIT state after STOPFX3 — this test detects that. */
+static int do_test_stop_gpif_state(libusb_device_handle *h)
+{
+    int r;
+
+    /* 1. Configure ADC clock */
+    r = cmd_u32(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL stop_gpif_state: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Start streaming */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL stop_gpif_state: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 3. Read a little data to let GPIF run */
+    bulk_read_some(h, 16384, 500);
+
+    /* 4. Stop */
+    r = cmd_u32(h, STOPFX3, 0);
+    if (r < 0) {
+        printf("FAIL stop_gpif_state: STOPFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    usleep(50000);  /* let SM settle */
+
+    /* 5. Read GPIF state */
+    struct fx3_stats s;
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL stop_gpif_state: GETSTATS: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* State 0 = RESET (after GpifDisable), 1 = IDLE (graceful stop) */
+    if (s.gpif_state == 0 || s.gpif_state == 1) {
+        printf("PASS stop_gpif_state: GPIF state=%u after STOP (SM properly stopped)\n",
+               s.gpif_state);
+        return 0;
+    }
+    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 0 or 1, SM still running)\n",
+           s.gpif_state);
+    return 1;
+}
+
+/* Repeatedly cycle STOP+START and verify streaming resumes each time.
+ *
+ * Sequences N iterations of:
+ *   STARTFX3 -> read bulk data (verify flowing) -> STOPFX3
+ * with a single STARTADC before the loop.
+ *
+ * On the current firmware this wedges on the 2nd or 3rd cycle because
+ * STARTFX3 doesn't restart the SM after STOPFX3 leaves it stuck. */
+static int do_test_stop_start_cycle(libusb_device_handle *h)
+{
+    int cycles = 5;
+    int r;
+
+    /* Configure ADC clock once */
+    r = cmd_u32(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL stop_start_cycle: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    for (int i = 0; i < cycles; i++) {
+        /* Start streaming */
+        r = cmd_u32(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_start_cycle: STARTFX3 on cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Read bulk data — should get at least 1 KB within 2 seconds */
+        int got = bulk_read_some(h, 16384, 2000);
+        if (got < 1024) {
+            printf("FAIL stop_start_cycle: cycle %d/%d: only %d bytes "
+                   "(expected >= 1024, stream not flowing)\n",
+                   i + 1, cycles, got < 0 ? 0 : got);
+            /* Try to clean up */
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        /* Stop streaming */
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_start_cycle: STOPFX3 on cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Brief pause between cycles */
+        usleep(100000);
+    }
+
+    printf("PASS stop_start_cycle: %d stop/start cycles completed, data flowing each time\n",
+           cycles);
+    return 0;
+}
+
+/* Verify STARTFX3 is rejected when the ADC clock is off.
+ *
+ * Sequences: STARTADC(0) -> STARTFX3 -> check result.
+ * With the PLL pre-flight check, STARTFX3 should fail (STALL or
+ * return isHandled=false).  Without it, START succeeds and the GPIF
+ * runs on stale data.
+ *
+ * NOTE: After this test the ADC clock is off.  The test restores
+ * clock at the end so subsequent tests can run. */
+static int do_test_pll_preflight(libusb_device_handle *h)
+{
+    int r;
+
+    /* 1. Turn off ADC clock */
+    r = cmd_u32(h, STARTADC, 0);
+    if (r < 0) {
+        printf("FAIL pll_preflight: STARTADC(0): %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Brief pause for PLL to drop lock */
+    usleep(200000);
+
+    /* 3. Attempt STARTFX3 — should be rejected if PLL pre-flight is implemented */
+    r = cmd_u32(h, STARTFX3, 0);
+
+    /* Accepted STALL as rejection */
+    int start_rejected = (r == LIBUSB_ERROR_PIPE);
+
+    /* Also check: if it "succeeded", try to read data.  If no data flows,
+     * the firmware may have silently rejected it. */
+    if (r == 0) {
+        int got = bulk_read_some(h, 4096, 1000);
+        /* If we get data despite clock being off, that's stale garbage —
+         * the pre-flight check is missing.  Clean up. */
+        cmd_u32(h, STOPFX3, 0);
+        if (got <= 0) {
+            /* No data: firmware may have quietly rejected (acceptable) */
+            start_rejected = 1;
+        }
+    }
+
+    /* 4. Restore clock for subsequent tests */
+    cmd_u32(h, STARTADC, 32000000);
+
+    if (start_rejected) {
+        printf("PASS pll_preflight: STARTFX3 correctly rejected with PLL unlocked\n");
+        return 0;
+    }
+    printf("FAIL pll_preflight: STARTFX3 accepted with ADC clock off (no PLL pre-flight check)\n");
+    return 1;
+}
+
+/* Test recovery after a deliberate DMA backpressure wedge.
+ *
+ * Sequences:
+ *   1. STARTADC(64 MHz) + STARTFX3
+ *   2. Do NOT read EP1 — let DMA buffers fill and GPIF enter BUSY/WAIT
+ *   3. Wait 2 seconds (longer than the 300ms watchdog threshold)
+ *   4. STOPFX3 + STARTFX3
+ *   5. Read EP1 — data should flow if recovery worked
+ *   6. Check GETSTATS for recovery counter (glCounter[1])
+ *
+ * On current firmware: step 5 times out (device is wedged).
+ * After Phase 2: step 5 succeeds (STOP+START recovers).
+ * After Phase 4: the watchdog may auto-recover in step 3, and
+ *   glCounter[1] > 0 in GETSTATS. */
+static int do_test_wedge_recovery(libusb_device_handle *h)
+{
+    int r;
+
+    /* Enable debug mode to see recovery messages */
+    uint8_t info[4] = {0};
+    ctrl_read(h, TESTFX3, 1, 0, info, 4);
+
+    /* 1. Configure ADC at 64 MHz */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL wedge_recovery: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Start streaming */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL wedge_recovery: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 3. Do NOT read EP1 — wait for DMA to back up and GPIF to wedge.
+     *    At 64 MS/s, 4 x 16 KB buffers fill in < 1 ms.
+     *    Wait 2 seconds to allow watchdog to fire (if implemented). */
+    usleep(2000000);
+
+    /* 4. Stop */
+    r = cmd_u32(h, STOPFX3, 0);
+    if (r < 0) {
+        printf("FAIL wedge_recovery: STOPFX3 after wedge: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    usleep(100000);
+
+    /* 5. Restart */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL wedge_recovery: STARTFX3 after stop: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 6. Read bulk data — should flow if recovery worked */
+    int got = bulk_read_some(h, 16384, 2000);
+
+    /* 7. Clean up */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(100000);
+
+    /* 8. Check GETSTATS for recovery counter */
+    struct fx3_stats s;
+    read_stats(h, &s);
+
+    if (got < 1024) {
+        printf("FAIL wedge_recovery: only %d bytes after recovery "
+               "(expected >= 1024, device still wedged)\n",
+               got < 0 ? 0 : got);
+        printf("#   GPIF state=%u, ep_underruns=%u\n",
+               s.gpif_state, s.ep_underruns);
+        return 1;
+    }
+
+    printf("PASS wedge_recovery: %d bytes after STOP+START recovery", got);
+    if (s.ep_underruns > 0)
+        printf(", watchdog_recoveries=%u", s.ep_underruns);
+    printf("\n");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -998,6 +1269,10 @@ static void usage(const char *prog)
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
         "  stats_pll                    Verify Si5351 PLL lock status\n"
+        "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
+        "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
+        "  pll_preflight                Verify STARTFX3 rejected without clock\n"
+        "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -1117,6 +1392,18 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stats_pll") == 0) {
         rc = do_test_stats_pll(h);
+
+    } else if (strcmp(cmd, "stop_gpif_state") == 0) {
+        rc = do_test_stop_gpif_state(h);
+
+    } else if (strcmp(cmd, "stop_start_cycle") == 0) {
+        rc = do_test_stop_start_cycle(h);
+
+    } else if (strcmp(cmd, "pll_preflight") == 0) {
+        rc = do_test_pll_preflight(h);
+
+    } else if (strcmp(cmd, "wedge_recovery") == 0) {
+        rc = do_test_wedge_recovery(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);

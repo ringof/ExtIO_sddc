@@ -174,10 +174,11 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
 #      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL
+#      + 4 GPIF wedge/recovery tests
 #      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=26
+PLANNED=30
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -465,7 +466,56 @@ output=$(run_cmd stats_pll) && {
 }
 
 # ==================================================================
-# 19. PIB error detection (issue #10)
+# 19. GPIF stop state verification
+# ==================================================================
+# After STOPFX3, verify the GPIF SM is actually stopped (state 0 or 1).
+# Before the fix: SM stays running or stuck in BUSY/WAIT.
+
+output=$(run_cmd stop_gpif_state) && {
+    tap_ok "stop_gpif_state: GPIF SM properly stopped after STOPFX3"
+} || {
+    tap_fail "stop_gpif_state: GPIF SM still running after STOPFX3" "$output"
+}
+
+# ==================================================================
+# 20. Stop/start cycle test
+# ==================================================================
+# Cycle STOP+START 5 times, verifying data flows each cycle.
+# Before the fix: wedges on 2nd or 3rd cycle.
+
+output=$(run_cmd stop_start_cycle) && {
+    tap_ok "stop_start_cycle: 5 stop/start cycles completed"
+} || {
+    tap_fail "stop_start_cycle: stream failed during cycling" "$output"
+}
+
+# ==================================================================
+# 21. PLL pre-flight check
+# ==================================================================
+# Verify STARTFX3 is rejected when ADC clock is off.
+# Before the fix: START succeeds and GPIF reads garbage.
+
+output=$(run_cmd pll_preflight) && {
+    tap_ok "pll_preflight: STARTFX3 rejected without ADC clock"
+} || {
+    tap_fail "pll_preflight: STARTFX3 accepted without ADC clock" "$output"
+}
+
+# ==================================================================
+# 22. Wedge recovery test
+# ==================================================================
+# Provoke DMA backpressure (start streaming, don't read EP1),
+# then STOP+START and verify recovery.
+# Before the fix: device is wedged, no recovery.
+
+output=$(run_cmd wedge_recovery) && {
+    tap_ok "wedge_recovery: recovered from DMA backpressure wedge"
+} || {
+    tap_fail "wedge_recovery: device wedged after backpressure" "$output"
+}
+
+# ==================================================================
+# 23. PIB error detection (issue #10)
 # ==================================================================
 # Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
 # Verify the debug console reports "PIB error".
@@ -479,7 +529,7 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 20. GETSTATS PIB error counter
+# 24. GETSTATS PIB error counter
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
@@ -490,7 +540,7 @@ output=$(run_cmd stats_pib) && {
 }
 
 # ==================================================================
-# 21. Streaming test via rx888_stream
+# 25. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
