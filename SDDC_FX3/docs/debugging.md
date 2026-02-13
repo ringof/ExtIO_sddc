@@ -310,6 +310,52 @@ cd tests && make
 - Typed characters are sent in `wValue`; Enter sends CR
 - Ctrl-C to quit
 
+##### Local Command Escape (`!`)
+
+While in the debug console, typing `!` switches to **local command
+mode**.  This lets you issue host-side `fx3_cmd` subcommands without
+leaving the debug session or releasing the USB interface.
+
+```
+debug: type commands + Enter for FX3, '!' for local commands, Ctrl-C to quit
+TESTFX3
+?
+Enter commands:
+threads, stack, gpif, reset;
+DMAcnt = 0
+
+!stats
+fx3> stats
+PASS stats: dma=0 gpif=0 pib=0 last_pib=0x0000 i2c=0 underrun=0 pll=0x00
+
+!stop_gpif_state
+fx3> stop_gpif_state
+PASS stop_gpif_state: GPIF state=0 after STOP (SM properly stopped)
+
+gpif
+GPIF State = 0
+```
+
+**Behavior:**
+
+| Key | In local mode | In normal mode |
+|-----|---------------|----------------|
+| `!` | -- | Enter local command mode, show `fx3> ` prompt |
+| Printable chars | Echoed locally, buffered | Sent to FX3 via `READINFODEBUG wValue` |
+| Enter | Dispatch buffered command to `do_*()` handler | Send CR to FX3 (triggers `ParseCommand`) |
+| Backspace | Erase last buffered char | Sent to FX3 |
+| Ctrl-C / Escape | Cancel local command, return to normal | Ctrl-C quits the debug session |
+
+All subcommands from the `fx3_cmd` command line are available via `!`,
+including test commands (`!stop_gpif_state`, `!wedge_recovery`, etc.)
+and commands with arguments (`!adc 64000000`, `!att 15`, `!i2cr 0xC0 0 1`).
+Type `!help` for the full list.
+
+**Note:** Debug output polling continues between keystrokes in local
+mode, but is paused during command execution (some test commands may
+take several seconds).  This is intentional — the user explicitly
+initiated the command and is waiting for its result.
+
 #### Automated Test Commands
 
 These are non-interactive subcommands for use in scripts and CI.  Each

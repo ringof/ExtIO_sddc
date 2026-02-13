@@ -311,10 +311,181 @@ static int do_raw(libusb_device_handle *h, uint8_t code)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Local command dispatch for the debug console ('!' escape)          */
+/* ------------------------------------------------------------------ */
+
+/* Forward declarations for do_* functions defined later in this file. */
+static int do_stats(libusb_device_handle *h);
+static int do_ep0_overflow(libusb_device_handle *h);
+static int do_test_oob_brequest(libusb_device_handle *h);
+static int do_test_oob_setarg(libusb_device_handle *h);
+static int do_test_console_fill(libusb_device_handle *h);
+static int do_test_debug_race(libusb_device_handle *h);
+static int do_test_debug_poll(libusb_device_handle *h);
+static int do_test_pib_overflow(libusb_device_handle *h);
+static int do_test_stack_check(libusb_device_handle *h);
+static int do_test_stats_i2c(libusb_device_handle *h);
+static int do_test_stats_pib(libusb_device_handle *h);
+static int do_test_stats_pll(libusb_device_handle *h);
+static int do_test_stop_gpif_state(libusb_device_handle *h);
+static int do_test_stop_start_cycle(libusb_device_handle *h);
+static int do_test_pll_preflight(libusb_device_handle *h);
+static int do_test_wedge_recovery(libusb_device_handle *h);
+
+/* No-arg command table entry */
+struct local_cmd_entry {
+    const char *name;
+    int (*func)(libusb_device_handle *);
+};
+
+static const struct local_cmd_entry local_cmds_noarg[] = {
+    {"test",             do_test},
+    {"start",            do_start},
+    {"stop",             do_stop},
+    {"stats",            do_stats},
+    {"ep0_overflow",     do_ep0_overflow},
+    {"oob_brequest",     do_test_oob_brequest},
+    {"oob_setarg",       do_test_oob_setarg},
+    {"console_fill",     do_test_console_fill},
+    {"debug_race",       do_test_debug_race},
+    {"debug_poll",       do_test_debug_poll},
+    {"pib_overflow",     do_test_pib_overflow},
+    {"stack_check",      do_test_stack_check},
+    {"stats_i2c",        do_test_stats_i2c},
+    {"stats_pib",        do_test_stats_pib},
+    {"stats_pll",        do_test_stats_pll},
+    {"stop_gpif_state",  do_test_stop_gpif_state},
+    {"stop_start_cycle", do_test_stop_start_cycle},
+    {"pll_preflight",    do_test_pll_preflight},
+    {"wedge_recovery",   do_test_wedge_recovery},
+    {"reset",            do_reset},
+    {NULL, NULL}
+};
+
+static void print_local_help(void)
+{
+    printf("Local commands (prefix with '!'):\n"
+           "  help / ?                      This help\n"
+           "  test                          Read device info\n"
+           "  start / stop                  Start/stop GPIF streaming\n"
+           "  adc <freq>                    Set ADC clock frequency\n"
+           "  att <0-63>                    Set DAT-31 attenuator\n"
+           "  vga <0-255>                   Set AD8370 VGA gain\n"
+           "  gpio <bits>                   Set GPIO word\n"
+           "  stats                         Read GETSTATS counters\n"
+           "  stats_i2c / stats_pib / stats_pll   Counter tests\n"
+           "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
+           "  stop_start_cycle              Cycle STOP+START N times\n"
+           "  pll_preflight                 Verify START rejected without clock\n"
+           "  wedge_recovery                Provoke DMA wedge, test recovery\n"
+           "  pib_overflow                  Provoke + detect PIB error\n"
+           "  stack_check                   Query stack watermark\n"
+           "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
+           "  i2cw <addr> <reg> <byte>...   I2C write (hex)\n"
+           "  raw <code>                    Send raw vendor request (hex)\n"
+           "  reset                         Reboot FX3 to bootloader\n");
+}
+
+/* Parse and dispatch a local command line (without the '!' prefix). */
+static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
+{
+    /* Skip leading whitespace */
+    while (*line == ' ') line++;
+    if (*line == '\0') return 0;
+
+    /* Split into command and args */
+    char cmd[64] = {0};
+    const char *args = NULL;
+    const char *sp = strchr(line, ' ');
+    if (sp) {
+        int len = (int)(sp - line);
+        if (len >= (int)sizeof(cmd)) len = (int)sizeof(cmd) - 1;
+        memcpy(cmd, line, len);
+        args = sp + 1;
+        while (*args == ' ') args++;
+        if (*args == '\0') args = NULL;
+    } else {
+        strncpy(cmd, line, sizeof(cmd) - 1);
+    }
+
+    /* Help */
+    if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+        print_local_help();
+        return 0;
+    }
+
+    /* No-arg commands */
+    for (const struct local_cmd_entry *e = local_cmds_noarg; e->name; e++) {
+        if (strcmp(cmd, e->name) == 0)
+            return e->func(h);
+    }
+
+    /* Commands with arguments */
+    if (strcmp(cmd, "adc") == 0) {
+        if (!args) { printf("usage: adc <freq_hz>\n"); return 1; }
+        return do_adc(h, (uint32_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "att") == 0) {
+        if (!args) { printf("usage: att <0-63>\n"); return 1; }
+        return do_att(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "vga") == 0) {
+        if (!args) { printf("usage: vga <0-255>\n"); return 1; }
+        return do_vga(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "gpio") == 0) {
+        if (!args) { printf("usage: gpio <bits>\n"); return 1; }
+        return do_gpio(h, (uint32_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "raw") == 0) {
+        if (!args) { printf("usage: raw <code>\n"); return 1; }
+        return do_raw(h, (uint8_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "i2cr") == 0) {
+        if (!args) { printf("usage: i2cr <addr> <reg> <len>\n"); return 1; }
+        unsigned long a, rg, l;
+        if (sscanf(args, "%li %li %li", &a, &rg, &l) != 3) {
+            printf("usage: i2cr <addr> <reg> <len>\n");
+            return 1;
+        }
+        return do_i2cr(h, (uint16_t)a, (uint16_t)rg, (uint16_t)l);
+    }
+    if (strcmp(cmd, "i2cw") == 0) {
+        if (!args) { printf("usage: i2cw <addr> <reg> <byte>...\n"); return 1; }
+        char *p = (char *)args;
+        char *end;
+        unsigned long a = strtoul(p, &end, 0);
+        if (end == p) { printf("usage: i2cw <addr> <reg> <byte>...\n"); return 1; }
+        p = end;
+        unsigned long rg = strtoul(p, &end, 0);
+        if (end == p) { printf("usage: i2cw <addr> <reg> <byte>...\n"); return 1; }
+        p = end;
+        uint8_t data[64];
+        int ndata = 0;
+        while (ndata < (int)sizeof(data)) {
+            unsigned long b = strtoul(p, &end, 0);
+            if (end == p) break;
+            data[ndata++] = (uint8_t)b;
+            p = end;
+        }
+        if (ndata == 0) { printf("usage: i2cw <addr> <reg> <byte>...\n"); return 1; }
+        return do_i2cw(h, (uint16_t)a, (uint16_t)rg, data, (uint16_t)ndata);
+    }
+
+    printf("unknown local command: '%s' (type !help for list)\n", cmd);
+    return 1;
+}
+
 /* Interactive debug console over USB.
  * First sends TESTFX3 with wValue=1 to enable debug mode, then polls
  * READINFODEBUG for output.  Typed characters are sent in wValue;
- * CR triggers command execution on the FX3 side.  Ctrl-C exits. */
+ * CR triggers command execution on the FX3 side.  Ctrl-C exits.
+ *
+ * Local command escape: typing '!' switches to local command mode.
+ * Characters are buffered locally and dispatched to the corresponding
+ * do_*() function on Enter, using the same USB handle.  Debug output
+ * polling continues between keystrokes.  See dispatch_local_cmd(). */
 static int do_debug(libusb_device_handle *h)
 {
     /* Enable debug mode via TESTFX3 wValue=1 */
@@ -326,7 +497,7 @@ static int do_debug(libusb_device_handle *h)
     }
     printf("debug: enabled (hwconfig=0x%02X fw=%d.%d)\n",
            info[0], info[1], info[2]);
-    printf("debug: polling for output, type commands + Enter (Ctrl-C to quit)\n");
+    printf("debug: type commands + Enter for FX3, '!' for local commands, Ctrl-C to quit\n");
     fflush(stdout);
 
     /* Put stdin in non-blocking mode for character-at-a-time input */
@@ -338,14 +509,55 @@ static int do_debug(libusb_device_handle *h)
     newt.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
+    /* Local command mode state */
+    int local_mode = 0;
+    char local_buf[128];
+    int local_len = 0;
+
     uint8_t buf[64];
     for (;;) {
         /* Check for typed character */
         uint16_t send_char = 0;
         char ch;
         if (read(STDIN_FILENO, &ch, 1) == 1) {
-            if (ch == '\n') ch = '\r';
-            send_char = (uint8_t)ch;
+            if (!local_mode && ch == '!') {
+                /* Enter local command mode */
+                local_mode = 1;
+                local_len = 0;
+                printf("\nfx3> ");
+                fflush(stdout);
+            } else if (local_mode) {
+                if (ch == '\n' || ch == '\r') {
+                    local_buf[local_len] = '\0';
+                    printf("\n");
+                    fflush(stdout);
+                    if (local_len > 0)
+                        dispatch_local_cmd(h, local_buf);
+                    fflush(stdout);
+                    local_mode = 0;
+                } else if (ch == 0x7f || ch == 0x08) {
+                    /* Backspace / Delete */
+                    if (local_len > 0) {
+                        local_len--;
+                        printf("\b \b");
+                        fflush(stdout);
+                    }
+                } else if (ch == 0x03 || ch == 0x1b) {
+                    /* Ctrl-C or Escape — cancel local command */
+                    printf(" (cancelled)\n");
+                    fflush(stdout);
+                    local_mode = 0;
+                } else if (local_len < (int)sizeof(local_buf) - 1) {
+                    local_buf[local_len++] = ch;
+                    putchar(ch);
+                    fflush(stdout);
+                }
+                /* Don't send to device in local mode */
+            } else {
+                /* Normal mode — send character to FX3 console */
+                if (ch == '\n') ch = '\r';
+                send_char = (uint8_t)ch;
+            }
         }
 
         /* Poll READINFODEBUG: wValue carries the typed char (0 = none) */
