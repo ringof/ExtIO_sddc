@@ -20,6 +20,8 @@
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
 extern void StopApplication(void);
+extern CyU3PReturnStatus_t StartGPIF(void);
+extern const CyU3PGpifConfig_t CyFxGpifConfig;
 extern CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig);
 
 // Declare external data
@@ -275,7 +277,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
-						apiRetStatus = CyU3PGpifSMStart (0, 0);
+						apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
 						if (apiRetStatus == CY_U3P_SUCCESS)
 							isHandled = CyTrue;
 					}
@@ -286,6 +288,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
+					CyU3PGpifLoad(&CyFxGpifConfig);  /* reload descriptor so SM is in RESET (state 0) */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					isHandled = CyTrue;
