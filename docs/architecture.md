@@ -495,7 +495,7 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 | 0xAE | I2CWFX3 | OUT | I2C addr | reg addr | N B | Write N bytes to I2C device at wValue, register wIndex |
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 4 B | Warm-reset the FX3; device disconnects and returns to bootloader |
-| 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0 |
+| 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | 1 B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255) |
 | 0xBA | READINFODEBUG | IN | char | -- | 100 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 
@@ -606,8 +606,10 @@ When the host sends `STARTADC` with a target frequency:
 7. Reset PLL A
 8. Enable CLK0 output
 
-The firmware sleeps 1000 ms after programming the clock to allow the
-PLL to settle.
+Each I2C step checks the return status; if any step fails the command
+STALLs EP0 and the failure is logged via `DebugPrint`.  On success the
+firmware sleeps 1000 ms after programming the clock to allow the PLL
+to settle.  A frequency of 0 disables CLK0 output (single I2C write).
 
 ---
 

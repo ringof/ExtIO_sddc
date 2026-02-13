@@ -269,7 +269,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 20 tests (23 with streaming) in TAP format:
+Runs 22 tests (25 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -281,15 +281,17 @@ Runs 20 tests (23 with streaming) in TAP format:
 | 7--8 | VGA | Min (0) and max (255) |
 | 9 | Stop | Clean state |
 | 10--12 | Stale tuner commands | 0xB4, 0xB5, 0xB8 all STALL (R82xx removed) |
-| 13 | EP0 overflow | wLength > 64 STALLs (issue #6) |
-| 14 | OOB bRequest | bRequest=0xCC survives (issue #21) |
-| 15 | OOB SETARGFX3 wIndex | wIndex=0xFFFF survives (issue #20) |
-| 16 | Console buffer fill | 35-char input survives (issue #13) |
-| 17 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
-| 18 | Debug console over USB | `?` command returns help text (issue #26) |
-| 19 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 20 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 21--23 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 13 | I2C NACK | Read from absent address 0xC2 correctly fails |
+| 14 | ADC clock-off | STARTADC freq=0 exercises I2cTransferW1 path |
+| 15 | EP0 overflow | wLength > 64 STALLs (issue #6) |
+| 16 | OOB bRequest | bRequest=0xCC survives (issue #21) |
+| 17 | OOB SETARGFX3 wIndex | wIndex=0xFFFF survives (issue #20) |
+| 18 | Console buffer fill | 35-char input survives (issue #13) |
+| 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
+| 20 | Debug console over USB | `?` command returns help text (issue #26) |
+| 21 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 22 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
+| 23--25 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
@@ -297,7 +299,7 @@ Options:
 --firmware PATH        Firmware .img file (required)
 --stream-seconds N     Streaming duration (default: 5)
 --rx888-stream PATH    Path to rx888_stream binary
---skip-stream          Skip streaming tests (tests 19--21)
+--skip-stream          Skip streaming tests (tests 23--25)
 --sample-rate HZ       ADC sample rate (default: 32000000)
 ```
 
