@@ -17,27 +17,36 @@
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 
 // Declare external data
-extern CyU3PQueue EventAvailable;			  	// Used for threads communications
+extern CyU3PQueue glEventAvailable;			  	// Used for threads communications
 extern uint32_t glDMACount;
 extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 
-extern CyU3PThread ThreadHandle[APP_THREADS];		// Handles to my Application Threads
-extern void *StackPtr[APP_THREADS];				// Stack allocated to each thread
+extern CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Threads
+extern void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
 CyBool_t glDebugTxEnabled = CyFalse;	// Set true once I can output messages to the Console
 CyU3PDmaChannel glUARTtoCPU_Handle;		// Handle needed by Uart Callback routine
-char ConsoleInBuffer[32];				// Buffer for user Console Input
-uint32_t ConsoleInIndex;				// Index into ConsoleIn buffer
+char glConsoleInBuffer[32];				// Buffer for user Console Input
+uint32_t glConsoleInIndex;				// Index into ConsoleIn buffer
 uint32_t glCounter[20];					// Counters used to monitor GPIF
-uint32_t MAXCLOCKVALUE = 10;
-uint32_t ClockValue;	// Used to Set/Display GPIF clock
-uint8_t Toggle;
-extern uint32_t Qevent __attribute__ ((aligned (32)));
+uint32_t glMaxClockValue = 10;
+uint32_t glClockValue;	// Used to Set/Display GPIF clock
+uint8_t glToggle;
+extern uint32_t glQevent __attribute__ ((aligned (32)));
 
-CyBool_t flagdebug = false;
-volatile uint16_t debtxtlen = 0;
-uint8_t bufdebug[MAXLEN_D_USB];  // buffer debug string//
+CyBool_t glFlagDebug = false;
+volatile uint16_t glDebTxtLen = 0;
+uint8_t glBufDebug[MAXLEN_D_USB];  // buffer debug string//
+
+void ConsoleAccumulateChar(char ch)
+{
+	char lower = ch | 0x20;
+	if (glConsoleInIndex < sizeof(glConsoleInBuffer) - 1) {
+		glConsoleInBuffer[glConsoleInIndex++] = lower;
+		glConsoleInBuffer[glConsoleInIndex] = '\0';
+	}
+}
 
 // For Debug and education display the name of the Event
 const char* EventName[] = {
@@ -47,17 +56,17 @@ const char* EventName[] = {
 	    "OTG_SRP", "EP_UNDERRUN", "LINK_RECOVERY", "USB3_LINKFAIL", "SS_COMP_ENTRY", "SS_COMP_EXIT"
 };
 
-#ifdef TRACESERIAL 
+#ifdef TRACESERIAL
 // For Debug and display the name of the FX3Command
-const char* FX3CommandName[] = {  // start 0xAA
+const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
-"STARTADC", "0xB3", "TUNERINIT","TUNERTUNE","SETARGFX3","0xB7", "TUNERSTDBY","0xB9","READINFODEBUG"
+"STARTADC", "GETSTATS", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
-// For Debug and display the name of the FX3Command
-const char* SETARGFX3List[] = { 
-"0", "R82XX_ATTENUATOR","R82XX_VGA","R82XX_SIDEBAND","R82XX_HARMONIC","5","6","7","8","9",
-"DAT31_ATT","AD8340_VGA","PRESELECTOR","VHF_ATTENUATOR"
+// For Debug and display the name of the SETARGFX3 argument
+const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
+"0", "1","2","3","4","5","6","7","8","9",
+"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR"
 };
 #endif
 
@@ -66,13 +75,13 @@ void ParseCommand(void)
 	// User has entered a command, process it
     CyU3PReturnStatus_t Status = CY_U3P_SUCCESS;
 
-    if (!strcmp("", ConsoleInBuffer)||!strcmp("?", ConsoleInBuffer) )
+    if (!strcmp("", glConsoleInBuffer)||!strcmp("?", glConsoleInBuffer) )
     {
     	DebugPrint(4, "Enter commands:\r\n"
     			"threads, stack, gpif, reset;\r\n"
     			"DMAcnt = %x\r\n\r\n", glDMACount);
     }
-    else if (!strcmp("threads", ConsoleInBuffer))
+    else if (!strcmp("threads", glConsoleInBuffer))
 	{
     	DebugPrint(4, "threads:\r\n");
 		CyU3PThread *ThisThread, *NextThread;
@@ -89,35 +98,37 @@ void ParseCommand(void)
 		}
 		DebugPrint(4, "\r\n\r\n");
 	}
-    else if (!strcmp("stack", ConsoleInBuffer))
+    else if (!strcmp("stack", glConsoleInBuffer))
     {
 		char* ThreadName;
 		DebugPrint(4, "stack:\r\n");
-		// Note that StackSize is in bytes but RTOS fill pattern is a uint32
-		uint32_t* StackStartPtr = StackPtr[0];
+		// Stack grows downward from top of allocation.  Bottom retains
+		// the RTOS 0xEFEFEFEF fill pattern; scan upward to find the
+		// high-water mark where the fill ends.
+		uint32_t* StackStartPtr = glStackPtr[0];
 		uint32_t* DataPtr = StackStartPtr;
-		while (*DataPtr++ != 0xEFEFEFEF) ;
-		CyU3PThreadInfoGet(&ThreadHandle[0], &ThreadName, 0, 0, 0);
+		while (*DataPtr == 0xEFEFEFEF) DataPtr++;
+		CyU3PThreadInfoGet(&glThreadHandle[0], &ThreadName, 0, 0, 0);
 		ThreadName += 3;	// Skip numeric ID
 		DebugPrint(4, "Stack free in %s is %d/%d\r\n\r\n", ThreadName,
-				FIFO_THREAD_STACK - ((DataPtr - StackStartPtr)<<2), FIFO_THREAD_STACK);
+				(DataPtr - StackStartPtr)<<2, FIFO_THREAD_STACK);
     }
-	else if (!strcmp("reset", ConsoleInBuffer))
+	else if (!strcmp("reset", glConsoleInBuffer))
 	{
 		DebugPrint(4, "reset:\r\n");
 		DebugPrint(4, "RESETTING CPU\r\n");
 		CyU3PThreadSleep(100);
 		CyU3PDeviceReset(CyFalse);
 	}
-	else if (!strcmp("gpif", ConsoleInBuffer))
+	else if (!strcmp("gpif", glConsoleInBuffer))
 	{
 		uint8_t State = 0xFF;
 		Status = CyU3PGpifGetSMState(&State);
 		CheckStatus("Get GPIF State ", Status);
 		DebugPrint(4, "GPIF State = %d\r\n\r\n", State);
 	}
-	else DebugPrint(4, "Input: '%s'\r\n\r\n", &ConsoleInBuffer[0]);
-	ConsoleInIndex = 0;
+	else DebugPrint(4, "Input: '%s'\r\n\r\n", &glConsoleInBuffer[0]);
+	glConsoleInIndex = 0;
 }
 
 uint8_t * CyU3PDebugIntToStr(uint8_t *convertedString, uint32_t num, uint8_t base);
@@ -231,7 +242,7 @@ static CyU3PReturnStatus_t MyDebugSNPrint (
 
 void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 {
-	if ((glIsApplnActive != CyTrue)||(flagdebug == false)) return;
+	if ((glIsApplnActive != CyTrue)||(glFlagDebug == false)) return;
 	va_list argp;
 	uint8_t buf[MAXLEN_D_USB];
 //		memset(buf,0,sizeof(buf)); // not necessary
@@ -240,14 +251,16 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 		va_start (argp, msg);
 		stat = MyDebugSNPrint (buf, &len, msg, argp);
 		va_end (argp);
-		if ( stat == CY_U3P_SUCCESS ) 
+		if ( stat == CY_U3P_SUCCESS )
 		{
-			if (debtxtlen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
-			if (debtxtlen+len < MAXLEN_D_USB) 
+			if (glDebTxtLen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
+			uint32_t intMask = CyU3PVicDisableAllInterrupts();
+			if (glDebTxtLen+len < MAXLEN_D_USB)
 			{
-				memcpy(&bufdebug[debtxtlen], buf, len);
-				debtxtlen = debtxtlen+len;		
-			}		
+				memcpy(&glBufDebug[glDebTxtLen], buf, len);
+				glDebTxtLen = glDebTxtLen+len;
+			}
+			CyU3PVicEnableInterrupts(intMask);
 		}
 }
 
@@ -266,14 +279,12 @@ void UartCallback(CyU3PUartEvt_t Event, CyU3PUartError_t Error)
 		// On CR, signal Main loop to process the command entered by the user.  Should NOT do this in a CallBack routine
 		if (InputChar == 0x0d)
 		{
-			Qevent = USER_COMMAND_AVAILABLE << 24;
-			CyU3PQueueSend(&EventAvailable, &Qevent, CYU3P_NO_WAIT);
+			glQevent = USER_COMMAND_AVAILABLE << 24;
+			CyU3PQueueSend(&glEventAvailable, &glQevent, CYU3P_NO_WAIT);
 		}
 		else
 		{
-			ConsoleInBuffer[ConsoleInIndex] = InputChar | 0x20;		// Save character as lower case (for compares)
-			if (ConsoleInIndex++ < sizeof(ConsoleInBuffer)) ConsoleInBuffer[ConsoleInIndex] = 0;
-			else ConsoleInIndex--;
+			ConsoleAccumulateChar(InputChar);
 		}
 		CyU3PDmaChannelDiscardBuffer(&glUARTtoCPU_Handle);
 		CyU3PUartRxSetBlockXfer(1);

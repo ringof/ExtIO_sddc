@@ -13,6 +13,8 @@
 #include "cyu3i2c.h"
 #include "i2cmodule.h"
 
+extern uint32_t glCounter[20];
+
 CyU3PReturnStatus_t
 I2cInit ()
 {
@@ -23,7 +25,7 @@ I2cInit ()
     status = CyU3PI2cInit ();
     if (status != CY_U3P_SUCCESS) return status;
 
-    /* Start the I2C master block. The bit rate is set at 100KHz.
+    /* Start the I2C master block. The bit rate is set at 400KHz.
      * The data transfer is done via DMA. */
     CyU3PMemSet ((uint8_t *)&i2cConfig, 0, sizeof(i2cConfig));
     i2cConfig.bitRate    = I2C_BITRATE;
@@ -46,9 +48,6 @@ I2cTransfer (
         uint8_t   *buffer,
         CyBool_t  isRead)
 {
-
-//	DebugPrint(4, "\r\nI2cTransfer %d, %d, %d, %d, %d",
-//			byteAddress, devAddr, byteCount, *buffer, isRead);
 
     CyU3PI2cPreamble_t preamble;
     CyU3PReturnStatus_t status = CY_U3P_SUCCESS;
@@ -75,6 +74,8 @@ I2cTransfer (
 		preamble.ctrlMask  = 0x0000;
 		status = CyU3PI2cTransmitBytes (&preamble, buffer, byteCount, 0);
 	}
+    if (status != CY_U3P_SUCCESS)
+        glCounter[1]++;
     return status;
 }
 
@@ -85,5 +86,5 @@ CyU3PReturnStatus_t I2cTransferW1(  // Write one byte only
 {
 	uint8_t   byteCount = 1;
 	uint8_t   ldata = data;
-	return I2cTransfer (byteAddress, devAddr, byteCount, &ldata, false);
+	return I2cTransfer (byteAddress, devAddr, byteCount, &ldata, CyFalse);
 }

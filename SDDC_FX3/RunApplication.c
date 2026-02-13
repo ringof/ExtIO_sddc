@@ -11,9 +11,9 @@
  */
 #include "Application.h"
 
-#include "tuner_r82xx.h"
 #include "Si5351.h"
-#include "rd5815.h"
+
+#define R828D_I2C_ADDR		0x74
 
 #include "radio.h"
 
@@ -31,75 +31,51 @@ extern uint32_t glDMACount;
 
 // Global data owned by this module
 CyBool_t glIsApplnActive = CyFalse;     // Set true once device is enumerated
-CyU3PQueue EventAvailable;			  	// Used for thread communications
-uint32_t EventAvailableQueue[16] __attribute__ ((aligned (32)));// Queue for up to 16 uint32_t pointers
-uint32_t Qevent __attribute__ ((aligned (32)));
-CyU3PThread ThreadHandle[APP_THREADS];		// Handles to my Application Threads
-void *StackPtr[APP_THREADS];				// Stack allocated to each thread
+CyU3PQueue glEventAvailable;			  	// Used for thread communications
+uint32_t glEventAvailableQueue[16] __attribute__ ((aligned (32)));// Queue for up to 16 uint32_t pointers
+uint32_t glQevent __attribute__ ((aligned (32)));
+CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Threads
+void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
-uint8_t HWconfig = NORADIO;       // Hardware config type BBRF103
-uint16_t FWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
+uint8_t glHWconfig = NORADIO;       // Hardware config type BBRF103
+uint16_t glFWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
 
-CyU3PReturnStatus_t
-ConfGPIOsimpleout( uint8_t gpioid)
-{
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
-
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyTrue;
-	      gpioConfig.driveHighEn = CyTrue;
-	      gpioConfig.inputEn = CyFalse;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-
-	 return apiRetStatus;
-}
+/* GPIO_OUTPUT: push-pull output, GPIO_INPUT: floating input,
+ * GPIO_INPUT_PU: input with internal pull-up. */
+#define GPIO_OUTPUT    0
+#define GPIO_INPUT     1
+#define GPIO_INPUT_PU  2
 
 CyU3PReturnStatus_t
-ConfGPIOsimpleinput( uint8_t gpioid)
+ConfGPIOSimple(uint8_t gpioid, uint8_t mode)
 {
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
+	CyU3PReturnStatus_t status;
+	CyU3PGpioSimpleConfig_t gpioConfig;
 
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyFalse;
-	      gpioConfig.driveHighEn = CyFalse;
-	      gpioConfig.inputEn = CyTrue;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-	      /* Adding internal pull-up resistor to GPIO 53 */
-	      CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_NONE);
-	 return apiRetStatus;
+	status = CyU3PDeviceGpioOverride(gpioid, CyTrue);
+	CheckStatusSilent("CyU3PDeviceGpioOverride", status);
+
+	gpioConfig.outValue    = CyFalse;
+	gpioConfig.inputEn     = (mode != GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.driveLowEn  = (mode == GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.driveHighEn = (mode == GPIO_OUTPUT) ? CyTrue : CyFalse;
+	gpioConfig.intrMode    = CY_U3P_GPIO_NO_INTR;
+
+	status = CyU3PGpioSetSimpleConfig(gpioid, &gpioConfig);
+	CheckStatusSilent("CyU3PGpioSetSimpleConfig", status);
+
+	if (mode == GPIO_INPUT)
+		CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_NONE);
+	else if (mode == GPIO_INPUT_PU)
+		CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_WPU);
+
+	return status;
 }
 
-CyU3PReturnStatus_t
-ConfGPIOsimpleinputPU( uint8_t gpioid)
-{
-	 CyU3PReturnStatus_t apiRetStatus = CY_U3P_SUCCESS;
-	 CyU3PGpioSimpleConfig_t gpioConfig;
-
-	  apiRetStatus = CyU3PDeviceGpioOverride (gpioid, CyTrue);
-	  CheckStatusSilent("CyU3PDeviceGpioOverride", apiRetStatus);
-	    /* Configure GPIO gpioid as output */
-	      gpioConfig.outValue = CyFalse;
-	      gpioConfig.driveLowEn = CyFalse;
-	      gpioConfig.driveHighEn = CyFalse;
-	      gpioConfig.inputEn = CyTrue;
-	      gpioConfig.intrMode = CY_U3P_GPIO_NO_INTR;
-	      apiRetStatus = CyU3PGpioSetSimpleConfig(gpioid , &gpioConfig);
-	      CheckStatusSilent("CyU3PGpioSetSimpleConfig", apiRetStatus);
-	      CyU3PGpioSetIoMode(gpioid, CY_U3P_GPIO_IO_MODE_WPU);
-	 return apiRetStatus;
-}
+/* Legacy wrappers -- kept for existing call sites */
+CyU3PReturnStatus_t ConfGPIOsimpleout(uint8_t gpioid)   { return ConfGPIOSimple(gpioid, GPIO_OUTPUT); }
+CyU3PReturnStatus_t ConfGPIOsimpleinput(uint8_t gpioid)  { return ConfGPIOSimple(gpioid, GPIO_INPUT); }
+CyU3PReturnStatus_t ConfGPIOsimpleinputPU(uint8_t gpioid) { return ConfGPIOSimple(gpioid, GPIO_INPUT_PU); }
 
 void
 GpioInitClock()
@@ -132,7 +108,7 @@ void MsgParsing(uint32_t qevent)
 			DebugPrint(4, "\r\nVendor request = %x  %x  %x\r\n", (uint8_t)( qevent >> 16), (uint8_t) (qevent >> 8) , (uint8_t) qevent );
 			break;
 		case 2:
-			DebugPrint(4, "\r\nfree \r\n", (uint8_t) qevent );
+			DebugPrint(4, "\r\nPIB error 0x%x\r\n", (uint16_t) qevent);
 			break;
 		case USER_COMMAND_AVAILABLE:
 			ParseCommand();
@@ -148,118 +124,64 @@ void ApplicationThread ( uint32_t input)
 #endif
 	uint32_t nline;
 	CyBool_t measure;
-	CyBool_t measure2;
     CyU3PReturnStatus_t Status;
-    HWconfig = 0;
+    glHWconfig = 0;
 
     GpioInitClock();
 
 	DebugPrint(4, "Detect Hardware");
-    Status = I2cInit (); // initialize i2c on FX3014 must be ok.
+    Status = I2cInit ();
     if (Status != CY_U3P_SUCCESS)
     	DebugPrint(4, "I2cInit failed to initialize. Error code: %d.", Status);
 	else
 	{
-		Status = Si5351init();
+		Status = Si5351Init();
 		if (Status != CY_U3P_SUCCESS)
 		{
-			ConfGPIOsimpleinputPU(GPIO52);
-			ConfGPIOsimpleinputPU(GPIO53);
-			CyU3PGpioSimpleGetValue ( GPIO52, &measure); //measure if external pull down
-			if (measure) 
-			{
-				HWconfig = HF103;
-				DebugPrint(4, "Si5351init failed to initialize. HF103 detected.");
-			}
-			else
-			{
-				HWconfig = RXLUCY;
-				DebugPrint(4, "Si5351init failed to initialize. RXLUCY detected.");
-			}
+			DebugPrint(4, "Si5351Init failed to initialize. Error code: %d.", Status);
 		}
 		else
 		{
-			ConfGPIOsimpleinputPU(GPIO50);
-			ConfGPIOsimpleinputPU(GPIO45);
 			ConfGPIOsimpleinputPU(GPIO36);
 
-			si5351aSetFrequencyB(16000000);
+			Status = si5351aSetFrequencyB(16000000);
+			if (Status != CY_U3P_SUCCESS)
+				DebugPrint(4, "si5351aSetFrequencyB(16MHz) failed: %d.", Status);
 			uint8_t identity;
-			if (I2cTransfer(0, R820T_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
-			{
-				// check if BBRF103 or RX888 (RX666 ?)
-				CyU3PGpioSimpleGetValue ( GPIO50, &measure);
-				CyU3PGpioSimpleGetValue ( GPIO45, &measure2);
-
-				if(!measure) {
-					HWconfig = BBRF103;
-					DebugPrint(4, "R820T Detectedinitialize. BBRF103 detected.");
-				}
-				else if (!measure2)
-				{
-					HWconfig = RX888;
-					DebugPrint(4, "R820T Detectedinitialize. RX888 detected.");
-				}
-				else
-				{
-					HWconfig = NORADIO;
-				}
-			}
-			else if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
+			if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
 			{
 				CyU3PGpioSimpleGetValue ( GPIO36, &measure);
 
 				if (!measure)
 				{
-					HWconfig = RX888r2;
-					DebugPrint(4, "R828D Detectedinitialize. RX888r2 detected.");
+					glHWconfig = RX888r2;
+					DebugPrint(4, "R828D detected. RX888r2 detected.");
 				}
 				else
 				{
-					HWconfig = NORADIO;
+					glHWconfig = NORADIO;
+					DebugPrint(4, "R828D detected but GPIO36 sense failed.");
 				}
-			}
-			else if (I2cTransfer(0, RD5812_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
-			{
-				HWconfig = RX888r3;
-				DebugPrint(4, "RD5812 Detectedinitialize. RX888r3 detected.");
 			}
 			else
 			{
-				HWconfig = RX999;
-				DebugPrint(4, "No Tuner Detectedinitialize. RX999 detected.");
+				glHWconfig = NORADIO;
+				DebugPrint(4, "No R828D tuner detected.");
 			}
-			si5351aSetFrequencyB(0);
+			Status = si5351aSetFrequencyB(0);
+			if (Status != CY_U3P_SUCCESS)
+				DebugPrint(4, "si5351aSetFrequencyB(0) failed: %d.", Status);
 		}
 	}
-    DebugPrint(4, "HWconfig: %d.", HWconfig);
+    DebugPrint(4, "HWconfig: %d.", glHWconfig);
 
-	switch(HWconfig) {
-		case HF103:
-			hf103_GpioInitialize();
-			break;
-		case BBRF103:
-			bbrf103_GpioInitialize();
-			break;
-		case RX888:
-			rx888_GpioInitialize();
-			break;
-		case RX888r2:
-			rx888r2_GpioInitialize();
-			break;
-		case RX888r3:
-			rx888r3_GpioInitialize();
-			break;
-		case RX999:
-			rx999_GpioInitialize();
-			break;
-		case RXLUCY:
-			rxlucy_GpioInitialize();
-			break;
+	if (glHWconfig == RX888r2)
+	{
+		rx888r2_GpioInitialize();
 	}
 
     // Spin up the USB Connection
-	Status = InitializeUSB(HWconfig);
+	Status = InitializeUSB(glHWconfig);
 	CheckStatus("Initialize USB", Status);
 	if (Status == CY_U3P_SUCCESS)
 	    {
@@ -269,9 +191,9 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for USB CallBack Events every 100msec
 	    		CyU3PThreadSleep(100);
-				while( CyU3PQueueReceive(&EventAvailable, &Qevent, CYU3P_NO_WAIT)== 0)
+				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
-						MsgParsing(Qevent);
+						MsgParsing(glQevent);
 					}
 			}
 
@@ -279,18 +201,17 @@ void ApplicationThread ( uint32_t input)
 			DebugPrint(4, "\r\nMAIN now running forever: ");
 			while(1)
 			{
-				//for (Count = 0; Count<10; Count++)
 				{
 					// Check for User Commands (and other CallBack Events) every 100msec
 					CyU3PThreadSleep(100);
 					nline =0;
-					while( CyU3PQueueReceive(&EventAvailable, &Qevent, CYU3P_NO_WAIT)== 0)
+					while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
 						if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
-						MsgParsing(Qevent);
+						MsgParsing(glQevent);
 					}
 				}
-#ifndef _DEBUG_USB_  // #include "../Interface.h"  -> second count in serial debug
+#ifndef _DEBUG_USB_  // second count in serial debug
 				if (glDMACount > 7812)
 				{
 					glDMACount -= 7812;
@@ -316,16 +237,16 @@ void CyFxApplicationDefine (void) {
     CheckStatus("Initialize Debug Console", Status);
 
     // Create Queue used to transfer callback messages
-        Status = CyU3PQueueCreate(&EventAvailable, 1, &EventAvailableQueue, sizeof(EventAvailableQueue));
+        Status = CyU3PQueueCreate(&glEventAvailable, 1, &glEventAvailableQueue, sizeof(glEventAvailableQueue));
         CheckStatus("Create EventAvailableQueue", Status);
 
 
-    StackPtr[0] = CyU3PMemAlloc (FIFO_THREAD_STACK);
-    Status = CyU3PThreadCreate (&ThreadHandle[0],                  /* Slave FIFO app thread structure */
+    glStackPtr[0] = CyU3PMemAlloc (FIFO_THREAD_STACK);
+    Status = CyU3PThreadCreate (&glThreadHandle[0],                  /* Slave FIFO app thread structure */
                           "11:HF103_ADC2USB30",                     /* Thread ID and thread name */
                           ApplicationThread,                   /* Slave FIFO app thread entry function */
                           0,                                       /* No input parameter to thread */
-                          StackPtr[0],                                     /* Pointer to the allocated thread stack */
+                          glStackPtr[0],                                     /* Pointer to the allocated thread stack */
                           FIFO_THREAD_STACK,               /* App Thread stack size */
                           FIFO_THREAD_PRIORITY,            /* App Thread priority */
                           FIFO_THREAD_PRIORITY,            /* App Thread pre-emption threshold */

@@ -13,8 +13,8 @@
 
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
-extern uint32_t Qevent __attribute__ ((aligned (32)));
 uint32_t glDMACount;
+uint16_t glLastPibArg;
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -22,6 +22,7 @@ extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 
 // Declare external data
 extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
+extern uint32_t glCounter[20];
 
 // Global data owned by this module
 
@@ -29,25 +30,22 @@ extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
 void StartApplication(void);
 void StopApplication(void);
 
-const char* BusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
-char* CyFxGpifName = { "HF103.h" };
+const char* glBusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
+char* glCyFxGpifName = { "HF103.h" };
 
 CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U transfer. */
 
-/*
-void Pib_error_cb(CyU3PPibIntrType cbType, uint16_t cbArg) {
+extern CyU3PQueue glEventAvailable;
+
+void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
-	Qevent =( 1<<25 |  cbArg );
-	CyU3PQueueSend(&EventAvailable, &Qevent, CYU3P_NO_WAIT);
+		glCounter[0]++;
+		glLastPibArg = cbArg;
+		uint32_t evt = (2 << 24) | cbArg;
+		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
 	}
 }
-*/
-/*
-#define TH1_BUSY 7
-#define TH1_WAIT 8
-#define TH0_BUSY 5
-*/
 /* Callback funtion for the DMA event notification. */
 void DmaCallback (
         CyU3PDmaChannel   *chHandle, /* Handle to the DMA channel. */
@@ -67,7 +65,7 @@ void DmaCallback (
 CyU3PReturnStatus_t StartGPIF(void)
 {
 	CyU3PReturnStatus_t Status;
-	DebugPrint(4, "\r\nGPIF file %s", CyFxGpifName);
+	DebugPrint(4, "\r\nGPIF file %s", glCyFxGpifName);
 	Status = CyU3PGpifLoad(&CyFxGpifConfig);
 	CheckStatus("GpifLoad", Status);
 	Status = CyU3PGpifSMStart (0, 0); //START, ALPHA_START);
@@ -82,7 +80,7 @@ void StartApplication ( void ) {
     CyU3PReturnStatus_t Status = CY_U3P_SUCCESS;
     CyU3PUSBSpeed_t usbSpeed = CyU3PUsbGetSpeed();
     // Display the enumerated device bus speed
-    DebugPrint(4, "\r\n@StartApplication, running at %sSpeed", BusSpeed[usbSpeed]);
+    DebugPrint(4, "\r\n@StartApplication, running at %sSpeed", glBusSpeed[usbSpeed]);
 
     // Start GPIF clocks, they need to be running before we attach a DMA channel to GPIF
     pibClock.clkDiv = 2;
@@ -98,9 +96,11 @@ void StartApplication ( void ) {
     epCfg.burstLen = ENDPOINT_BURST_LENGTH;
     epCfg.streams = 0;
     epCfg.pcktSize = ENDPOINT_BURST_SIZE;
-    epCfg.isoPkts = 1;
+    epCfg.isoPkts = 0;   /* bulk endpoint — isoPkts is for ISO EPs only */
 
     glDMACount= 0;
+    glCounter[0] = glCounter[1] = glCounter[2] = 0;
+    glLastPibArg = 0;
     /* Consumer endpoint configuration */
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epCfg);
     CheckStatus("CyU3PSetEpConfig Consumer", Status);
@@ -127,7 +127,7 @@ void StartApplication ( void ) {
     CheckStatus("CyU3PDmaMultiChannelSetXfer", Status);
 
     /* callback to see if there is any overflow of data on the GPIF II side*/
-  //  CyU3PPibRegisterCallback(Pib_error_cb,CYU3P_PIB_INTR_ERROR);
+    CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 
 	// Load, configure and start the GPIF state machine
     Status = StartGPIF();
@@ -154,7 +154,7 @@ void StopApplication ( void )
 
     Status = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
     CheckStatus("FlushEndpoint", Status);
-    CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(&epConfig));
+    CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(epConfig));
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epConfig);
 	CheckStatus("SetEndpointConfig_Disable", Status);
     // OK, Application is now stopped

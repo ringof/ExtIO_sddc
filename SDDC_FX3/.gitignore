@@ -1,0 +1,6 @@
+# Build artifacts
+obj/
+*.elf
+*.img
+*.map
+elf2img

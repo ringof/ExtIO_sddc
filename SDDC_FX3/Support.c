@@ -14,6 +14,34 @@
 // Declare external data
 extern CyBool_t glDebugTxEnabled;
 
+#define ERROR_BLINK_COUNT	10	/* Number of blinks before reset */
+#define ERROR_BLINK_MS		200	/* On/off time per blink in ms */
+
+extern void IndicateError(uint16_t ErrorCode);
+
+/*
+ * Best-effort LED blink followed by device reset.
+ * Reuses IndicateError() to configure GPIO_LED_BLUE as output,
+ * then blinks the LED.  If the GPIO clock isn't started yet the
+ * config calls fail silently and we proceed straight to the reset.
+ */
+static void ErrorBlinkAndReset(void)
+{
+	int i;
+
+	IndicateError(0);  /* configure LED GPIO (off) */
+
+	for (i = 0; i < ERROR_BLINK_COUNT; i++)
+	{
+		CyU3PGpioSetValue(GPIO_LED_BLUE_PIN, CyTrue);
+		CyU3PThreadSleep(ERROR_BLINK_MS);
+		CyU3PGpioSetValue(GPIO_LED_BLUE_PIN, CyFalse);
+		CyU3PThreadSleep(ERROR_BLINK_MS);
+	}
+
+	CyU3PDeviceReset(CyFalse);
+}
+
 const char* ErrorCodeTextLookupTable[] = {
 	"SUCCESS",				// 0
 	"DELETED",				// 1
@@ -134,29 +162,21 @@ void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status)
 			DebugPrint(4, "%s = Successful\r\n", StringPtr);
 			return;
 		}
-		// else hang here
-		    DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
-		while (1)
-		{
-			DebugPrint(4, "?");
-		}
+		DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
+		ErrorBlinkAndReset();
 	}
 }
 
 
 void CheckStatusSilent(char* StringPtr, CyU3PReturnStatus_t Status)
-// displays and stall on an un-successful system call
+// logs error and blinks/resets on an un-successful system call
 {
 	if (glDebugTxEnabled)				// Need to wait until ConsoleOut is enabled
 	{
 		if (Status != CY_U3P_SUCCESS)
 		{
-		//  hang here
-		    DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
-			while (1)
-			{
-				DebugPrint(4, "?");
-			}
+		DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
+		ErrorBlinkAndReset();
 		}
 	}
 }
