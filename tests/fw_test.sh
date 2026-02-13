@@ -171,9 +171,10 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # ---- Test Plan ----
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
-#      + 3 stale commands + 1 ep0_overflow + 5 debug/OOB tests
+#      + 3 stale commands + 1 i2c_nack + 1 adc_off
+#      + 1 ep0_overflow + 5 debug/OOB tests
 #      + 1 PIB overflow + 1 stack check + optional streaming (3 checks)
-PLANNED=20
+PLANNED=22
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -319,6 +320,32 @@ if [[ "$output" == *STALL* ]]; then
 else
     tap_fail "stale TUNERSTDBY (0xB8): command accepted (not removed?)" "$output"
 fi
+
+# ==================================================================
+# 8a. I2C NACK on non-existent address
+# ==================================================================
+# Read from I2C address 0xC2 (no device at this address) to confirm
+# the firmware propagates I2C NACK errors as EP0 STALLs.
+
+output=$("$FX3_CMD" i2cr 0xC2 0 1 2>&1) || true
+if [[ "$output" == *FAIL* ]]; then
+    tap_ok "i2c_nack: read from absent address 0xC2 correctly failed"
+else
+    tap_fail "i2c_nack: read from absent address 0xC2 unexpectedly succeeded" "$output"
+fi
+
+# ==================================================================
+# 8b. ADC clock-off (freq=0) — exercises I2cTransferW1 error path
+# ==================================================================
+# Send STARTADC with freq=0 to exercise the Si5351 clock-off path
+# through the error-checked I2cTransferW1 code.  On a working device
+# this should succeed (the Si5351 accepts the write to disable CLK0).
+
+output=$(run_cmd adc 0) && {
+    tap_ok "adc_off: clock-off via STARTADC freq=0"
+} || {
+    tap_fail "adc_off: clock-off failed (I2cTransferW1 error?)" "$output"
+}
 
 # ==================================================================
 # 9. EP0 wLength overflow check (issue #6)

@@ -185,9 +185,14 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint32_t freq;
 						freq = *(uint32_t *) &glEp0Buffer[0];
-						si5351aSetFrequencyA(freq);
-						CyU3PThreadSleep(1000);
-						isHandled = CyTrue;
+						apiRetStatus = si5351aSetFrequencyA(freq);
+						if (apiRetStatus == CY_U3P_SUCCESS) {
+							CyU3PThreadSleep(1000);
+							isHandled = CyTrue;
+						} else {
+							DebugPrint(4, "STARTADC si5351 failed: %d", apiRetStatus);
+							isHandled = CyFalse;
+						}
 					}
 					break;
 

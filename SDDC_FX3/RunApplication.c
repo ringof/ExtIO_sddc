@@ -144,7 +144,9 @@ void ApplicationThread ( uint32_t input)
 		{
 			ConfGPIOsimpleinputPU(GPIO36);
 
-			si5351aSetFrequencyB(16000000);
+			Status = si5351aSetFrequencyB(16000000);
+			if (Status != CY_U3P_SUCCESS)
+				DebugPrint(4, "si5351aSetFrequencyB(16MHz) failed: %d.", Status);
 			uint8_t identity;
 			if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
 			{
@@ -166,7 +168,9 @@ void ApplicationThread ( uint32_t input)
 				glHWconfig = NORADIO;
 				DebugPrint(4, "No R828D tuner detected.");
 			}
-			si5351aSetFrequencyB(0);
+			Status = si5351aSetFrequencyB(0);
+			if (Status != CY_U3P_SUCCESS)
+				DebugPrint(4, "si5351aSetFrequencyB(0) failed: %d.", Status);
 		}
 	}
     DebugPrint(4, "HWconfig: %d.", glHWconfig);
