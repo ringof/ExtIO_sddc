@@ -285,11 +285,13 @@ CyFxSlFifoApplnUSBSetupCB (
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nGO gp=%d s=%d",apiRetStatus,_s); }
 					if (apiRetStatus == CY_U3P_SUCCESS)
-							isHandled = CyTrue;
+					{
+						CyU3PGpifControlSWInput ( CyTrue );
+						{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+						  DebugPrint(4,"\r\nGO sw s=%d",_s); }
+						isHandled = CyTrue;
 					}
-					CyU3PGpifControlSWInput ( CyTrue );
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nGO sw s=%d",_s); }
+					}
 					break;
 
 			case STOPFX3:
@@ -297,12 +299,13 @@ CyFxSlFifoApplnUSBSetupCB (
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP in s=%d",_s); }
+					CyU3PGpifControlSWInput(CyFalse);  /* deassert FW_TRG before disable */
 					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP dis s=%d",_s); }
-					CyU3PGpifLoad(&CyFxGpifConfig);  /* reload descriptor so SM is in RESET (state 0) */
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nSTP ld s=%d",_s); }
+					/* Do NOT call CyU3PGpifLoad() here — it re-enables the GPIF
+					 * block, causing the SM to auto-advance.  STARTFX3 will reload
+					 * the waveform via StartGPIF() when streaming resumes. */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					isHandled = CyTrue;

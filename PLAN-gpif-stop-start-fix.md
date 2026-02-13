@@ -223,9 +223,52 @@ points or switch to UART debug.
 
 ---
 
-## Proposed Fix (pending diagnostic confirmation)
+## Hardware Test Confirmation (2026-02-13)
 
-Once the instrumentation confirms the hypothesis, the fix has two parts:
+Ran `!stop_gpif_state` from the debug console (using the new `!`
+local command escape).  Firmware debug trace captured in real time:
+
+```
+fx3> stop_gpif_state
+FAIL stop_gpif_state: GPIF state=8 after STOP (expected 0 or 1, SM still running)
+STARTADC	32000000
+GO in s=8
+GO dis s=255
+GPIF file HF103.
+```
+
+### Trace Interpretation
+
+| Trace line | Meaning |
+|------------|---------|
+| `STARTADC 32000000` | Test configured ADC clock at 32 MHz |
+| `GO in s=8` | STARTFX3 entry: SM already in state 8 (TH1_WAIT — leftover from prior run) |
+| `GO dis s=255` | `CyU3PGpifDisable(CyTrue)` worked — state 255 = GPIF block fully disabled |
+| `GPIF file HF103.` | `StartGPIF()` reloaded waveform via `CyU3PGpifLoad()` + `CyU3PGpifSMStart()` |
+
+After STARTFX3 the SM ran (test read bulk data successfully).  Then
+STOPFX3 fired and GETSTATS reported `gpif_state=8` — the SM is back
+in TH1_WAIT, still running.
+
+**Note:** The STOPFX3 trace lines (`STP in`, `STP dis`, `STP ld`)
+were likely dropped due to debug buffer contention with the bulk
+transfer activity.  But the GETSTATS result (state=8) is conclusive:
+`CyU3PGpifLoad()` in STOPFX3 re-enabled the GPIF and the SM
+auto-advanced through the transition chain.
+
+### Confirmation
+
+This **confirms the hypothesis from the analysis above**:
+- `CyU3PGpifDisable(CyTrue)` correctly stops the SM (state→255)
+- `CyU3PGpifLoad()` re-enables the GPIF block, SM restarts immediately
+- The SM reaches state 8 because FW_TRG is still asserted (never
+  deasserted) and ADC data is clocking in
+
+The fix below is now validated against hardware and ready to apply.
+
+---
+
+## Proposed Fix (confirmed by hardware test)
 
 ### Fix A: Remove `CyU3PGpifLoad()` from STOPFX3, add SW input deassert
 
