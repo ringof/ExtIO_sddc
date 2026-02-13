@@ -346,7 +346,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 25 tests (28 with streaming) in TAP format:
+Runs 26 tests (29 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -367,11 +367,12 @@ Runs 25 tests (28 with streaming) in TAP format:
 | 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
 | 21 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 22 | GETSTATS readout | GETSTATS (0xB3) returns 19 bytes with sane values |
+| 22 | GETSTATS readout | GETSTATS (0xB3) returns 20 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
-| 24 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 25 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
-| 26--28 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
+| 25 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 26 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
+| 27--29 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
