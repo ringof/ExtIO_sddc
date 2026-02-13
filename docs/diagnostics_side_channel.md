@@ -3,8 +3,8 @@
 > **Status: Partially implemented.**
 >
 > The core diagnostic side-channel is live as **GETSTATS (`0xB3`)**, a
-> 19-byte EP0 vendor request returning DMA counts, GPIF state, PIB
-> error counts, I2C failure counts, and EP underrun counts.  See
+> 20-byte EP0 vendor request returning DMA counts, GPIF state, PIB
+> error counts, I2C failure counts, EP underrun counts, and Si5351 PLL status.  See
 > [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md) for
 > the implemented wire format and host usage.
 >
@@ -69,6 +69,7 @@ and alignment ambiguity on the ARM926EJ-S target.
 | 9--10  | 2    | Last PIB error arg     | *(not in proposal)* | **Implemented** (bonus diagnostic) |
 | 11--14 | 4    | I2C failure count      | *(not in proposal)* | **Implemented** (bonus diagnostic) |
 | 15--18 | 4    | EP underrun count      | `usb_ep_underrun` | **Implemented** |
+| 19     | 1    | Si5351 status (reg 0)  | `si5351_status`   | **Implemented** |
 
 **Not yet implemented** from the original proposal:
 
@@ -77,7 +78,6 @@ and alignment ambiguity on the ARM926EJ-S target.
 | `timestamp_ms` | DMA count alone is sufficient for rate computation when the host timestamps its polls |
 | `pib_underrun_count` | Combined into single PIB error counter |
 | `usb_phy_errors` / `usb_link_errors` | Requires `CyU3PUsbGetErrorCounts()` — low priority, host can't act on it |
-| `si5351_status` (PLL lock) | Requires I2C read during streaming — planned as next extension |
 | `streaming` | Host already knows (it issues START/STOP) |
 | `recovery_count` | No autonomous recovery logic exists yet |
 
@@ -140,13 +140,13 @@ count) as a superset.
 
 ### Chosen: New vendor command via EP0 (Option A)
 
-**Implemented as GETSTATS (`0xB3`), 19 bytes.**  This follows Option A
+**Implemented as GETSTATS (`0xB3`), 20 bytes.**  This follows Option A
 from the original proposal — a dedicated vendor request returning
 diagnostic counters via EP0, independent of the bulk data stream.
 
 ```
-Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=19, direction=IN
-FX3 returns: 19 bytes, packed little-endian (see debugging.md §5 for layout)
+Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=20, direction=IN
+FX3 returns: 20 bytes, packed little-endian (see debugging.md §5 for layout)
 ```
 
 The host calls this periodically (every 100-500 ms) alongside its
@@ -401,8 +401,8 @@ int ret = libusb_control_transfer(dev,
 
 **Actual cost (GETSTATS, implemented):**
 - Handler runs inline in the EP0 callback — one `CyU3PGpifGetSMState()`
-  call plus three `memcpy` operations; sub-microsecond
-- 19-byte EP0 response per poll; at 10 polls/sec: 190 bytes/sec
+  call, three `memcpy` operations, and one I2C register read (~50 µs)
+- 20-byte EP0 response per poll; at 10 polls/sec: 200 bytes/sec
 - Counters reuse the existing `glCounter[20]` array — zero additional BSS
 
 **Projected cost (DIAGFX3 extension, if implemented):**

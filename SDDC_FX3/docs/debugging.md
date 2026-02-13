@@ -248,12 +248,12 @@ Read-only EP0 vendor request (IN direction):
 bRequest = 0xB3 (GETSTATS)
 wValue   = 0
 wIndex   = 0
-wLength  = 19
+wLength  = 20
 ```
 
 ### Response Layout
 
-19 bytes, packed, little-endian (native ARM byte order):
+20 bytes, packed, little-endian (native ARM byte order):
 
 | Offset | Size | Field | Source |
 |--------|------|-------|--------|
@@ -263,6 +263,7 @@ wLength  = 19
 | 9--10 | 2 | Last PIB error arg | `glLastPibArg`, saved in `PibErrorCallback` |
 | 11--14 | 4 | I2C failure count | `glCounter[1]`, incremented in `I2cTransfer` on error |
 | 15--18 | 4 | EP underrun count | `glCounter[2]`, incremented in `USBEventCallback` |
+| 19 | 1 | Si5351 status (reg 0) | `I2cTransfer(0x00, 0xC0, …)` sampled at read time |
 
 ### Counter Behavior
 
@@ -280,7 +281,7 @@ wLength  = 19
 
 ```
 $ fx3_cmd stats
-PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0
+PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0 pll=0x00
 ```
 
 ---

@@ -792,15 +792,16 @@ static int do_test_stack_check(libusb_device_handle *h)
 /* GETSTATS tests                                                     */
 /* ------------------------------------------------------------------ */
 
-/* GETSTATS response layout (19 bytes, little-endian):
+/* GETSTATS response layout (20 bytes, little-endian):
  *   [0..3]   uint32  DMA buffer completions
  *   [4]      uint8   GPIF state machine state
  *   [5..8]   uint32  PIB error count
  *   [9..10]  uint16  last PIB error arg
  *   [11..14] uint32  I2C failure count
  *   [15..18] uint32  EP underrun count
+ *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  19
+#define GETSTATS_LEN  20
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -809,6 +810,7 @@ struct fx3_stats {
     uint16_t last_pib_arg;
     uint32_t i2c_failures;
     uint32_t ep_underruns;
+    uint8_t  si5351_status;
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -823,6 +825,7 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->last_pib_arg, &buf[9],  2);
     memcpy(&s->i2c_failures, &buf[11], 4);
     memcpy(&s->ep_underruns, &buf[15], 4);
+    s->si5351_status = buf[19];
     return 0;
 }
 
@@ -835,9 +838,10 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u underrun=%u\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u underrun=%u pll=0x%02X\n",
            s.dma_count, s.gpif_state, s.pib_errors,
-           s.last_pib_arg, s.i2c_failures, s.ep_underruns);
+           s.last_pib_arg, s.i2c_failures, s.ep_underruns,
+           s.si5351_status);
     return 0;
 }
 
@@ -931,6 +935,35 @@ static int do_test_stats_pib(libusb_device_handle *h)
     return 1;
 }
 
+/* Verify Si5351 PLL lock status from GETSTATS.
+ * Reg 0 bit 7 = SYS_INIT (should be clear after boot).
+ * Reg 0 bit 5 = PLL A not locked (should be clear when tuned). */
+static int do_test_stats_pll(libusb_device_handle *h)
+{
+    struct fx3_stats s;
+    int r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL stats_pll: read: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    if (s.si5351_status & 0x80) {
+        printf("FAIL stats_pll: SYS_INIT set (0x%02X) — device not ready\n",
+               s.si5351_status);
+        return 1;
+    }
+
+    if (s.si5351_status & 0x20) {
+        printf("FAIL stats_pll: PLL A not locked (0x%02X)\n",
+               s.si5351_status);
+        return 1;
+    }
+
+    printf("PASS stats_pll: si5351_status=0x%02X (SYS_INIT clear, PLL A locked)\n",
+           s.si5351_status);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
@@ -964,6 +997,7 @@ static void usage(const char *prog)
         "  stats                        Read GETSTATS diagnostic counters\n"
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
+        "  stats_pll                    Verify Si5351 PLL lock status\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -1080,6 +1114,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stats_pib") == 0) {
         rc = do_test_stats_pib(h);
+
+    } else if (strcmp(cmd, "stats_pll") == 0) {
+        rc = do_test_stats_pll(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
