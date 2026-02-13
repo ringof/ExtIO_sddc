@@ -1,8 +1,16 @@
 # Firmware-Side Diagnostics for Host Streamer Software
 
-> **Status:** Design proposal — not yet implemented.  The counters,
-> `DIAGFX3` vendor command, and `fx3_diag_snapshot()` described below do
-> not exist in the current firmware.
+> **Status: Partially implemented.**
+>
+> The core diagnostic side-channel is live as **GETSTATS (`0xB3`)**, a
+> 19-byte EP0 vendor request returning DMA counts, GPIF state, PIB
+> error counts, I2C failure counts, and EP underrun counts.  See
+> [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md) for
+> the implemented wire format and host usage.
+>
+> The extended `DIAGFX3` (`0xB7`) command and the 24-byte `fx3_diag_t`
+> structure described in §§ "Future extensions" below remain **design
+> proposals — not yet implemented**.
 
 ## Overview
 
@@ -46,9 +54,40 @@ is 1 ms.  With a count and a timestamp, you have a throughput meter.
 
 ---
 
-## Diagnostic data the firmware can expose
+## What was implemented: GETSTATS (`0xB3`)
 
-### Proposed telemetry structure
+The firmware implements the `GETSTATS` vendor request, which delivers
+the highest-value subset of the originally proposed telemetry.  It
+chose a flat `memcpy`-based layout over a C struct to avoid packing
+and alignment ambiguity on the ARM926EJ-S target.
+
+| Offset | Size | Field | Proposal field | Status |
+|--------|------|-------|----------------|--------|
+| 0--3   | 4    | DMA buffer completions | `dma_buf_count` | **Implemented** |
+| 4      | 1    | GPIF state             | `gpif_state`    | **Implemented** |
+| 5--8   | 4    | PIB error count        | `pib_overrun_count` | **Implemented** (combined, not split by type) |
+| 9--10  | 2    | Last PIB error arg     | *(not in proposal)* | **Implemented** (bonus diagnostic) |
+| 11--14 | 4    | I2C failure count      | *(not in proposal)* | **Implemented** (bonus diagnostic) |
+| 15--18 | 4    | EP underrun count      | `usb_ep_underrun` | **Implemented** |
+
+**Not yet implemented** from the original proposal:
+
+| Field | Reason deferred |
+|-------|-----------------|
+| `timestamp_ms` | DMA count alone is sufficient for rate computation when the host timestamps its polls |
+| `pib_underrun_count` | Combined into single PIB error counter |
+| `usb_phy_errors` / `usb_link_errors` | Requires `CyU3PUsbGetErrorCounts()` — low priority, host can't act on it |
+| `si5351_status` (PLL lock) | Requires I2C read during streaming — planned as next extension |
+| `streaming` | Host already knows (it issues START/STOP) |
+| `recovery_count` | No autonomous recovery logic exists yet |
+
+Full protocol details: [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md).
+
+---
+
+## Future extensions
+
+### Originally proposed telemetry structure
 
 ```c
 typedef struct fx3_diag {
@@ -72,61 +111,61 @@ typedef struct fx3_diag {
 ```
 
 This fits comfortably in the 64-byte EP0 buffer and can be delivered
-as a vendor request response.
+as a vendor request response.  Most of the core fields are already
+covered by GETSTATS; a future DIAGFX3 command would add the
+remaining fields (timestamp, USB PHY/link errors, PLL lock, recovery
+count) as a superset.
 
 ### Where each field comes from
 
-| Field | Source | Existing? |
-|-------|--------|-----------|
-| `dma_buf_count` | `glDMACount` in `StartStopApplication.c` | Yes, exists |
-| `timestamp_ms` | `CyU3PGetTime()` from ThreadX | Yes, SDK API |
-| `pib_overrun_count` | Increment in `PibErrorCallback` on `WR_OVERRUN` | Needs callback enabled |
-| `pib_underrun_count` | Increment in `PibErrorCallback` on `RD_UNDERRUN` | Needs callback enabled |
-| `usb_ep_underrun` | Increment in `USBEventCallback` on `EP_UNDERRUN` | Needs counter added |
-| `usb_phy_errors` | `CyU3PUsbGetErrorCounts(&phy, &link)` | Yes, SDK API |
-| `usb_link_errors` | Same API, second output | Yes, SDK API |
-| `gpif_state` | `CyU3PGpifGetSMState(&state)` | Yes, SDK API |
-| `si5351_status` | `I2cTransfer(0x00, 0xC0, 1, &status, CyTrue)` | Needs one I2C read |
-| `streaming` | `glIsApplnActive` | Yes, exists |
-| `recovery_count` | New counter, increment on autonomous recovery | Needs recovery logic |
+| Field | Source | In GETSTATS? | Notes |
+|-------|--------|:------------:|-------|
+| `dma_buf_count` | `glDMACount` in `StartStopApplication.c` | **Yes** | Offset 0--3 |
+| `timestamp_ms` | `CyU3PGetTime()` from ThreadX | No | Host-side timestamps suffice |
+| `pib_overrun_count` | `glCounter[0]` via `PibErrorCallback` | **Yes** | Offset 5--8 (combined, not split by type) |
+| `pib_underrun_count` | `PibErrorCallback` on `RD_UNDERRUN` | No | Folded into combined PIB count |
+| `usb_ep_underrun` | `glCounter[2]` via `USBEventCallback` | **Yes** | Offset 15--18 |
+| `usb_phy_errors` | `CyU3PUsbGetErrorCounts(&phy, &link)` | No | SDK API available, not yet wired |
+| `usb_link_errors` | Same API, second output | No | SDK API available, not yet wired |
+| `gpif_state` | `CyU3PGpifGetSMState(&state)` | **Yes** | Offset 4 |
+| `si5351_status` | `I2cTransfer(0x00, 0xC0, 1, &status, CyTrue)` | No | Planned next — see §4 "PLL lock status" |
+| `streaming` | `glIsApplnActive` | No | Host already knows |
+| `recovery_count` | New counter, increment on autonomous recovery | No | No recovery logic yet |
+| *(bonus)* last PIB arg | `glLastPibArg` in `PibErrorCallback` | **Yes** | Offset 9--10, not in original proposal |
+| *(bonus)* I2C failures | `glCounter[1]` in `I2cTransfer` | **Yes** | Offset 11--14, not in original proposal |
 
 ---
 
 ## Delivery mechanism
 
-### Option A: New vendor command (recommended)
+### Chosen: New vendor command via EP0 (Option A)
 
-Add a new vendor request code (e.g., `DIAGFX3 = 0xB7`) that returns
-the 24-byte `fx3_diag_t` structure via EP0:
+**Implemented as GETSTATS (`0xB3`), 19 bytes.**  This follows Option A
+from the original proposal — a dedicated vendor request returning
+diagnostic counters via EP0, independent of the bulk data stream.
 
 ```
-Host sends:  bRequest=0xB7, wValue=0, wIndex=0, wLength=24, direction=IN
-FX3 returns: 24 bytes of fx3_diag_t, packed little-endian
+Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=19, direction=IN
+FX3 returns: 19 bytes, packed little-endian (see debugging.md §5 for layout)
 ```
 
 The host calls this periodically (every 100-500 ms) alongside its
 normal streaming.  EP0 control transfers do not interfere with the
 bulk data stream on EP1.
 
-This is the cleanest approach: no change to the bulk data format, no
-impact on streaming throughput, backwards-compatible (old hosts that
-don't send `DIAGFX3` are unaffected).
+If a future DIAGFX3 (`0xB7`) superset is added, it would extend the
+same pattern with additional fields (timestamp, USB error counts, PLL
+lock status).  GETSTATS would remain available for lightweight polling.
 
-### Option B: Extend TESTFX3
+### Considered alternatives (not chosen)
 
-The existing `TESTFX3` (0xAC) returns only 4 bytes.  It could be
-extended: if `wLength >= 24`, return the full diagnostic structure
-after the original 4 bytes; if `wLength == 4`, return the legacy
-format.  This avoids allocating a new command code but couples
-diagnostics to the device-info query.
+**Option B — Extend TESTFX3:** The existing `TESTFX3` (0xAC) returns
+only 4 bytes.  It could be extended, but coupling diagnostics to the
+device-info query was undesirable.
 
-### Option C: In-band metadata
-
-Embed diagnostic frames in the bulk data stream, distinguished by a
-magic header.  This is the most complex option: it requires the host
-to parse every buffer for metadata, adds processing overhead at
-128 MB/s, and changes the sample format.  Not recommended unless the
-side-channel polling of Options A/B proves insufficient.
+**Option C — In-band metadata:** Embedding diagnostic frames in the
+bulk data stream would require host-side parsing at 128 MB/s and change
+the sample format.  Not recommended.
 
 ---
 
@@ -297,7 +336,11 @@ telemetry to:
 
 ---
 
-## Firmware implementation sketch
+## Firmware implementation sketch (for future DIAGFX3 extension)
+
+> The code below is a **reference sketch** for the proposed DIAGFX3
+> superset command.  For the implemented GETSTATS handler, see
+> `SDDC_FX3/USBHandler.c` (the `case GETSTATS:` block).
 
 ### Snapshot function
 
@@ -356,21 +399,20 @@ int ret = libusb_control_transfer(dev,
 
 ## Cost and constraints
 
-**Firmware cost:**
-- `fx3_diag_snapshot()` takes ~50 us (dominated by the I2C read of
+**Actual cost (GETSTATS, implemented):**
+- Handler runs inline in the EP0 callback — one `CyU3PGpifGetSMState()`
+  call plus three `memcpy` operations; sub-microsecond
+- 19-byte EP0 response per poll; at 10 polls/sec: 190 bytes/sec
+- Counters reuse the existing `glCounter[20]` array — zero additional BSS
+
+**Projected cost (DIAGFX3 extension, if implemented):**
+- `fx3_diag_snapshot()` would take ~50 us (dominated by the I2C read of
   Si5351 status and the `CyU3PUsbGetErrorCounts` call)
 - Called only on host request via EP0, not in the streaming hot path
 - No impact on bulk transfer throughput
-
-**Memory cost:**
-- ~6 new global counters (24 bytes of BSS)
+- ~6 additional global counters (24 bytes of BSS)
 - `fx3_diag_t` structure (24 bytes on stack during EP0 handler)
 - Negligible compared to 512 KB SRAM
-
-**USB bandwidth cost:**
-- One 24-byte EP0 control transfer per poll interval
-- EP0 is independent of the bulk streaming on EP1
-- At 10 polls/second: 240 bytes/sec = 0.0002% of USB 3.0 bandwidth
 
 **I2C bus contention:**
 - The Si5351 register read shares the I2C bus with other operations
@@ -435,9 +477,9 @@ current 1.3.4 libraries:
 | `CyU3PUsbSendEP0Data()` | libcyfxapi.a | Exists |
 | `I2cTransfer()` | Application code (i2cmodule.c) | Exists |
 
-The DIAGFX3 vendor command, PIB error callback, DMA count monitoring,
-and telemetry snapshot are all additions to application `.c` files,
-linked against the unchanged libraries.
+The GETSTATS vendor command (implemented) and the proposed DIAGFX3
+extension are application-level additions to `.c` files, linked
+against the unchanged libraries.
 
 ### If installing a fresh FX3 SDK
 
@@ -478,8 +520,9 @@ All diagnostic and telemetry features in this document work by
   independent of the GPIF configuration
 - PIB error callbacks fire on DMA-level errors detected by the
   hardware, not by the state machine
-- The DIAGFX3 vendor command is an EP0 control transfer, completely
-  independent of the bulk streaming GPIF path
+- The GETSTATS vendor command (and any future DIAGFX3 extension) is
+  an EP0 control transfer, completely independent of the bulk
+  streaming GPIF path
 
 The existing `SDDC_GPIF.h` (generated by GPIF II Designer) does not
 need to be modified for any feature described in this document.
