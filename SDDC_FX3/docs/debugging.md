@@ -212,9 +212,60 @@ UART/debug subsystem is initialized.
 
 ---
 
-## 5. Host-Side Tools
+## 5. Diagnostic Counters (GETSTATS)
 
-### 5.1 `fx3_cmd` -- Vendor Command Exerciser
+The `GETSTATS` vendor request (`0xB3`) returns a read-only snapshot of
+firmware-internal counters and GPIF state.  It uses no new storage --
+all counters live in the pre-existing `glCounter[20]` array.
+
+### Protocol
+
+Read-only EP0 vendor request (IN direction):
+
+```
+bRequest = 0xB3 (GETSTATS)
+wValue   = 0
+wIndex   = 0
+wLength  = 19
+```
+
+### Response Layout
+
+19 bytes, packed, little-endian (native ARM byte order):
+
+| Offset | Size | Field | Source |
+|--------|------|-------|--------|
+| 0--3 | 4 | DMA buffer completions | `glDMACount` (incremented by DMA callback) |
+| 4 | 1 | GPIF state machine state | `CyU3PGpifGetSMState()` sampled at read time |
+| 5--8 | 4 | PIB error count | `glCounter[0]`, incremented in `PibErrorCallback` |
+| 9--10 | 2 | Last PIB error arg | `glLastPibArg`, saved in `PibErrorCallback` |
+| 11--14 | 4 | I2C failure count | `glCounter[1]`, incremented in `I2cTransfer` on error |
+| 15--18 | 4 | EP underrun count | `glCounter[2]`, incremented in `USBEventCallback` |
+
+### Counter Behavior
+
+- **Reset:** All counters are zeroed in `StartApplication()` alongside
+  `glDMACount = 0`.  This occurs on USB enumeration (`SET_CONFIGURATION`)
+  -- not on `STOPFX3`/`STARTFX3` vendor commands.
+- **Atomicity:** 32-bit aligned stores are atomic on the ARM926EJ-S core.
+  Individual counter increments need no locking.  The multi-field
+  snapshot is best-effort (no cross-counter consistency guarantee), which
+  is acceptable for diagnostics.
+- **EP0 buffer:** The handler clears `glEp0Buffer` before building the
+  response (`CyU3PMemSet`), matching the `I2CRFX3` pattern.
+
+### Host Usage
+
+```
+$ fx3_cmd stats
+PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0
+```
+
+---
+
+## 6. Host-Side Tools
+
+### 6.1 `fx3_cmd` -- Vendor Command Exerciser
 
 Built from `tests/fx3_cmd.c`.  Provides both interactive and automated
 access to all debug facilities.
@@ -260,9 +311,12 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd debug_poll` | Send `?` + CR, verify help text comes back | #26 |
 | `fx3_cmd pib_overflow` | Start streaming without reading EP1, verify PIB error in debug output | #10 |
 | `fx3_cmd stack_check` | Send `stack` command, parse watermark, verify > 25% free | #12 |
+| `fx3_cmd stats` | Read and display all GETSTATS diagnostic counters | -- |
+| `fx3_cmd stats_i2c` | Verify I2C failure counter increments after NACK on absent address | -- |
+| `fx3_cmd stats_pib` | Verify PIB error counter is non-zero (opportunistic after `pib_overflow`) | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
-### 5.2 `fw_test.sh` -- Automated TAP Test Suite
+### 6.2 `fw_test.sh` -- Automated TAP Test Suite
 
 ```
 cd tests && make
@@ -308,7 +362,7 @@ Options:
 
 ---
 
-## 6. File Map
+## 7. File Map
 
 | File | Debug role |
 |------|-----------|
