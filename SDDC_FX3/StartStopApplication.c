@@ -14,6 +14,7 @@
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
 uint32_t glDMACount;
+uint16_t glLastPibArg;
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -21,6 +22,7 @@ extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 
 // Declare external data
 extern CyBool_t glIsApplnActive;				// Set true once device is enumerated
+extern uint32_t glCounter[20];
 
 // Global data owned by this module
 
@@ -38,6 +40,8 @@ extern CyU3PQueue glEventAvailable;
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
+		glCounter[0]++;
+		glLastPibArg = cbArg;
 		uint32_t evt = (2 << 24) | cbArg;
 		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
 	}
@@ -95,6 +99,8 @@ void StartApplication ( void ) {
     epCfg.isoPkts = 1;
 
     glDMACount= 0;
+    glCounter[0] = glCounter[1] = glCounter[2] = 0;
+    glLastPibArg = 0;
     /* Consumer endpoint configuration */
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epCfg);
     CheckStatus("CyU3PSetEpConfig Consumer", Status);

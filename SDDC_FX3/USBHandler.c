@@ -31,6 +31,8 @@ extern uint16_t  glFWconfig;       			    // Firmware config hb.lb
 extern CyBool_t glFlagDebug;
 extern volatile uint16_t glDebTxtLen;
 extern uint8_t glBufDebug[MAXLEN_D_USB];
+extern uint32_t glCounter[20];
+extern uint16_t glLastPibArg;
 
 
 
@@ -196,7 +198,23 @@ CyFxSlFifoApplnUSBSetupCB (
 					}
 					break;
 
-			case I2CWFX3:
+			case GETSTATS:
+				{
+					uint8_t gpifState = 0xFF;
+					CyU3PGpifGetSMState(&gpifState);
+					uint16_t off = 0;
+					memcpy(&glEp0Buffer[off], &glDMACount, 4);   off += 4;
+					glEp0Buffer[off++] = gpifState;
+					memcpy(&glEp0Buffer[off], &glCounter[0], 4); off += 4;
+					memcpy(&glEp0Buffer[off], &glLastPibArg, 2); off += 2;
+					memcpy(&glEp0Buffer[off], &glCounter[1], 4); off += 4;
+					memcpy(&glEp0Buffer[off], &glCounter[2], 4); off += 4;
+					CyU3PUsbSendEP0Data(off, glEp0Buffer);
+					isHandled = CyTrue;
+				}
+				break;
+
+		case I2CWFX3:
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
@@ -360,6 +378,7 @@ void USBEventCallback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
             break;
 
         case CY_U3P_USB_EVENT_EP_UNDERRUN:
+        	glCounter[2]++;
         	DebugPrint (4, "\r\nEP Underrun on %d", evdata);
             break;
 

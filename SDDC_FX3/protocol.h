@@ -20,6 +20,7 @@ enum FX3Command {
     I2CRFX3       = 0xAF,   /* Read data from I2C bus */
     RESETFX3      = 0xB1,   /* Reset FX3 to bootloader */
     STARTADC      = 0xB2,   /* Start ADC clock at specified frequency */
+    GETSTATS      = 0xB3,   /* Read diagnostic counters (read-only) */
     SETARGFX3     = 0xB6,   /* Set argument by index/value */
     READINFODEBUG = 0xBA,   /* Read debug output / send debug input */
 };

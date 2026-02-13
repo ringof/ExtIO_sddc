@@ -60,7 +60,7 @@ const char* EventName[] = {
 // For Debug and display the name of the FX3Command
 const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
-"STARTADC", "0xB3", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
+"STARTADC", "GETSTATS", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
 // For Debug and display the name of the SETARGFX3 argument

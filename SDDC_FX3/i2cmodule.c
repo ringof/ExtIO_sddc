@@ -13,6 +13,8 @@
 #include "cyu3i2c.h"
 #include "i2cmodule.h"
 
+extern uint32_t glCounter[20];
+
 CyU3PReturnStatus_t
 I2cInit ()
 {
@@ -72,6 +74,8 @@ I2cTransfer (
 		preamble.ctrlMask  = 0x0000;
 		status = CyU3PI2cTransmitBytes (&preamble, buffer, byteCount, 0);
 	}
+    if (status != CY_U3P_SUCCESS)
+        glCounter[1]++;
     return status;
 }
 
