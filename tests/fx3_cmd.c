@@ -712,9 +712,10 @@ static int do_test_stack_check(libusb_device_handle *h)
         return 1;
     }
 
-    /* 2. Drain stale output */
-    for (int i = 0; i < 10; i++) {
-        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+    /* 2. Drain stale output (30 rounds handles bursts from prior tests) */
+    for (int i = 0; i < 30; i++) {
+        int dr = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (dr <= 0) break;     /* buffer empty → done draining */
         usleep(20000);
     }
 

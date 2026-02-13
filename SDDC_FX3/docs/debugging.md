@@ -289,11 +289,11 @@ Runs 25 tests (28 with streaming) in TAP format:
 | 18 | Console buffer fill | 35-char input survives (issue #13) |
 | 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
-| 21 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 22 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 23 | GETSTATS readout | GETSTATS (0xB3) returns 19 bytes with sane values |
-| 24 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
-| 25 | GETSTATS PIB counter | PIB error count increments after unread streaming overflow |
+| 21 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
+| 22 | GETSTATS readout | GETSTATS (0xB3) returns 19 bytes with sane values |
+| 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
+| 24 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 25 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
 | 26--28 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:

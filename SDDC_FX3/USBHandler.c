@@ -201,6 +201,7 @@ CyFxSlFifoApplnUSBSetupCB (
 
 			case GETSTATS:
 				{
+					CyU3PMemSet(glEp0Buffer, 0, CYFX_SDRAPP_MAX_EP0LEN);
 					uint8_t gpifState = 0xFF;
 					CyU3PGpifGetSMState(&gpifState);
 					uint16_t off = 0;

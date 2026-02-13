@@ -172,9 +172,10 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
-#      + 1 ep0_overflow + 5 debug/OOB tests
-#      + 1 PIB overflow + 1 stack check
-#      + 3 GETSTATS tests + optional streaming (3 checks)
+#      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
+#      + 2 GETSTATS (readout + I2C) + 1 PIB overflow + 1 GETSTATS PIB
+#      + optional streaming (3 checks)
+# NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
 PLANNED=25
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
@@ -419,19 +420,7 @@ output=$(run_cmd debug_poll) && {
 }
 
 # ==================================================================
-# 15. PIB error detection (issue #10)
-# ==================================================================
-# Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
-# Verify the debug console reports "PIB error".
-
-output=$(run_cmd pib_overflow) && {
-    tap_ok "pib_overflow: PIB error detected in debug output (issue #10)"
-} || {
-    tap_fail "pib_overflow: no PIB error reported" "$output"
-}
-
-# ==================================================================
-# 16. Stack watermark check (issue #12)
+# 15. Stack watermark check (issue #12)
 # ==================================================================
 # Query the "stack" debug command and verify adequate headroom
 # after the thread has run through initialization.
@@ -443,7 +432,7 @@ output=$(run_cmd stack_check) && {
 }
 
 # ==================================================================
-# 17. GETSTATS readout
+# 16. GETSTATS readout
 # ==================================================================
 
 output=$(run_cmd stats) && {
@@ -453,7 +442,7 @@ output=$(run_cmd stats) && {
 }
 
 # ==================================================================
-# 18. GETSTATS I2C failure counter
+# 17. GETSTATS I2C failure counter
 # ==================================================================
 
 output=$(run_cmd stats_i2c) && {
@@ -463,8 +452,23 @@ output=$(run_cmd stats_i2c) && {
 }
 
 # ==================================================================
+# 18. PIB error detection (issue #10)
+# ==================================================================
+# Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
+# Verify the debug console reports "PIB error".
+# NOTE: This test wedges the DMA/GPIF path.  All tests that need
+# clean device state must run BEFORE this point.
+
+output=$(run_cmd pib_overflow) && {
+    tap_ok "pib_overflow: PIB error detected in debug output (issue #10)"
+} || {
+    tap_fail "pib_overflow: no PIB error reported" "$output"
+}
+
+# ==================================================================
 # 19. GETSTATS PIB error counter
 # ==================================================================
+# Runs after pib_overflow; counter should already be > 0.
 
 output=$(run_cmd stats_pib) && {
     tap_ok "stats_pib: PIB error counter incremented on overflow"
