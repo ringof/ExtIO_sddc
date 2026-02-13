@@ -92,9 +92,17 @@ USB debug output requires two conditions:
 TESTFX3 (0xAC) with wValue=1
 ```
 
-This returns the normal 4-byte device info AND sets `glFlagDebug = true`
-as a side effect.  Sending `TESTFX3` with `wValue=0` disables debug
-mode again.
+The `TESTFX3` response is 4 bytes:
+
+| Byte | Contents |
+|------|----------|
+| 0 | `glHWconfig` (e.g., 0x04 = RX888r2) |
+| 1 | `glFWconfig` high byte |
+| 2 | `glFWconfig` low byte |
+| 3 | `glVendorRqtCnt` (rolling 8-bit counter of vendor requests) |
+
+When `wValue=1`, this also sets `glFlagDebug = true` as a side effect.
+Sending `TESTFX3` with `wValue=0` disables debug mode again.
 
 Until debug mode is enabled, all `DebugPrint()` calls are silently
 discarded.  This prevents buffer overflow during early init when no
@@ -151,6 +159,20 @@ Stack free in AppThread is 1312/2048
 gpif
 GPIF State = 0
 ```
+
+### Command Dispatch
+
+Console input from either path accumulates in `glConsoleInBuffer[32]`.
+On CR, a `USER_COMMAND_AVAILABLE` event is posted to `glEventAvailable`.
+The main `ApplicationThread` polls the queue every 100ms and calls
+`MsgParsing()` which decodes the 32-bit event by label (top 8 bits):
+
+| Label | Action |
+|-------|--------|
+| 0 | Print USB event name from `EventName[]` |
+| 1 | Print vendor request bytes (dead code -- nothing posts this label) |
+| 2 | Print PIB error code (dead code -- nothing posts this label) |
+| 0x0A (`USER_COMMAND_AVAILABLE`) | Call `ParseCommand()` |
 
 ---
 
@@ -371,5 +393,17 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler |
 | `tests/fx3_cmd.c` | Host-side vendor command tool with interactive debug console |
 | `tests/fw_test.sh` | Automated TAP test suite |
+
+---
+
+## 8. Known Limitations
+
+| Area | Description |
+|------|-------------|
+| UART output | Unreachable when `_DEBUG_USB_` is defined (current default).  All `DebugPrint()` output goes to the USB buffer; UART input still works but output is invisible on the serial port. |
+| `TESTFX3` | Debug enable/disable is a side effect of the device-info query.  Sending `TESTFX3` with `wValue=0` to read hwconfig will disable debug output.  There is no way to query device info without affecting the debug state. |
+| `Seconds` counter | Dead code in USB-debug mode.  `RunApplication.c` increments a `Seconds` counter inside `#ifndef _DEBUG_USB_`, so there is no periodic throughput indication on the console when USB debug is active. |
+| `EventName[]` | No bounds check.  `MsgParsing` indexes `EventName[]` (23 entries) by `(uint8_t)qevent`.  In practice SDK USB events map to 0--22, but there is no guard for out-of-range values. |
