@@ -269,7 +269,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 22 tests (25 with streaming) in TAP format:
+Runs 25 tests (28 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -291,7 +291,10 @@ Runs 22 tests (25 with streaming) in TAP format:
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
 | 21 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
 | 22 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 23--25 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 23 | GETSTATS readout | GETSTATS (0xB3) returns 19 bytes with sane values |
+| 24 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
+| 25 | GETSTATS PIB counter | PIB error count increments after unread streaming overflow |
+| 26--28 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
@@ -299,7 +302,7 @@ Options:
 --firmware PATH        Firmware .img file (required)
 --stream-seconds N     Streaming duration (default: 5)
 --rx888-stream PATH    Path to rx888_stream binary
---skip-stream          Skip streaming tests (tests 23--25)
+--skip-stream          Skip streaming tests (tests 26--28)
 --sample-rate HZ       ADC sample rate (default: 32000000)
 ```
 

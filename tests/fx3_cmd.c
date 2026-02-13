@@ -43,6 +43,7 @@
 #define I2CRFX3       0xAF
 #define RESETFX3      0xB1
 #define STARTADC      0xB2
+#define GETSTATS      0xB3
 #define TUNERINIT     0xB4
 #define TUNERTUNE     0xB5
 #define SETARGFX3     0xB6
@@ -787,6 +788,139 @@ static int do_test_stack_check(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* GETSTATS tests                                                     */
+/* ------------------------------------------------------------------ */
+
+/* GETSTATS response layout (19 bytes, little-endian):
+ *   [0..3]   uint32  DMA buffer completions
+ *   [4]      uint8   GPIF state machine state
+ *   [5..8]   uint32  PIB error count
+ *   [9..10]  uint16  last PIB error arg
+ *   [11..14] uint32  I2C failure count
+ *   [15..18] uint32  EP underrun count
+ */
+#define GETSTATS_LEN  19
+
+struct fx3_stats {
+    uint32_t dma_count;
+    uint8_t  gpif_state;
+    uint32_t pib_errors;
+    uint16_t last_pib_arg;
+    uint32_t i2c_failures;
+    uint32_t ep_underruns;
+};
+
+static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
+{
+    uint8_t buf[GETSTATS_LEN];
+    int r = ctrl_read(h, GETSTATS, 0, 0, buf, GETSTATS_LEN);
+    if (r < 0) return r;
+    if (r < GETSTATS_LEN) return LIBUSB_ERROR_IO;
+    memcpy(&s->dma_count,    &buf[0],  4);
+    s->gpif_state = buf[4];
+    memcpy(&s->pib_errors,   &buf[5],  4);
+    memcpy(&s->last_pib_arg, &buf[9],  2);
+    memcpy(&s->i2c_failures, &buf[11], 4);
+    memcpy(&s->ep_underruns, &buf[15], 4);
+    return 0;
+}
+
+/* Read and display GETSTATS fields */
+static int do_stats(libusb_device_handle *h)
+{
+    struct fx3_stats s;
+    int r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL stats: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u underrun=%u\n",
+           s.dma_count, s.gpif_state, s.pib_errors,
+           s.last_pib_arg, s.i2c_failures, s.ep_underruns);
+    return 0;
+}
+
+/* Verify I2C failure counter increments on NACK.
+ * Read stats, trigger I2C NACK (absent address 0xC2), read stats again. */
+static int do_test_stats_i2c(libusb_device_handle *h)
+{
+    struct fx3_stats before, after;
+    int r = read_stats(h, &before);
+    if (r < 0) {
+        printf("FAIL stats_i2c: initial read: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Trigger I2C NACK — read from absent address 0xC2 */
+    uint8_t buf[1];
+    ctrl_read(h, I2CRFX3, 0xC2, 0, buf, 1);  /* expected to fail */
+
+    r = read_stats(h, &after);
+    if (r < 0) {
+        printf("FAIL stats_i2c: post read: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    if (after.i2c_failures > before.i2c_failures) {
+        printf("PASS stats_i2c: i2c_failures %u -> %u after NACK\n",
+               before.i2c_failures, after.i2c_failures);
+        return 0;
+    }
+    printf("FAIL stats_i2c: i2c_failures unchanged (%u -> %u)\n",
+           before.i2c_failures, after.i2c_failures);
+    return 1;
+}
+
+/* Verify PIB error counter increments during unread streaming.
+ * Read stats, start streaming without reading EP1 (causes GPIF overflow),
+ * wait briefly, stop, read stats again. */
+static int do_test_stats_pib(libusb_device_handle *h)
+{
+    struct fx3_stats before, after;
+    int r = read_stats(h, &before);
+    if (r < 0) {
+        printf("FAIL stats_pib: initial read: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Configure ADC at 64 MHz */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL stats_pib: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Start streaming — GPIF pushes to EP1 IN */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL stats_pib: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Wait for DMA buffers to overflow (< 1 ms at 64 MS/s, but give it 2s) */
+    usleep(2000000);
+
+    /* Stop streaming */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(200000);
+
+    r = read_stats(h, &after);
+    if (r < 0) {
+        printf("FAIL stats_pib: post read: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    if (after.pib_errors > before.pib_errors) {
+        printf("PASS stats_pib: pib_errors %u -> %u, last_pib=0x%04X\n",
+               before.pib_errors, after.pib_errors, after.last_pib_arg);
+        return 0;
+    }
+    printf("FAIL stats_pib: pib_errors unchanged (%u -> %u)\n",
+           before.pib_errors, after.pib_errors);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -816,6 +950,9 @@ static void usage(const char *prog)
         "  debug_poll                   Test debug console over USB (issue #26)\n"
         "  pib_overflow                 Provoke + detect PIB error (issue #10)\n"
         "  stack_check                  Query stack watermark, verify headroom (issue #12)\n"
+        "  stats                        Read GETSTATS diagnostic counters\n"
+        "  stats_i2c                    Verify I2C failure counter via NACK\n"
+        "  stats_pib                    Verify PIB error counter via overflow\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -923,6 +1060,15 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stack_check") == 0) {
         rc = do_test_stack_check(h);
+
+    } else if (strcmp(cmd, "stats") == 0) {
+        rc = do_stats(h);
+
+    } else if (strcmp(cmd, "stats_i2c") == 0) {
+        rc = do_test_stats_i2c(h);
+
+    } else if (strcmp(cmd, "stats_pib") == 0) {
+        rc = do_test_stats_pib(h);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);

@@ -173,8 +173,9 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests
-#      + 1 PIB overflow + 1 stack check + optional streaming (3 checks)
-PLANNED=22
+#      + 1 PIB overflow + 1 stack check
+#      + 3 GETSTATS tests + optional streaming (3 checks)
+PLANNED=25
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -442,7 +443,37 @@ output=$(run_cmd stack_check) && {
 }
 
 # ==================================================================
-# 17. Streaming test via rx888_stream
+# 17. GETSTATS readout
+# ==================================================================
+
+output=$(run_cmd stats) && {
+    tap_ok "stats: GETSTATS readout"
+} || {
+    tap_fail "stats: GETSTATS readout failed" "$output"
+}
+
+# ==================================================================
+# 18. GETSTATS I2C failure counter
+# ==================================================================
+
+output=$(run_cmd stats_i2c) && {
+    tap_ok "stats_i2c: I2C failure counter incremented on NACK"
+} || {
+    tap_fail "stats_i2c: I2C failure counter did not increment" "$output"
+}
+
+# ==================================================================
+# 19. GETSTATS PIB error counter
+# ==================================================================
+
+output=$(run_cmd stats_pib) && {
+    tap_ok "stats_pib: PIB error counter incremented on overflow"
+} || {
+    tap_fail "stats_pib: PIB error counter did not increment" "$output"
+}
+
+# ==================================================================
+# 20. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
