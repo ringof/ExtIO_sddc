@@ -284,7 +284,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					CyU3PGpifControlSWInput ( CyFalse   );
-					CyU3PThreadSleep(10);
+					CyU3PGpifDisable(CyFalse);  /* force-stop GPIF SM, keep waveform config */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					isHandled = CyTrue;
