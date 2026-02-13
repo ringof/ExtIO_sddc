@@ -272,23 +272,37 @@ CyFxSlFifoApplnUSBSetupCB (
     	 	case STARTFX3:
 					CyU3PUsbLPMDisable();
     	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+				  DebugPrint(4,"\r\nGO in s=%d",_s); }
+				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
+				{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+				  DebugPrint(4,"\r\nGO dis s=%d",_s); }
     	 		 	CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
 						apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
-						if (apiRetStatus == CY_U3P_SUCCESS)
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nGO gp=%d s=%d",apiRetStatus,_s); }
+					if (apiRetStatus == CY_U3P_SUCCESS)
 							isHandled = CyTrue;
 					}
 					CyU3PGpifControlSWInput ( CyTrue );
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nGO sw s=%d",_s); }
 					break;
 
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nSTP in s=%d",_s); }
 					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nSTP dis s=%d",_s); }
 					CyU3PGpifLoad(&CyFxGpifConfig);  /* reload descriptor so SM is in RESET (state 0) */
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nSTP ld s=%d",_s); }
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					isHandled = CyTrue;
