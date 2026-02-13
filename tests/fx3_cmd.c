@@ -406,7 +406,9 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
         while (*args == ' ') args++;
         if (*args == '\0') args = NULL;
     } else {
-        strncpy(cmd, line, sizeof(cmd) - 1);
+        int len = (int)strlen(line);
+        if (len >= (int)sizeof(cmd)) len = (int)sizeof(cmd) - 1;
+        memcpy(cmd, line, len);
     }
 
     /* Help */
