@@ -1245,13 +1245,14 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
         return 1;
     }
 
-    /* State 0 = RESET (after GpifDisable), 1 = IDLE (graceful stop) */
-    if (s.gpif_state == 0 || s.gpif_state == 1) {
+    /* State 0 = RESET, 1 = IDLE (graceful stop),
+     * 255 = GPIF block disabled (CyU3PGpifDisable with force=true) */
+    if (s.gpif_state == 0 || s.gpif_state == 1 || s.gpif_state == 255) {
         printf("PASS stop_gpif_state: GPIF state=%u after STOP (SM properly stopped)\n",
                s.gpif_state);
         return 0;
     }
-    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 0 or 1, SM still running)\n",
+    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 0, 1, or 255; SM still running)\n",
            s.gpif_state);
     return 1;
 }
