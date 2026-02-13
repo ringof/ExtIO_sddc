@@ -96,7 +96,7 @@ void StartApplication ( void ) {
     epCfg.burstLen = ENDPOINT_BURST_LENGTH;
     epCfg.streams = 0;
     epCfg.pcktSize = ENDPOINT_BURST_SIZE;
-    epCfg.isoPkts = 1;
+    epCfg.isoPkts = 0;   /* bulk endpoint — isoPkts is for ISO EPs only */
 
     glDMACount= 0;
     glCounter[0] = glCounter[1] = glCounter[2] = 0;
