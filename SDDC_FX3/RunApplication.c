@@ -241,8 +241,8 @@ void ApplicationThread ( uint32_t input)
 								DebugPrint(4, "\r\nWDG: === RECOVERY START ===");
 								CyU3PGpifControlSWInput(CyFalse);
 
-								rc = CyU3PGpifDisable(CyFalse);
-								DebugPrint(4, "\r\nWDG: GpifDisable rc=%d", rc);
+								CyU3PGpifDisable(CyFalse);
+								DebugPrint(4, "\r\nWDG: GpifDisable done");
 
 								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
 								DebugPrint(4, "\r\nWDG: DmaReset rc=%d", rc);
