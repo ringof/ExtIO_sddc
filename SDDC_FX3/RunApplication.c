@@ -28,6 +28,8 @@ extern void ParseCommand(void);
 // Declare external data
 extern const char* EventName[];
 extern uint32_t glDMACount;
+extern uint32_t glCounter[20];
+extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 
 // Global data owned by this module
 CyBool_t glIsApplnActive = CyFalse;     // Set true once device is enumerated
@@ -211,6 +213,63 @@ void ApplicationThread ( uint32_t input)
 						MsgParsing(glQevent);
 					}
 				}
+				/* GPIF watchdog: detect and recover from DMA stalls.
+				 * If glDMACount hasn't advanced for 3 consecutive 100ms
+				 * polls while the GPIF SM is in a BUSY/WAIT state, the
+				 * streaming pipeline is wedged.  Tear it down and rebuild. */
+				if (glIsApplnActive)
+				{
+					static uint32_t prevDMACount = 0;
+					static uint8_t  stallCount = 0;
+
+					uint32_t curDMA = glDMACount;
+					if (curDMA == prevDMACount && curDMA > 0)
+					{
+						uint8_t gpifState = 0xFF;
+						CyU3PGpifGetSMState(&gpifState);
+
+						if (gpifState == 5 || gpifState == 7 ||
+						    gpifState == 8 || gpifState == 9)
+						{
+							stallCount++;
+							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
+							{
+								DebugPrint(4, "\r\nGPIF WEDGE (state=%d), recovering", gpifState);
+								CyU3PGpifControlSWInput(CyFalse);
+								CyU3PGpifDisable(CyFalse);
+								CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+								CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+
+								if (!si5351_pll_locked())
+								{
+									DebugPrint(4, " PLL_A unlocked, waiting for host");
+								}
+								else
+								{
+									DebugPrint(4, " PLL OK, auto-restart");
+									CyU3PDmaMultiChannelSetXfer(
+										&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+									CyU3PGpifSMStart(0, 0);
+									CyU3PGpifControlSWInput(CyTrue);
+								}
+								glCounter[2]++;  /* watchdog recovery — shares the
+								                  * GETSTATS [15..18] slot with EP underrun
+								                  * count (both indicate streaming faults) */
+								stallCount = 0;
+								prevDMACount = 0;
+								glDMACount = 0;
+							}
+						}
+						else
+							stallCount = 0;
+					}
+					else
+					{
+						stallCount = 0;
+						prevDMACount = curDMA;
+					}
+				}
+
 #ifndef _DEBUG_USB_  // second count in serial debug
 				if (glDMACount > 7812)
 				{
