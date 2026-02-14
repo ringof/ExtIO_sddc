@@ -272,42 +272,34 @@ CyFxSlFifoApplnUSBSetupCB (
     	 	case STARTFX3:
 					CyU3PUsbLPMDisable();
     	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-				  DebugPrint(4,"\r\nGO in s=%d",_s); }
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
-				{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-				  DebugPrint(4,"\r\nGO dis s=%d",_s); }
     	 		 	CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
 						apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nGO gp=%d s=%d",apiRetStatus,_s); }
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
 						CyU3PGpifControlSWInput ( CyTrue );
-						{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-						  DebugPrint(4,"\r\nGO sw s=%d",_s); }
 						isHandled = CyTrue;
 					}
 					}
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nGO s=%d r=%d",_s,apiRetStatus); }
 					break;
 
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nSTP in s=%d",_s); }
 					CyU3PGpifControlSWInput(CyFalse);  /* deassert FW_TRG before disable */
 					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nSTP dis s=%d",_s); }
 					/* Do NOT call CyU3PGpifLoad() here — it re-enables the GPIF
 					 * block, causing the SM to auto-advance.  STARTFX3 will reload
 					 * the waveform via StartGPIF() when streaming resumes. */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;
 					break;
 

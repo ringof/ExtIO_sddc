@@ -180,13 +180,12 @@ instrumentation visible via `fx3_cmd debug` USB polling.
 
 | Message | When | What it captures |
 |---------|------|------------------|
-| `GO in s=N` | STARTFX3 entry | SM state before any action |
-| `GO dis s=N` | After GpifDisable in START | SM state after force-stop |
-| `GO gp=R s=N` | After StartGPIF() | Return code R + SM state |
-| `GO sw s=N` | After SWInput assert | SM state after FW_TRG set |
-| `STP in s=N` | STOPFX3 entry | SM state before any action |
-| `STP dis s=N` | After GpifDisable in STOP | SM state after force-stop |
-| `STP ld s=N` | After GpifLoad in STOP | SM state after waveform reload |
+| `GO s=N r=R` | STARTFX3 completion | Final SM state + last apiRetStatus |
+| `STP s=N` | STOPFX3 completion | SM state after full stop sequence |
+
+Previous verbose per-step messages (`GO in`, `GO dis`, `GO gp`, `GO sw`,
+`STP in`, `STP dis`, `STP ld`) were removed to reduce DebugPrint
+pressure in the EP0 callback context.
 
 ### Test Procedure for Diagnostic Firmware
 
@@ -308,6 +307,179 @@ Rationale:
 
 Move `CyU3PGpifControlSWInput(CyTrue)` inside the success path so
 it only fires when StartGPIF() succeeded.
+
+---
+
+## fw_test.sh STARTFX3 Timeout — Root Cause (2026-02-14)
+
+### Symptom
+
+`fw_test.sh` test 25 (`stop_gpif_state`) fails with:
+```
+FAIL stop_gpif_state: STARTFX3: Operation timed out
+```
+After the timeout, the device is completely unresponsive (all subsequent
+EP0 transfers return I/O Error).  However, the same test passes when
+run interactively from the `!` debug console.
+
+### Diagnostic Tests Performed
+
+| Test | Method | Result |
+|------|--------|--------|
+| fw_test.sh → debug_poll after | Script then manual | Device dead (I/O Error) |
+| Interactive `!stop` → `!start` | Debug console | PASS + PIB error 0x1005 |
+| Interactive `!stop` → `!adc 0` → `!adc 32M` → `!start` | Debug console | PASS |
+| Separate processes: stop → adc 0 → adc 32M → start | Command line | PASS |
+
+Key observation: the failure **only** occurs in `fw_test.sh`, never in
+manual tests.  The interactive test shows `GpifLoad = Succes[sful]`
+confirming GPIF reload works.
+
+### Root Cause: `CyU3PThreadSleep(100)` in `DebugPrint2USB`
+
+The `DebugPrint2USB` function (`DebugConsole.c:256`) sleeps **100ms** when
+the USB debug buffer is full:
+
+```c
+if (glDebTxtLen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
+```
+
+This is called from the USB EP0 callback (STARTFX3 handler) in the USB
+thread context.  The host **cannot** drain the buffer during this sleep
+because the USB thread is blocked in the same callback.
+
+**Trigger chain in fw_test.sh:**
+
+1. Test 20 (`debug_poll`) sets `glFlagDebug = true` — this enables
+   `DebugPrint2USB` (otherwise it returns at line 245 without doing
+   anything).
+2. Tests 21-24 generate DebugPrint output that fills the 100-byte
+   `glBufDebug[]`.  No test between 21 and 25 polls `READINFODEBUG`,
+   so the buffer is never drained.
+3. Test 25 (`stop_gpif_state`) sends STARTFX3.  The EP0 callback
+   runs in the USB thread.
+4. The STARTFX3 handler has **6 DebugPrint calls** (`GO in`, `GO dis`,
+   `GPIF file`, `GpifLoad = Successful`, `GO gp=`, `GO sw=`).
+   Each call finds the buffer full → `CyU3PThreadSleep(100)`.
+5. Cumulative delay: **≥600ms** in the EP0 callback.  Combined with
+   SDK call execution and RTOS scheduling jitter, this approaches or
+   exceeds the host's 1000ms `CTRL_TIMEOUT_MS`.
+6. The host times out → USB thread is left in a bad state →
+   device becomes completely unresponsive.
+
+**Why the interactive test works:** The `fx3_cmd debug` session
+continuously polls `READINFODEBUG` every 50ms, keeping the buffer
+drained.  `DebugPrint` never triggers the sleep.
+
+**Why Test 5 (separate processes) works:** `glFlagDebug` was never
+set to `true`.  `DebugPrint2USB` returns immediately at line 245
+(`glFlagDebug == false`), skipping buffer and sleep entirely.
+
+### Fix: Remove `CyU3PThreadSleep` from `DebugPrint2USB`
+
+```c
+void DebugPrint2USB(uint8_t priority, char *msg, ...) {
+    if ((glIsApplnActive != CyTrue) || (glFlagDebug == false)) return;
+    va_list argp;
+    uint8_t buf[MAXLEN_D_USB];
+    CyU3PReturnStatus_t stat;
+    uint16_t len = MAXLEN_D_USB;
+    va_start(argp, msg);
+    stat = MyDebugSNPrint(buf, &len, msg, argp);
+    va_end(argp);
+    if (stat == CY_U3P_SUCCESS) {
+        uint32_t intMask = CyU3PVicDisableAllInterrupts();
+        if (glDebTxtLen + len < MAXLEN_D_USB) {
+            memcpy(&glBufDebug[glDebTxtLen], buf, len);
+            glDebTxtLen = glDebTxtLen + len;
+        }
+        CyU3PVicEnableInterrupts(intMask);
+    }
+}
+```
+
+Rationale: `CyU3PThreadSleep` inside a function callable from the USB
+EP0 callback is fundamentally unsafe.  The sleep was intended to let
+the host drain the buffer, but in EP0 context the host **cannot** drain
+it (the USB thread is blocked).  If the buffer is full, silently drop
+the message — this is the same behavior as when `glFlagDebug == false`.
+
+### Upstream Provenance: Latent Bug Since Original Firmware
+
+Comparison with the original upstream project
+([ik1xpv/ExtIO_sddc](https://github.com/ik1xpv/ExtIO_sddc/blob/master/SDDC_FX3/DebugConsole.c))
+confirms that the `CyU3PThreadSleep(100)` has been present since the
+original codebase.  The original function is identical except for
+variable naming (`flagdebug`, `debtxtlen`, `bufdebug` vs our
+`glFlagDebug`, `glDebTxtLen`, `glBufDebug`) and the absence of
+interrupt masking around the memcpy (a separate race-condition bug
+in the original).
+
+The original upstream code also enables `TRACESERIAL` by default
+(`Application.h: #define TRACESERIAL`), which calls `TraceSerial()`
+**after every EP0 vendor request** (`USBHandler.c:370`).
+`TraceSerial` calls `DebugPrint` **2–3 times per request**:
+
+```c
+void TraceSerial(uint8_t bRequest, ...) {
+    if (bRequest != READINFODEBUG) {
+        DebugPrint(4, "%s\t", FX3CommandName[...]);   // (1) command name
+        switch(bRequest) {
+            case STARTADC:
+                DebugPrint(4, "%d", ...);             // (2) argument
+                break;
+            case STARTFX3:
+            case STOPFX3:
+                break;                                // (no arg for these)
+            ...
+        }
+        DebugPrint(4, "\r\n\n");                      // (3) terminator
+    }
+}
+```
+
+This means **every vendor request in the original firmware** — not
+just our added diagnostic prints — was subject to the 100ms sleep
+per DebugPrint call when the buffer was full and debug mode was
+enabled.
+
+**Impact on original firmware restart failures:**  The long-standing
+user-reported issue where restarting the application firmware fails
+(requiring `RESETFX3` or a full USB port reset) is consistent with
+this bug.  The failure scenario in the original code:
+
+1. Host application (ExtIO_sddc) sends `TESTFX3` with `wValue=1`,
+   enabling debug mode (`flagdebug = true`).
+2. Vendor requests accumulate `DebugPrint` output in the 100-byte
+   buffer.  The Windows host application does not poll
+   `READINFODEBUG`, so the buffer fills and stays full.
+3. Host sends `STOPFX3` → EP0 callback runs.  `TraceSerial` calls
+   `DebugPrint` 2× → 200ms sleep.  Plus the original `STOPFX3`
+   handler's own `CyU3PThreadSleep(10)` → **210ms total** in EP0.
+4. Host immediately sends `STARTFX3` → EP0 callback runs.
+   `TraceSerial` calls `DebugPrint` 2× → **200ms sleep** in EP0.
+5. Depending on host-side timeout and USB stack behavior, the
+   cumulative delay causes intermittent EP0 timeouts.
+6. A single EP0 timeout corrupts the USB thread state, making the
+   device unresponsive until reset.
+
+This explains why the failure was intermittent and hard to
+reproduce: it required debug mode to be enabled AND the buffer to
+be full AND a vendor request with enough DebugPrint calls to exceed
+the host timeout.
+
+**Additional original bug — no interrupt masking:**  The original
+`DebugPrint2USB` does not use `CyU3PVicDisableAllInterrupts()`
+around the `memcpy` + `debtxtlen` update.  If the `PibErrorCallback`
+(which calls `DebugPrint`) fires during the memcpy, the buffer could
+be corrupted.  Our fork already fixed this with interrupt masking.
+
+### Secondary Fix: Reduce diagnostic prints in STARTFX3
+
+The 6 DebugPrint calls in STARTFX3 were added for initial debugging
+and are now excessive for production use.  Reduce to 1 call (final
+state + return code) to minimize buffer pressure even after the
+sleep fix.  STOPFX3 similarly reduced from 2 to 1.
 
 ---
 

@@ -253,7 +253,11 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 		va_end (argp);
 		if ( stat == CY_U3P_SUCCESS )
 		{
-			if (glDebTxtLen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
+			/* Never sleep here — this function is called from the USB
+			 * EP0 callback (STARTFX3/STOPFX3 handlers) in the USB
+			 * thread context.  Sleeping blocks the EP0 response and
+			 * causes host-side timeouts.  If the buffer is full, just
+			 * drop the message silently. */
 			uint32_t intMask = CyU3PVicDisableAllInterrupts();
 			if (glDebTxtLen+len < MAXLEN_D_USB)
 			{
