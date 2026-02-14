@@ -360,7 +360,10 @@ CyFxSlFifoApplnUSBSetupCB (
 							if (len > CYFX_SDRAPP_MAX_EP0LEN - 1)
 								len = CYFX_SDRAPP_MAX_EP0LEN - 1;
 							memcpy(glEp0Buffer, glBufDebug, len);
-							glDebTxtLen=0;
+							uint16_t remain = glDebTxtLen - len;
+							if (remain > 0)
+								memmove(glBufDebug, glBufDebug + len, remain);
+							glDebTxtLen = remain;
 							CyU3PVicEnableInterrupts(intMask);
 							glEp0Buffer[len] = '\0';
 							CyU3PUsbSendEP0Data (len + 1, glEp0Buffer);
