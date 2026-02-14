@@ -846,17 +846,28 @@ static int do_test_pib_overflow(libusb_device_handle *h)
         return 1;
     }
 
-    /* 5. Don't read EP1 IN.  Just poll debug output for ~5 seconds.
-     *    The 4 × 16 KB DMA buffers fill in < 1 ms at 64 MS/s,
-     *    so PIB errors should appear almost immediately.
+    /* 5. Let DMA buffers fill and PIB errors fire.
+     *    At 64 MS/s the 4 × 16 KB DMA buffers fill in < 1 ms, so
+     *    PIB error interrupts begin almost immediately.  However,
+     *    the interrupt rate (~64 MHz) saturates the ARM core and
+     *    starves the application thread — it can never wake from
+     *    CyU3PThreadSleep to dequeue events and format "PIB error"
+     *    text into the debug buffer.
      *
-     *    Do NOT drain trace output before polling — the main thread
-     *    processes PIB error events on its first 100ms wake cycle
-     *    and formats them into the same debug buffer.  A blind drain
-     *    at 150ms discards those messages, and no further PIB errors
-     *    fire once the GPIF stalls, leaving the poll loop empty. */
-    for (int attempt = 0; attempt < 100; attempt++) {
-        usleep(50000);  /* 50ms poll interval */
+     *    Fix: stop the GPIF to end the interrupt storm, then give
+     *    the application thread time to wake and process events. */
+    usleep(50000);  /* 50ms — plenty of time for DMA to fill */
+
+    /* 6. Stop streaming — ends the PIB interrupt storm */
+    cmd_u32(h, STOPFX3, 0);
+
+    /* 7. Let the application thread wake (100ms sleep cycle) and
+     *    process the queued PIB error events into the debug buffer. */
+    usleep(300000);
+
+    /* 8. Now read the debug buffer.  It should contain trace output
+     *    from STARTFX3 followed by PIB error messages. */
+    for (int attempt = 0; attempt < 20; attempt++) {
         r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
         if (r > 0) {
             int copy = r - 1;  /* strip NUL terminator */
@@ -866,22 +877,16 @@ static int do_test_pib_overflow(libusb_device_handle *h)
                 memcpy(collected + collected_len, buf, copy);
                 collected_len += copy;
             }
-            /* Check for the PIB error signature as we go */
             if (strstr(collected, "PIB error")) {
                 found_pib_error = 1;
                 break;
             }
         }
+        usleep(50000);  /* 50ms between polls */
     }
     collected[collected_len] = '\0';
 
-    /* 6. Stop streaming */
-    cmd_u32(h, STOPFX3, 0);
-
-    /* Allow device to settle */
-    usleep(200000);
-
-    /* 7. Verify device is still alive */
+    /* 9. Verify device is still alive */
     r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
         printf("FAIL pib_overflow: device unresponsive after test: %s\n",
