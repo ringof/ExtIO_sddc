@@ -394,6 +394,11 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd stats` | Read and display all GETSTATS diagnostic counters | -- |
 | `fx3_cmd stats_i2c` | Verify I2C failure counter increments after NACK on absent address | -- |
 | `fx3_cmd stats_pib` | Verify PIB error counter is non-zero (opportunistic after `pib_overflow`) | -- |
+| `fx3_cmd stats_pll` | Verify Si5351 PLL A locked and SYS_INIT clear via GETSTATS byte 19 | -- |
+| `fx3_cmd stop_gpif_state` | START+STOP, verify GPIF SM state is 0, 1, or 255 (not stuck in read) | -- |
+| `fx3_cmd stop_start_cycle` | Cycle STOP+START 5 times, verify bulk data flows each cycle | -- |
+| `fx3_cmd pll_preflight` | Verify STARTFX3 is rejected (STALL) when ADC clock is off | -- |
+| `fx3_cmd wedge_recovery` | Provoke DMA backpressure wedge, verify STOP+START recovers data flow | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
 ### 6.2 `fw_test.sh` -- Automated TAP Test Suite
@@ -403,7 +408,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 26 tests (29 with streaming) in TAP format:
+Runs 30 tests (33 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -427,9 +432,13 @@ Runs 26 tests (29 with streaming) in TAP format:
 | 22 | GETSTATS readout | GETSTATS (0xB3) returns 20 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
 | 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
-| 25 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 26 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
-| 27--29 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 25 | GPIF stop state | GPIF SM state is 0, 1, or 255 after STOPFX3 (not stuck in read) |
+| 26 | Stop/start cycle | 5 STOP+START cycles with bulk read each -- detects GPIF wedge |
+| 27 | PLL preflight | STARTFX3 rejected (STALL) when ADC clock is off |
+| 28 | Wedge recovery | DMA backpressure wedge, then STOP+START recovers data flow |
+| 29 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 30 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
+| 31--33 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
@@ -437,7 +446,7 @@ Options:
 --firmware PATH        Firmware .img file (required)
 --stream-seconds N     Streaming duration (default: 5)
 --rx888-stream PATH    Path to rx888_stream binary
---skip-stream          Skip streaming tests (tests 26--28)
+--skip-stream          Skip streaming tests (tests 31--33)
 --sample-rate HZ       ADC sample rate (default: 32000000)
 ```
 
