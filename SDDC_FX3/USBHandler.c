@@ -282,7 +282,10 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * and si5351_pll_locked() in Si5351.c for details.
 				 */
 				if (!GpifPreflightCheck()) {
-					isHandled = CyFalse;
+					/* Data phase already ACKed by GetEP0Data;
+					 * stall status phase so host sees rejection. */
+					CyU3PUsbStall(0, CyTrue, CyFalse);
+					isHandled = CyTrue;
 					break;
 				}
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */

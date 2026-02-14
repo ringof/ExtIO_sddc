@@ -88,6 +88,10 @@ void DmaCallback (
  */
 CyBool_t GpifPreflightCheck(void)
 {
+	if (!si5351_clk0_enabled()) {
+		DebugPrint(4, "\r\nPreflight FAIL: ADC clock not enabled");
+		return CyFalse;
+	}
 	if (!si5351_pll_locked()) {
 		DebugPrint(4, "\r\nPreflight FAIL: Si5351 PLL_A not locked");
 		return CyFalse;
