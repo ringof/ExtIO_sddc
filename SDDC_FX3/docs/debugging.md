@@ -245,7 +245,95 @@ UART/debug subsystem is initialized.
 
 ---
 
-## 5. Diagnostic Counters (GETSTATS)
+## 5. GPIF Watchdog Recovery
+
+The application thread (`RunApplication.c:216-295`) runs a watchdog
+that detects and recovers from DMA stalls caused by host-side
+backpressure.  All watchdog activity is logged to the debug console
+with a `WDG:` prefix.
+
+### Detection
+
+Every 100 ms the main loop compares `glDMACount` to its previous value.
+If the count has not advanced and the GPIF state machine is in one of
+the backpressure states (5 = TH0_BUSY, 7 = TH1_BUSY, 8 = TH1_WAIT,
+9 = TH0_WAIT), the stall counter increments:
+
+```
+WDG: stall 1/3 SM=5 DMA=48210
+WDG: stall 2/3 SM=5 DMA=48210
+WDG: stall 3/3 SM=5 DMA=48210
+```
+
+If DMA resumes or the SM exits the stuck states before the counter
+reaches 3, the stall is cleared:
+
+```
+WDG: DMA resumed (48210->48215), stall cleared
+WDG: stall cleared SM=2 (was 1/3)
+```
+
+### Recovery (after 3 consecutive stalls = 300 ms)
+
+When the stall counter reaches 3, the watchdog tears down and rebuilds
+the streaming pipeline:
+
+```
+WDG: === RECOVERY START ===
+WDG: GpifDisable done
+WDG: DmaReset rc=0
+WDG: FlushEp rc=0
+```
+
+It then checks if the Si5351 PLL A is still locked:
+
+- **PLL locked:** auto-restarts streaming (DMA SetXfer, GPIF SMStart,
+  assert FW_TRG).
+
+  ```
+  WDG: PLL_A locked, auto-restart
+  WDG: SetXfer rc=0
+  WDG: SMStart rc=0
+  WDG: === RECOVERY DONE (total=1) ===
+  ```
+
+- **PLL unlocked:** leaves the pipeline torn down and waits for the
+  host to reconfigure the clock and send `STARTFX3`.
+
+  ```
+  WDG: PLL_A UNLOCKED, waiting for host
+  WDG: === RECOVERY DONE (total=1) ===
+  ```
+
+### Counter
+
+Each recovery increments `glCounter[2]`, readable via `GETSTATS`
+at offset 15--18.  This counter shares the slot formerly used for EP
+underrun events -- both indicate streaming faults.  The counter resets
+to zero on USB re-enumeration (`StartApplication`), not on
+`STOPFX3`/`STARTFX3`.
+
+### Observing the watchdog
+
+From `fx3_cmd debug`, provoke a stall and watch the log:
+
+```
+!adc 64000000        # set ADC clock to 64 MHz
+!start               # start streaming (host is not reading EP1)
+                     # ... wait ~300ms, watchdog fires ...
+WDG: stall 1/3 SM=5 DMA=4
+WDG: stall 2/3 SM=5 DMA=4
+WDG: stall 3/3 SM=5 DMA=4
+WDG: === RECOVERY START ===
+...
+```
+
+The `wedge_recovery` test in `fx3_cmd` exercises this path
+programmatically and checks `glCounter[2]` via `GETSTATS`.
+
+---
+
+## 6. Diagnostic Counters (GETSTATS)
 
 The `GETSTATS` vendor request (`0xB3`) returns a read-only snapshot of
 firmware-internal counters and GPIF state.  It uses no new storage --
@@ -273,7 +361,7 @@ wLength  = 20
 | 5--8 | 4 | PIB error count | `glCounter[0]`, incremented in `PibErrorCallback` |
 | 9--10 | 2 | Last PIB error arg | `glLastPibArg`, saved in `PibErrorCallback` |
 | 11--14 | 4 | I2C failure count | `glCounter[1]`, incremented in `I2cTransfer` on error |
-| 15--18 | 4 | EP underrun count | `glCounter[2]`, incremented in `USBEventCallback` |
+| 15--18 | 4 | Watchdog recovery count | `glCounter[2]`, incremented by GPIF watchdog on each recovery (see section 5) |
 | 19 | 1 | Si5351 status (reg 0) | `I2cTransfer(0x00, 0xC0, …)` sampled at read time |
 
 ### Counter Behavior
@@ -297,9 +385,9 @@ PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0 pll=0x00
 
 ---
 
-## 6. Host-Side Tools
+## 7. Host-Side Tools
 
-### 6.1 `fx3_cmd` -- Vendor Command Exerciser
+### 7.1 `fx3_cmd` -- Vendor Command Exerciser
 
 Built from `tests/fx3_cmd.c`.  Provides both interactive and automated
 access to all debug facilities.
@@ -401,7 +489,7 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd wedge_recovery` | Provoke DMA backpressure wedge, verify STOP+START recovers data flow | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
-### 6.2 `fw_test.sh` -- Automated TAP Test Suite
+### 7.2 `fw_test.sh` -- Automated TAP Test Suite
 
 ```
 cd tests && make
@@ -452,7 +540,7 @@ Options:
 
 ---
 
-## 7. File Map
+## 8. File Map
 
 | File | Debug role |
 |------|-----------|
@@ -461,13 +549,13 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
-| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery |
 | `tests/fx3_cmd.c` | Host-side vendor command tool with interactive debug console |
 | `tests/fw_test.sh` | Automated TAP test suite |
 
 ---
 
-## 8. Known Limitations
+## 9. Known Limitations
 
 | Area | Description |
 |------|-------------|
