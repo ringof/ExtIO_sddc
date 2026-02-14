@@ -232,39 +232,63 @@ void ApplicationThread ( uint32_t input)
 						    gpifState == 8 || gpifState == 9)
 						{
 							stallCount++;
+							DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
+								stallCount, gpifState, curDMA);
 							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
 							{
-								DebugPrint(4, "\r\nGPIF WEDGE (state=%d), recovering", gpifState);
+								CyU3PReturnStatus_t rc;
+
+								DebugPrint(4, "\r\nWDG: === RECOVERY START ===");
 								CyU3PGpifControlSWInput(CyFalse);
-								CyU3PGpifDisable(CyFalse);
-								CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
-								CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+
+								rc = CyU3PGpifDisable(CyFalse);
+								DebugPrint(4, "\r\nWDG: GpifDisable rc=%d", rc);
+
+								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+								DebugPrint(4, "\r\nWDG: DmaReset rc=%d", rc);
+
+								rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+								DebugPrint(4, "\r\nWDG: FlushEp rc=%d", rc);
 
 								if (!si5351_pll_locked())
 								{
-									DebugPrint(4, " PLL_A unlocked, waiting for host");
+									DebugPrint(4, "\r\nWDG: PLL_A UNLOCKED, waiting for host");
 								}
 								else
 								{
-									DebugPrint(4, " PLL OK, auto-restart");
-									CyU3PDmaMultiChannelSetXfer(
+									DebugPrint(4, "\r\nWDG: PLL_A locked, auto-restart");
+									rc = CyU3PDmaMultiChannelSetXfer(
 										&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
-									CyU3PGpifSMStart(0, 0);
+									DebugPrint(4, "\r\nWDG: SetXfer rc=%d", rc);
+
+									rc = CyU3PGpifSMStart(0, 0);
+									DebugPrint(4, "\r\nWDG: SMStart rc=%d", rc);
+
 									CyU3PGpifControlSWInput(CyTrue);
 								}
 								glCounter[2]++;  /* watchdog recovery — shares the
 								                  * GETSTATS [15..18] slot with EP underrun
 								                  * count (both indicate streaming faults) */
+								DebugPrint(4, "\r\nWDG: === RECOVERY DONE (total=%u) ===",
+									glCounter[2]);
 								stallCount = 0;
 								prevDMACount = 0;
 								glDMACount = 0;
 							}
 						}
 						else
+						{
+							if (stallCount > 0)
+								DebugPrint(4, "\r\nWDG: stall cleared SM=%d (was %d/3)",
+									gpifState, stallCount);
 							stallCount = 0;
+						}
 					}
 					else
 					{
+						if (stallCount > 0)
+							DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
+								prevDMACount, curDMA);
 						stallCount = 0;
 						prevDMACount = curDMA;
 					}
