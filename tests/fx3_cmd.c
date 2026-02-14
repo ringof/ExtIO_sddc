@@ -846,19 +846,15 @@ static int do_test_pib_overflow(libusb_device_handle *h)
         return 1;
     }
 
-    /* 4b. Drain trace messages from STARTADC + STARTFX3/GPIF load.
-     *     These fill the small debug buffer before the main thread
-     *     wakes up (100ms sleep) to format the PIB error message.
-     *     Without this drain the PIB error gets silently dropped. */
-    usleep(150000);  /* let main thread wake and process PIB event */
-    for (int i = 0; i < 5; i++) {
-        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
-        usleep(20000);
-    }
-
     /* 5. Don't read EP1 IN.  Just poll debug output for ~5 seconds.
      *    The 4 × 16 KB DMA buffers fill in < 1 ms at 64 MS/s,
-     *    so PIB errors should appear almost immediately. */
+     *    so PIB errors should appear almost immediately.
+     *
+     *    Do NOT drain trace output before polling — the main thread
+     *    processes PIB error events on its first 100ms wake cycle
+     *    and formats them into the same debug buffer.  A blind drain
+     *    at 150ms discards those messages, and no further PIB errors
+     *    fire once the GPIF stalls, leaving the poll loop empty. */
     for (int attempt = 0; attempt < 100; attempt++) {
         usleep(50000);  /* 50ms poll interval */
         r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
