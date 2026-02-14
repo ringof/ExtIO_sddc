@@ -13,6 +13,7 @@
 
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
+#include "Si5351.h"
 uint32_t glDMACount;
 uint16_t glLastPibArg;
 
@@ -61,6 +62,38 @@ void DmaCallback (
     }
 }
 
+
+/*
+ * GpifPreflightCheck — verify hardware preconditions before starting
+ * the GPIF state machine.
+ *
+ * The GPIF II state machine in this design is synchronous: it clocks
+ * data in on edges of the external ADC sample clock, which is generated
+ * by the Si5351 PLL.  If the SM is started without that clock, it will
+ * stall in a read state waiting for DATA_CNT_HIT, which never fires.
+ * The SM has no state-count timeout (STATE_COUNT_CONFIG = 0), so the
+ * wedge is permanent — only CyU3PGpifDisable(CyTrue) can recover it.
+ *
+ * This function is called from any code path that is about to assert
+ * FW_TRG and begin data flow (currently: the STARTFX3 vendor command).
+ * It is intentionally NOT called from StartApplication(), because that
+ * path loads the SM into IDLE where it waits for FW_TRG — the external
+ * clock is not needed until FW_TRG transitions the SM into read states.
+ *
+ * Today this only checks the Si5351 PLL lock.  Future checks (e.g. DMA
+ * health, VBUS level) can be added here without changing call sites.
+ *
+ * Returns CyTrue  if all checks pass and GPIF may be started.
+ * Returns CyFalse if any check fails — caller must NOT start GPIF.
+ */
+CyBool_t GpifPreflightCheck(void)
+{
+	if (!si5351_pll_locked()) {
+		DebugPrint(4, "\r\nPreflight FAIL: Si5351 PLL_A not locked");
+		return CyFalse;
+	}
+	return CyTrue;
+}
 
 CyU3PReturnStatus_t StartGPIF(void)
 {

@@ -132,6 +132,32 @@ CyU3PReturnStatus_t SetupMultisynth(UINT8 synth, UINT32 divider, UINT8 rDiv)
 	return I2cTransfer ( synth , SI5351_ADDR, sizeof(data), data, false);
 }
 
+/*
+ * si5351_pll_locked — check whether PLL A on the Si5351 is locked.
+ *
+ * Reads the Si5351 device status register (register 0).  Bit 5 (LOL_A)
+ * is set when PLL A has lost lock — i.e. the ADC reference clock is not
+ * being generated.  This function is used by the GPIF preflight check
+ * (GpifPreflightCheck in StartStopApplication.c) to prevent the GPIF
+ * state machine from being started without a valid external clock.
+ *
+ * Returns CyTrue if PLL A is locked and the clock is presumed valid.
+ * Returns CyFalse if PLL A is unlocked, the Si5351 is absent, or the
+ * I2C read fails (all of which mean: don't start the GPIF).
+ */
+CyBool_t si5351_pll_locked(void)
+{
+	uint8_t status = 0xFF;  /* default to "unlocked" if I2C fails */
+	CyU3PReturnStatus_t rc;
+
+	rc = I2cTransfer(0x00, SI5351_ADDR, 1, &status, CyTrue);
+	if (rc != CY_U3P_SUCCESS)
+		return CyFalse;        /* I2C failed — treat as unlocked */
+
+	/* Bit 5 = LOL_A (Loss Of Lock, PLL A).  0 = locked, 1 = unlocked. */
+	return (status & 0x20) == 0;
+}
+
 CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
 {
 	CyU3PReturnStatus_t status;

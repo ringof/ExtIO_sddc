@@ -21,6 +21,7 @@ extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
 extern void StopApplication(void);
 extern CyU3PReturnStatus_t StartGPIF(void);
+extern CyBool_t GpifPreflightCheck(void);  /* StartStopApplication.c */
 extern const CyU3PGpifConfig_t CyFxGpifConfig;
 extern CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig);
 
@@ -272,6 +273,18 @@ CyFxSlFifoApplnUSBSetupCB (
     	 	case STARTFX3:
 					CyU3PUsbLPMDisable();
     	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
+				/*
+				 * Preflight: verify the ADC clock is running before
+				 * starting the GPIF state machine.  The SM is clocked
+				 * by the Si5351 output; without it the SM will wedge
+				 * in a read state with no timeout-based recovery.
+				 * See GpifPreflightCheck() in StartStopApplication.c
+				 * and si5351_pll_locked() in Si5351.c for details.
+				 */
+				if (!GpifPreflightCheck()) {
+					isHandled = CyFalse;
+					break;
+				}
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
     	 		 	CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0);
