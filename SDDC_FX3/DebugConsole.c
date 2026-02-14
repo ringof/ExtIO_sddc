@@ -30,9 +30,6 @@ CyU3PDmaChannel glUARTtoCPU_Handle;		// Handle needed by Uart Callback routine
 char glConsoleInBuffer[32];				// Buffer for user Console Input
 uint32_t glConsoleInIndex;				// Index into ConsoleIn buffer
 uint32_t glCounter[20];					// Counters used to monitor GPIF
-uint32_t glMaxClockValue = 10;
-uint32_t glClockValue;	// Used to Set/Display GPIF clock
-uint8_t glToggle;
 extern uint32_t glQevent __attribute__ ((aligned (32)));
 
 CyBool_t glFlagDebug = false;

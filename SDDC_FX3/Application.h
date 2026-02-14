@@ -79,13 +79,6 @@ extern void DebugPrint2USB ( uint8_t priority, char *msg, ...);
 #define GPIO36			(36) // sense RX888R2
 #define GPIO_LED_BLUE_PIN	21	/* FX3 GPIO pin for blue LED (RX888mk2) */
 
-typedef struct outxio_t
-{
-    uint8_t  buffer[4];         /* The actual byte used is [0][1]  */
-} outxio_t;
-
-
-
 #include "cyu3externcend.h"
 
 CyU3PReturnStatus_t ConfGPIOsimpleout( uint8_t gpioid);

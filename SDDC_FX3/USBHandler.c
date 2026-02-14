@@ -44,7 +44,6 @@ extern uint32_t glDMACount;
 
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
-CyU3PDmaChannel glGPIF2USB_Handle;
 uint8_t  *glEp0Buffer = 0;              /* Buffer used to handle vendor specific control requests. */
 uint8_t  glVendorRqtCnt = 0;
 

@@ -1400,12 +1400,12 @@ static int do_test_pll_preflight(libusb_device_handle *h)
  *   3. Wait 2 seconds (longer than the 300ms watchdog threshold)
  *   4. STOPFX3 + STARTFX3
  *   5. Read EP1 — data should flow if recovery worked
- *   6. Check GETSTATS for recovery counter (glCounter[1])
+ *   6. Check GETSTATS for recovery counter (glCounter[2])
  *
  * On current firmware: step 5 times out (device is wedged).
  * After Phase 2: step 5 succeeds (STOP+START recovers).
  * After Phase 4: the watchdog may auto-recover in step 3, and
- *   glCounter[1] > 0 in GETSTATS. */
+ *   glCounter[2] > 0 in GETSTATS. */
 static int do_test_wedge_recovery(libusb_device_handle *h)
 {
     int r;

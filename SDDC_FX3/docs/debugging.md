@@ -115,8 +115,19 @@ host is polling.
 | Buffer | `glBufDebug[100]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
 | Fill counter | `glDebTxtLen` (declared `volatile uint16_t`) |
 | Formatter | `MyDebugSNPrint()` -- simplified printf supporting `%d`, `%x`, `%s`, `%u`, `%c` |
-| Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, sleeps 100ms and retries once.  If still full, the message is dropped. |
+| Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, the message is silently dropped (see note below). |
 | Synchronization | Writer (`DebugPrint2USB`, application thread) and reader (`READINFODEBUG` handler, USB callback context) use `CyU3PVicDisableAllInterrupts()`/`CyU3PVicEnableInterrupts()` to protect buffer access |
+
+**DebugPrint2USB overflow fix (latent upstream bug):** The original upstream
+firmware called `CyU3PThreadSleep(100)` when the buffer was full, intending to
+let the host drain it.  This is unsafe when `DebugPrint` is called from the USB
+EP0 callback context (e.g. inside STARTFX3/STOPFX3 handlers), because the USB
+thread is blocked in the same callback — the host *cannot* drain the buffer
+during the sleep.  With multiple DebugPrint calls in the handler, cumulative
+sleep time could exceed the host's 1-second control transfer timeout, causing
+the device to become unresponsive.  The fix removes the sleep: if the buffer is
+full, the message is dropped.  This matches the existing behavior when
+`glFlagDebug == false`.
 
 ---
 
