@@ -8,8 +8,8 @@ streamer software enter a deadlocked state with no recovery path short
 of physically unplugging the device.
 
 This document explains why the wedge happens, what detection mechanisms
-the FX3 SDK provides, and how to implement a stop-and-wait recovery
-instead of the current fail-and-wedge behavior.
+the FX3 SDK provides, and how the firmware now implements a
+stop-and-wait recovery.
 
 ---
 
@@ -50,9 +50,8 @@ Clock loss
   → Device is wedged until physical disconnect
 ```
 
-The firmware has no watchdog, no throughput monitor, and the PIB error
-callback is commented out (`StartStopApplication.c:130`), so the entire
-failure chain is silent.
+The firmware now implements a watchdog and preflight check to break
+this chain (see "Implemented recovery" below).
 
 ---
 
@@ -88,22 +87,23 @@ equivalents exist at offset +8):
 These catch the **secondary failure** (DMA congestion after the host
 stops reading), not the clock loss itself.
 
-**Current state:** The callback is enabled (issue #10, resolved):
+**Implementation:** The callback is registered in `StartApplication()`
+(`StartStopApplication.c:167`):
 ```c
-// StartStopApplication.c:129
 CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 ```
 
-The callback body (`StartStopApplication.c:38-44`) logs the error code
-to the debug console and posts the event to the `glEventAvailable` queue
-for host-side visibility.
+The callback body (`StartStopApplication.c:41-49`) increments
+`glCounter[0]`, saves the error argument in `glLastPibArg`, and posts
+the event to the `glEventAvailable` queue where `MsgParsing()` prints
+it to the debug console as `"PIB error 0x..."`.
 
 ### 2. DMA buffer count monitoring
 
-The DMA callback already increments `glDMACount` on every buffer
-completion (`CY_U3P_DMA_CB_PROD_EVENT`).  The application thread loops
-every 100 ms.  By comparing `glDMACount` across iterations, the
-firmware can detect:
+The DMA callback increments `glDMACount` on every buffer completion
+(`CY_U3P_DMA_CB_PROD_EVENT`).  The application thread loops every
+100 ms.  By comparing `glDMACount` across iterations, the firmware
+detects:
 
 - **Count stopped advancing:** DMA is stalled (USB host stopped
   reading, or GPIF stopped producing).
@@ -126,6 +126,11 @@ firmware can detect:
 At 100 ms polling interval, even the slowest rate produces ~48 buffers
 per interval.  A zero-delta is an unambiguous stall indicator.
 
+**Implementation:** The GPIF watchdog in `RunApplication.c:216-295`
+uses `glDMACount` delta == 0 as the first trigger condition.  The
+count must also be > 0 (streaming has started) to avoid false triggers
+on idle devices.
+
 ### 3. GPIF state machine polling
 
 `CyU3PGpifGetSMState()` returns the current state index.  The state
@@ -141,12 +146,14 @@ machine for this application has 10 states:
 | **TH0_WAIT** | **9** | Thread 0 waiting for buffer availability |
 | **TH1_WAIT** | **8** | Thread 1 waiting for buffer availability |
 
-If the state machine is stuck in a BUSY or WAIT state across multiple
-consecutive polls (e.g., 3 polls = 300 ms), the DMA is congested and
-the stream is effectively stalled.
+**Implementation:** The GPIF watchdog checks the SM state as its
+second trigger condition.  A stall is only counted when `glDMACount`
+has not advanced **and** the SM is in one of the four backpressure
+states (5, 7, 8, 9).  If DMA stalls but the SM is in a healthy read
+state, the stall counter is cleared — the slowdown is transient.
 
-This is already accessible via the `gpif` debug console command
-(`DebugConsole.c`), but is not used for automated health monitoring.
+This is also accessible interactively via the `gpif` debug console
+command (`DebugConsole.c`) and via `GETSTATS` byte offset 4.
 
 ### 4. Si5351 PLL lock status (proactive clock verification)
 
@@ -164,20 +171,22 @@ directly tells you whether the clock is running.  This is a **proactive**
 check that detects the root cause (clock failure) rather than the
 symptom (DMA stall).
 
-The I2C bus and Si5351 driver are already initialized; reading one
-register is a single `I2cTransfer()` call:
+**Implementation:** Used in two places:
 
-```c
-uint8_t status;
-I2cTransfer(0x00,         /* register address */
-            0xC0,         /* Si5351 I2C address */
-            1,            /* one byte */
-            &status,
-            CyTrue);      /* read */
-if (status & 0x20) {
-    /* PLL A has lost lock -- ADC clock is bad */
-}
-```
+1. **Pre-flight check** (`GpifPreflightCheck()` in
+   `StartStopApplication.c:89-100`): called before every `STARTFX3`.
+   Verifies CLK0 is enabled (`si5351_clk0_enabled()`) and PLL A is
+   locked (`si5351_pll_locked()`).  If either fails, `STARTFX3` is
+   rejected with an EP0 STALL.
+
+2. **Watchdog recovery** (`RunApplication.c:253-268`): after tearing
+   down the pipeline, the watchdog reads PLL lock status.  If locked,
+   it auto-restarts streaming.  If unlocked, it leaves the pipeline
+   stopped and waits for the host to reconfigure.
+
+3. **GETSTATS** (`USBHandler.c`): the Si5351 status register is
+   sampled at read time and returned as byte 19 of the GETSTATS
+   response, giving the host continuous visibility into PLL health.
 
 ### 5. GPIF event callback
 
@@ -189,7 +198,8 @@ if (status & 0x20) {
   fire at a throughput threshold
 
 These require changes to the GPIF state machine (via GPIF II Designer)
-and are more invasive than the polling approaches above.
+and are more invasive than the polling approaches above.  **Not
+currently implemented.**
 
 ### 6. GPIF state machine redesign (advanced)
 
@@ -204,74 +214,103 @@ The GPIF II Designer tool could be used to modify the state machine to:
 
 This is the most responsive approach but requires regenerating
 `SDDC_GPIF.h` and careful validation of the new state machine timing.
+**Not currently implemented.**
 
 ---
 
-## Recovery strategy
+## Implemented recovery
 
-### Stop-and-wait (recommended)
+### GPIF watchdog (`RunApplication.c:216-295`)
 
-Instead of staying wedged, the firmware should detect the stall and
-autonomously tear down the streaming pipeline, then either restart or
-wait for the host to re-initiate:
+The application thread runs a watchdog inside the existing 100 ms
+polling loop.  The detection and recovery sequence is:
 
 ```
-Detect stall (any of the mechanisms above)
+Every 100 ms (while glIsApplnActive):
   │
-  ├─ 1. CyU3PGpifControlSWInput(CyFalse)    // stop GPIF state machine
-  │
-  ├─ 2. CyU3PGpifDisable(CyFalse)           // disable SM (keep config)
-  │
-  ├─ 3. CyU3PDmaMultiChannelReset(&glChHandleSlFifo)  // flush DMA
-  │
-  ├─ 4. CyU3PUsbFlushEp(CY_FX_EP_CONSUMER)  // flush USB endpoint
-  │
-  ├─ 5. Read Si5351 register 0               // check PLL lock
-  │     │
-  │     ├─ PLL locked → clock is OK, problem was transient
-  │     │   → restart GPIF + DMA (automatic recovery)
-  │     │
-  │     └─ PLL unlocked → clock is bad
-  │         → set status flag for host to query via TESTFX3
-  │         → wait for host to re-send STARTADC + STARTFX3
-  │
-  └─ 6. Log event via debug channel
+  ├─ Compare glDMACount to previous value
+  │   │
+  │   ├─ Count advanced → DMA is healthy
+  │   │   └─ Clear stall counter, update previous count
+  │   │
+  │   └─ Count stalled (== prev, and prev > 0) →
+  │       │
+  │       ├─ Read GPIF SM state
+  │       │   │
+  │       │   ├─ State is 5, 7, 8, or 9 (BUSY/WAIT) →
+  │       │   │   └─ Increment stall counter (log "WDG: stall N/3")
+  │       │   │
+  │       │   └─ State is anything else →
+  │       │       └─ Clear stall counter (transient)
+  │       │
+  │       └─ If stall counter reaches 3 (300 ms stuck) →
+  │           │
+  │           ├─ 1. CyU3PGpifControlSWInput(CyFalse)   // de-assert FW_TRG
+  │           ├─ 2. CyU3PGpifDisable(CyFalse)          // disable SM
+  │           ├─ 3. CyU3PDmaMultiChannelReset()         // flush DMA
+  │           ├─ 4. CyU3PUsbFlushEp(CY_FX_EP_CONSUMER) // flush EP1
+  │           │
+  │           ├─ 5. Check Si5351 PLL lock
+  │           │   │
+  │           │   ├─ PLL locked → auto-restart:
+  │           │   │   ├─ DmaMultiChannelSetXfer (re-arm DMA)
+  │           │   │   ├─ GpifSMStart (restart SM in IDLE)
+  │           │   │   └─ GpifControlSWInput(CyTrue)  // assert FW_TRG
+  │           │   │
+  │           │   └─ PLL unlocked → wait for host:
+  │           │       └─ (host must send STARTADC + STARTFX3)
+  │           │
+  │           ├─ 6. Increment glCounter[2] (watchdog recovery count)
+  │           ├─ 7. Reset stall counter and DMA count
+  │           └─ 8. Log "WDG: === RECOVERY DONE (total=N) ==="
 ```
 
-### Integration points
+### Pre-flight check (`StartStopApplication.c:89-100`)
 
-The recovery logic belongs in `RunApplication.c:ApplicationThread()`
-inside the existing 100 ms polling loop.  The PIB error callback
-(`StartStopApplication.c:PibErrorCallback`) should post an event to
-`glEventAvailable` for deferred handling by the application thread,
-since DMA and GPIF APIs cannot be safely called from interrupt
-context.
+Every `STARTFX3` vendor command runs `GpifPreflightCheck()` before
+touching the GPIF:
+
+```c
+if (!si5351_clk0_enabled()) {
+    DebugPrint(4, "\r\nPreflight FAIL: ADC clock not enabled");
+    return CyFalse;
+}
+if (!si5351_pll_locked()) {
+    DebugPrint(4, "\r\nPreflight FAIL: Si5351 PLL_A not locked");
+    return CyFalse;
+}
+return CyTrue;
+```
+
+If the check fails, the `STARTFX3` handler stalls EP0 and sets
+`isHandled = CyTrue`.  The host sees a rejected command and can retry
+after reprogramming the clock via `STARTADC`.
 
 ### Host notification
 
-The host can be informed of a recovery event through:
+The host is informed of watchdog recovery events through:
 
-1. **TESTFX3 response** -- the 4-byte status response could encode
-   a "recovered from stall" flag in an unused bit of `glFWconfig` or
-   `glVendorRqtCnt`
-2. **Debug-over-USB** -- if `glFlagDebug` is enabled, the recovery
-   message appears in the `READINFODEBUG` buffer
-3. **Stream gap** -- the host will observe a gap in the bulk transfer
-   stream, which it can interpret as a recovery event
+1. **GETSTATS counter** -- `glCounter[2]` (offset 15-18) increments
+   on each watchdog recovery.  Readable via `fx3_cmd stats`.
+2. **Debug-over-USB** -- if `glFlagDebug` is enabled, `WDG:` prefixed
+   messages appear in the `READINFODEBUG` buffer.
+3. **Stream gap** -- the host observes a gap in the bulk transfer
+   stream, which it can interpret as a recovery event.
 
 ---
 
-## Implementation priorities
+## Implementation status
 
-| Priority | Change | Complexity | Detection latency |
-|----------|--------|-----------|-------------------|
-| **1** | Enable PIB error callback, post event to app thread | Low | ~ms (interrupt-driven) |
-| **2** | Add `glDMACount` delta check in main loop | Low | 100-300 ms (polling) |
-| **3** | Add Si5351 PLL lock check before STARTFX3 | Low | N/A (pre-flight check) |
-| **4** | Add GPIF state polling in main loop | Low | 100-300 ms (polling) |
-| **5** | Periodic Si5351 PLL lock check during streaming | Medium | 100-300 ms (polling) |
-| **6** | Redesign GPIF state machine with timeout transitions | High | <1 us (hardware) |
+| Priority | Change | Status | Detection latency |
+|----------|--------|--------|-------------------|
+| **1** | PIB error callback: log + post event to app thread | **Done** (`StartStopApplication.c:41-49,167`) | ~ms (interrupt-driven) |
+| **2** | `glDMACount` delta check in watchdog | **Done** (`RunApplication.c:226`) | 100-300 ms (polling) |
+| **3** | Si5351 PLL lock check before STARTFX3 (preflight) | **Done** (`StartStopApplication.c:89-100`) | N/A (pre-flight) |
+| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | **Done** (`RunApplication.c:229-232`) | 100-300 ms (polling) |
+| **5** | Si5351 PLL lock check during recovery | **Done** (`RunApplication.c:253`) | 300 ms (after 3 stall polls) |
+| **6** | Redesign GPIF state machine with timeout transitions | Not started | <1 us (hardware) |
 
-Priorities 1-4 can be implemented with minimal code changes and no
-hardware or state machine modifications.  They transform the silent
-wedge into a detected-and-recovered condition.
+Priorities 1-5 are implemented.  The silent wedge is now a
+detected-and-recovered condition.  Priority 6 (GPIF SM redesign) would
+provide sub-microsecond detection but requires regenerating
+`SDDC_GPIF.h` via GPIF II Designer and is not yet planned.
