@@ -59,7 +59,7 @@ scientific measurement, and general RF experimentation.
 | **Variable gain amp** | AD8370 | 8-bit programmable-gain amplifier |
 | **VHF tuner** | R828D | Silicon tuner IC for VHF/UHF (detected at I2C address 0x74 during hardware identification; R82xx driver was removed from this fork due to GPL licensing) |
 | **HF LNA** | JFET front-end | Bias-controlled via `BIAS_HF` GPIO |
-| **Red LED** | GPIO 21 | Status indicator; used for error blink on fatal faults |
+| **Blue LED** | GPIO 21 | Status indicator; used for error blink on fatal faults |
 
 ### Signal path
 
@@ -512,12 +512,11 @@ For recognized commands, `isHandled` is set to `CyTrue` and the USB
 stack sends a successful status phase.  For unrecognized `bRequest`
 values, the firmware stalls EP0 and logs the code via `CyU3PDebugPrint`.
 
-The `SETARGFX3` handler has a protocol oddity: it calls
-`CyU3PUsbGetEP0Data()` unconditionally (ACKing the data phase) before
-checking whether `wIndex` identifies a valid argument.  For unknown
-argument IDs, the data phase is already complete but `isHandled` remains
-false, causing a STALL on the status phase -- a DATA-acked-but-STATUS-
-stalled protocol violation.
+The `SETARGFX3` handler calls `CyU3PUsbGetEP0Data()` unconditionally
+(ACKing the data phase) before checking whether `wIndex` identifies a
+valid argument.  For unknown argument IDs, the handler explicitly stalls
+EP0 via `CyU3PUsbStall()` and sets `isHandled = CyTrue`, producing a
+single clean STALL that the host sees as a rejected command.
 
 ---
 
@@ -535,7 +534,7 @@ Each pin is configured as a simple push-pull output during
 | 18 | BIAS_VHF | VHF LNA bias (silicon MMIC) |
 | 19 | BIAS_HF | HF LNA bias (JFET) |
 | 20 | RANDO | ADC randomizer dither enable |
-| 21 | LED_RED | Red status LED |
+| 21 | LED_BLUE | Blue status LED |
 | 24 | PGA | Programmable gain amplifier enable (**inverted**: GPIO high = PGA off) |
 | 26 | ATT_DATA | Serial data to PE4304 and AD8370 (shared) |
 | 27 | ATT_CLK | Serial clock to PE4304 and AD8370 (shared) |
@@ -557,9 +556,9 @@ specific function:
 | 7 | RANDO | High = randomizer on |
 | 8 | BIAS_HF | High = HF LNA biased |
 | 9 | BIAS_VHF | High = VHF LNA biased |
-| 10 | LED_YELLOW | High (but **not wired** -- no GPIO mapped) |
-| 11 | LED_RED | High = LED on |
-| 12 | LED_BLUE | High (but **not wired** -- no GPIO mapped) |
+| 10 | *(unused)* | -- |
+| 11 | LED_BLUE | High = blue LED on (GPIO 21) |
+| 12 | *(unused)* | -- |
 | 15 | VHF_EN | High = VHF path enabled |
 | 16 | PGA_EN | **Inverted**: bit set = PGA disabled |
 
