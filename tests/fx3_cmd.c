@@ -854,19 +854,33 @@ static int do_test_pib_overflow(libusb_device_handle *h)
      *    CyU3PThreadSleep to dequeue events and format "PIB error"
      *    text into the debug buffer.
      *
-     *    Fix: stop the GPIF to end the interrupt storm, then give
-     *    the application thread time to wake and process events. */
-    usleep(50000);  /* 50ms — plenty of time for DMA to fill */
+     *    Second problem: READINFODEBUG zeros glDebTxtLen after
+     *    reading only 63 bytes, discarding the rest of the buffer.
+     *    If trace output (~90 bytes) precedes PIB error text, the
+     *    first 63-byte read gets trace and the PIB text is lost.
+     *
+     *    Fix: drain trace output DURING the storm (app thread is
+     *    guaranteed starved, so only trace is in the buffer), then
+     *    stop GPIF, then let the app thread write PIB error text
+     *    into the now-empty buffer. */
+    usleep(10000);  /* 10ms — DMA fills in < 1ms */
 
-    /* 6. Stop streaming — ends the PIB interrupt storm */
+    /* 6. Drain trace output while the interrupt storm guarantees
+     *    the app thread cannot run (no PIB error text yet). */
+    for (int i = 0; i < 5; i++)
+        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+
+    /* 7. Stop streaming — ends the PIB interrupt storm */
     cmd_u32(h, STOPFX3, 0);
 
-    /* 7. Let the application thread wake (100ms sleep cycle) and
-     *    process the queued PIB error events into the debug buffer. */
+    /* 8. Let the application thread wake (100ms sleep cycle) and
+     *    process the queued PIB error events into the debug buffer.
+     *    The buffer now has only STOPFX3 trace (~12 bytes) followed
+     *    by PIB error text — well within the 63-byte read limit. */
     usleep(300000);
 
-    /* 8. Now read the debug buffer.  It should contain trace output
-     *    from STARTFX3 followed by PIB error messages. */
+    /* 9. Read the debug buffer.  STOPFX3 trace + PIB error text
+     *    fits in a single 63-byte read. */
     for (int attempt = 0; attempt < 20; attempt++) {
         r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
         if (r > 0) {
@@ -886,7 +900,7 @@ static int do_test_pib_overflow(libusb_device_handle *h)
     }
     collected[collected_len] = '\0';
 
-    /* 9. Verify device is still alive */
+    /* 10. Verify device is still alive */
     r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
         printf("FAIL pib_overflow: device unresponsive after test: %s\n",
