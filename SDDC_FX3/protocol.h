@@ -68,7 +68,7 @@ enum ArgumentList {
 };
 
 #define _DEBUG_USB_
-#define MAXLEN_D_USB (100)
+#define MAXLEN_D_USB (256)
 
 /* Debug trace: command-name lookup tables */
 #define FX3_CMD_BASE           0xAA
