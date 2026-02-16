@@ -33,7 +33,7 @@ void StartApplication(void);
 void StopApplication(void);
 
 const char* glBusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
-char* glCyFxGpifName = { "HF103.h" };
+static const char *const glCyFxGpifName = { "HF103.h" };
 
 CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U transfer. */
 
