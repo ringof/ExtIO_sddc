@@ -73,7 +73,7 @@ flushes and executes the command.
 
 | Condition | Data phase |
 |-----------|-----------|
-| `glDebTxtLen > 0` | Firmware copies `glBufDebug[]` (up to 100 bytes of ASCII) to the data phase, resets `glDebTxtLen` to 0 |
+| `glDebTxtLen > 0` | Firmware copies up to 63 bytes from `glBufDebug[]` to the data phase (limited by `CYFX_SDRAPP_MAX_EP0LEN - 1`).  Remaining data is shifted via `memmove` and returned on subsequent polls. |
 | `glDebTxtLen == 0` | Firmware STALLs EP0 to signal "no data available" |
 
 The last byte of the data phase is a NUL terminator placed by the
@@ -112,7 +112,7 @@ host is polling.
 
 | Item | Detail |
 |------|--------|
-| Buffer | `glBufDebug[100]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
+| Buffer | `glBufDebug[256]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
 | Fill counter | `glDebTxtLen` (declared `volatile uint16_t`) |
 | Formatter | `MyDebugSNPrint()` -- simplified printf supporting `%d`, `%x`, `%s`, `%u`, `%c` |
 | Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, the message is silently dropped (see note below). |
