@@ -203,15 +203,13 @@ void ApplicationThread ( uint32_t input)
 			DebugPrint(4, "\r\nMAIN now running forever: ");
 			while(1)
 			{
+				// Check for User Commands (and other CallBack Events) every 100msec
+				CyU3PThreadSleep(100);
+				nline =0;
+				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 				{
-					// Check for User Commands (and other CallBack Events) every 100msec
-					CyU3PThreadSleep(100);
-					nline =0;
-					while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
-					{
-						if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
-						MsgParsing(glQevent);
-					}
+					if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
+					MsgParsing(glQevent);
 				}
 				/* GPIF watchdog: detect and recover from DMA stalls.
 				 * If glDMACount hasn't advanced for 3 consecutive 100ms
