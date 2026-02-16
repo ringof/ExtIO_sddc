@@ -73,12 +73,17 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 			break;
 
 		case GPIOFX3:
-			DebugPrint(4, "\t0x%x", * (uint32_t *) pdata);
+			{
+				uint32_t val; memcpy(&val, pdata, 4);
+				DebugPrint(4, "\t0x%x", val);
+			}
 			break;
 
-
 		case STARTADC:
-			DebugPrint(4, "%d", * (uint32_t *) pdata);
+			{
+				uint32_t val; memcpy(&val, pdata, 4);
+				DebugPrint(4, "%d", val);
+			}
 			break;
 
 		case STARTFX3:
@@ -179,7 +184,7 @@ CyFxSlFifoApplnUSBSetupCB (
 			case GPIOFX3:
 					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
 					{
-						uint32_t mdata = * (uint32_t *) &glEp0Buffer[0];
+						uint32_t mdata; memcpy(&mdata, glEp0Buffer, 4);
 						rx888r2_GpioSet(mdata);
 						isHandled = CyTrue;
 					}
@@ -189,7 +194,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
 					{
 						uint32_t freq;
-						freq = *(uint32_t *) &glEp0Buffer[0];
+						memcpy(&freq, glEp0Buffer, 4);
 						apiRetStatus = si5351aSetFrequencyA(freq);
 						if (apiRetStatus == CY_U3P_SUCCESS) {
 							CyU3PThreadSleep(1000);
