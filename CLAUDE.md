@@ -18,6 +18,11 @@ Before any approved commit, provide the user — in the chat — with a **copy-p
 3. **Validation test** — a concrete procedure to demonstrate the change works as intended. If a runtime validation test is not feasible, provide a clear rationale explaining why code inspection is sufficient.
 4. **Regression test** — a procedure or set of checks demonstrating that other functions of the code remain unaffected by the change.
 
+## Issue Filing Policy
+
+- **Always audit the codebase before filing issues.** Issue descriptions must be derived from actual findings, not speculation about what might be wrong.
+- Never assume a problem exists — verify it with concrete evidence (grep, file reads, build output) before writing it up.
+
 ## GitHub Issues from Plans
 
 - When a plan contains many changes/tasks, offer to generate a **run-once shell script** that uses the local `gh` CLI to populate each planned task as a GitHub issue in the repository.

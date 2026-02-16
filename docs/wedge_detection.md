@@ -188,20 +188,25 @@ symptom (DMA stall).
    sampled at read time and returned as byte 19 of the GETSTATS
    response, giving the host continuous visibility into PLL health.
 
-### 5. GPIF event callback
+### Possible future improvements (not implemented)
+
+The following mechanisms are available in the FX3 SDK but have not been
+implemented.  They are documented here as design notes for reference.
+
+#### 5. GPIF event callback
 
 `CyU3PGpifRegisterCallback()` can deliver events including:
 
-- `CYU3P_GPIF_EVT_SM_INTERRUPT` -- if the state machine is redesigned
-  to fire `INTR_CPU` on error conditions (e.g., stuck in BUSY too long)
-- `CYU3P_GPIF_EVT_DATA_COUNTER` -- if a data counter is configured to
-  fire at a throughput threshold
+- `CYU3P_GPIF_EVT_SM_INTERRUPT` -- requires the state machine to be
+  redesigned to fire `INTR_CPU` on error conditions (e.g., stuck in
+  BUSY too long)
+- `CYU3P_GPIF_EVT_DATA_COUNTER` -- requires a data counter configured
+  to fire at a throughput threshold
 
 These require changes to the GPIF state machine (via GPIF II Designer)
-and are more invasive than the polling approaches above.  **Not
-currently implemented.**
+and are more invasive than the polling approaches above.
 
-### 6. GPIF state machine redesign (advanced)
+#### 6. GPIF state machine redesign (advanced)
 
 The GPIF II Designer tool could be used to modify the state machine to:
 
@@ -212,9 +217,8 @@ The GPIF II Designer tool could be used to modify the state machine to:
   giving sub-microsecond detection latency via
   `CyU3PGpifRegisterSMIntrCallback()`
 
-This is the most responsive approach but requires regenerating
-`SDDC_GPIF.h` and careful validation of the new state machine timing.
-**Not currently implemented.**
+This would require regenerating `SDDC_GPIF.h` and careful validation
+of the new state machine timing.
 
 ---
 

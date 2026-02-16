@@ -44,6 +44,9 @@
 #define RESETFX3      0xB1
 #define STARTADC      0xB2
 #define GETSTATS      0xB3
+/* Legacy tuner commands (R82xx driver removed — GPL conflict).
+ * Retained here for stale-command regression tests: the "raw"
+ * subcommand sends these codes and expects a USB STALL. */
 #define TUNERINIT     0xB4
 #define TUNERTUNE     0xB5
 #define SETARGFX3     0xB6

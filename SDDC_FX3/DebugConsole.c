@@ -55,12 +55,19 @@ const char* EventName[] = {
 
 #ifdef TRACESERIAL
 // For Debug and display the name of the FX3Command
+// Slots 0xB4, 0xB5, 0xB8: removed tuner commands (TUNERINIT, TUNERTUNE,
+// TUNERSTDBY) from the R82xx driver (GPL, removed).  Kept as hex
+// placeholders so the trace table indices stay aligned with bRequest codes.
 const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
 "STARTADC", "GETSTATS", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
 // For Debug and display the name of the SETARGFX3 argument
+// Indices 1-4 were R82xx tuner parameters (removed with GPL driver).
+// Indices 5-9 were never assigned.
+// Indices 12-13 (PRESELECTOR, VHF_ATTENUATOR) are heritage names from the
+// ExtIO host DLL; not implemented in this firmware.
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
 "DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR"
