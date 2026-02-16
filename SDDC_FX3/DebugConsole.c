@@ -273,8 +273,8 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 }
 
 
+/* UART driver thread context — avoid heavy operations. */
 void UartCallback(CyU3PUartEvt_t Event, CyU3PUartError_t Error)
-// Handle characters typed in by the developer
 {
 	CyU3PDmaBuffer_t ConsoleInDmaBuffer;
 	char InputChar;

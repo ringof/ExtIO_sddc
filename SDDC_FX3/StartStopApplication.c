@@ -38,6 +38,7 @@ CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U 
 
 extern CyU3PQueue glEventAvailable;
 
+/* PIB interrupt context — must not block or call CyU3PThread* APIs. */
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
@@ -47,7 +48,7 @@ void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
 	}
 }
-/* Callback funtion for the DMA event notification. */
+/* DMA system thread context — keep lightweight, avoid long operations. */
 void DmaCallback (
         CyU3PDmaChannel   *chHandle, /* Handle to the DMA channel. */
         CyU3PDmaCbType_t  type,      /* Callback type.             */
