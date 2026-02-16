@@ -42,12 +42,6 @@ void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 uint8_t glHWconfig = NORADIO;       // Hardware config type BBRF103
 uint16_t glFWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
 
-/* GPIO_OUTPUT: push-pull output, GPIO_INPUT: floating input,
- * GPIO_INPUT_PU: input with internal pull-up. */
-#define GPIO_OUTPUT    0
-#define GPIO_INPUT     1
-#define GPIO_INPUT_PU  2
-
 CyU3PReturnStatus_t
 ConfGPIOSimple(uint8_t gpioid, uint8_t mode)
 {

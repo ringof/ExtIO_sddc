@@ -81,7 +81,16 @@ extern void DebugPrint2USB ( uint8_t priority, char *msg, ...);
 
 #include "cyu3externcend.h"
 
+/* GPIO configuration modes for ConfGPIOSimple() */
+#define GPIO_OUTPUT    0   /* Push-pull output */
+#define GPIO_INPUT     1   /* Floating input */
+#define GPIO_INPUT_PU  2   /* Input with internal pull-up */
+
+CyU3PReturnStatus_t ConfGPIOSimple(uint8_t gpioid, uint8_t mode);
+
+/* Legacy wrappers — convenience for single-mode call sites */
 CyU3PReturnStatus_t ConfGPIOsimpleout( uint8_t gpioid);
 CyU3PReturnStatus_t ConfGPIOsimpleinput( uint8_t gpioid);
+CyU3PReturnStatus_t ConfGPIOsimpleinputPU( uint8_t gpioid);
 
 #endif // _INCLUDED_APPLICATION_H_
