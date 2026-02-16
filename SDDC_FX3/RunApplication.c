@@ -235,40 +235,30 @@ void ApplicationThread ( uint32_t input)
 							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
 							{
 								CyU3PReturnStatus_t rc;
+								CyBool_t pll_ok;
 
-								DebugPrint(4, "\r\nWDG: === RECOVERY START ===");
+								DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u",
+									gpifState, curDMA);
 								CyU3PGpifControlSWInput(CyFalse);
 
 								CyU3PGpifDisable(CyFalse);
-								DebugPrint(4, "\r\nWDG: GpifDisable done");
 
 								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
-								DebugPrint(4, "\r\nWDG: DmaReset rc=%d", rc);
-
 								rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
-								DebugPrint(4, "\r\nWDG: FlushEp rc=%d", rc);
 
-								if (!si5351_pll_locked())
+								pll_ok = si5351_pll_locked();
+								if (pll_ok)
 								{
-									DebugPrint(4, "\r\nWDG: PLL_A UNLOCKED, waiting for host");
-								}
-								else
-								{
-									DebugPrint(4, "\r\nWDG: PLL_A locked, auto-restart");
 									rc = CyU3PDmaMultiChannelSetXfer(
 										&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
-									DebugPrint(4, "\r\nWDG: SetXfer rc=%d", rc);
-
 									rc = CyU3PGpifSMStart(0, 0);
-									DebugPrint(4, "\r\nWDG: SMStart rc=%d", rc);
-
 									CyU3PGpifControlSWInput(CyTrue);
 								}
 								glCounter[2]++;  /* watchdog recovery — shares the
 								                  * GETSTATS [15..18] slot with EP underrun
 								                  * count (both indicate streaming faults) */
-								DebugPrint(4, "\r\nWDG: === RECOVERY DONE (total=%u) ===",
-									glCounter[2]);
+								DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
+									pll_ok ? "DONE" : "WAIT", rc);
 								stallCount = 0;
 								prevDMACount = 0;
 								glDMACount = 0;
