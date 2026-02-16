@@ -16,6 +16,7 @@
 #include "Si5351.h"
 uint32_t glDMACount;
 uint16_t glLastPibArg;
+static volatile CyBool_t glPibNotified = CyFalse;  /* one-shot flag for PIB error queue event */
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -38,14 +39,22 @@ CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U 
 
 extern CyU3PQueue glEventAvailable;
 
-/* PIB interrupt context — must not block or call CyU3PThread* APIs. */
+/* PIB interrupt context — must not block or call CyU3PThread* APIs.
+ * During sustained overflow PIB errors fire at ~64 MHz; the queue send
+ * overhead per invocation starves the application thread.  Use a one-shot
+ * flag so only the first error queues an event — subsequent interrupts
+ * just bump the counter (cheap).  The flag is reset in StartApplication(). */
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
 		glCounter[0]++;
 		glLastPibArg = cbArg;
-		uint32_t evt = (2 << 24) | cbArg;
-		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
+		if (!glPibNotified)
+		{
+			uint32_t evt = (2 << 24) | cbArg;
+			CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
+			glPibNotified = CyTrue;
+		}
 	}
 }
 /* DMA system thread context — keep lightweight, avoid long operations. */
@@ -139,6 +148,7 @@ void StartApplication ( void ) {
     glDMACount= 0;
     glCounter[0] = glCounter[1] = glCounter[2] = 0;
     glLastPibArg = 0;
+    glPibNotified = CyFalse;
     /* Consumer endpoint configuration */
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epCfg);
     CheckStatus("CyU3PSetEpConfig Consumer", Status);
