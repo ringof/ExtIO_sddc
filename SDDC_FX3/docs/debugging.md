@@ -182,7 +182,7 @@ The main `ApplicationThread` polls the queue every 100ms and calls
 |-------|--------|
 | 0 | Print USB event name from `EventName[]` |
 | 1 | Print vendor request bytes (dead code -- nothing posts this label) |
-| 2 | Print PIB error code (dead code -- nothing posts this label) |
+| 2 | Print PIB error code (posted by `PibErrorCallback` on first overflow per streaming session) |
 | 0x0A (`USER_COMMAND_AVAILABLE`) | Call `ParseCommand()` |
 
 ---
@@ -380,7 +380,7 @@ wLength  = 20
 
 ```
 $ fx3_cmd stats
-PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0 pll=0x00
+PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 faults=0 pll=0x00
 ```
 
 ---
@@ -407,7 +407,7 @@ cd tests && make
 - Puts stdin in raw mode (character-at-a-time, no echo)
 - Polls `READINFODEBUG` every 50ms
 - Typed characters are sent in `wValue`; Enter sends CR
-- Ctrl-C to quit
+- Ctrl-C to quit (SIGINT handler restores terminal from raw mode before exit)
 
 ##### Local Command Escape (`!`)
 
@@ -425,7 +425,7 @@ DMAcnt = 0
 
 !stats
 fx3> stats
-PASS stats: dma=0 gpif=0 pib=0 last_pib=0x0000 i2c=0 underrun=0 pll=0x00
+PASS stats: dma=0 gpif=0 pib=0 last_pib=0x0000 i2c=0 faults=0 pll=0x00
 
 !stop_gpif_state
 fx3> stop_gpif_state
