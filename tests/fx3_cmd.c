@@ -22,6 +22,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <signal.h>
 #include <termios.h>
 #include <libusb-1.0/libusb.h>
 
@@ -482,6 +483,18 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     return 1;
 }
 
+/* SIGINT handler: restore terminal from raw mode before exit. */
+static struct termios saved_termios;
+static volatile sig_atomic_t raw_mode_active;
+
+static void sigint_handler(int sig)
+{
+    if (raw_mode_active)
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 /* Interactive debug console over USB.
  * First sends TESTFX3 with wValue=1 to enable debug mode, then polls
  * READINFODEBUG for output.  Typed characters are sent in wValue;
@@ -508,11 +521,14 @@ static int do_debug(libusb_device_handle *h)
     /* Put stdin in non-blocking mode for character-at-a-time input */
     struct termios oldt, newt;
     tcgetattr(STDIN_FILENO, &oldt);
+    saved_termios = oldt;
     newt = oldt;
     newt.c_lflag &= ~(ICANON | ECHO);
     newt.c_cc[VMIN] = 0;
     newt.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    raw_mode_active = 1;
+    signal(SIGINT, sigint_handler);
 
     /* Local command mode state */
     int local_mode = 0;
@@ -576,9 +592,7 @@ static int do_debug(libusb_device_handle *h)
 
         usleep(50000);  /* 50ms poll interval */
     }
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    return 0;
+    /* NOTREACHED — loop exits via SIGINT → sigint_handler */
 }
 
 /* Send a vendor request with wLength > 64 — must STALL if firmware
