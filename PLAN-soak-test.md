@@ -119,7 +119,7 @@ GETSTATS cumulative:
   dma_completions: 2,847,162
   pib_errors:      42
   i2c_failures:    92  (expected: all from stats_i2c NACK triggers)
-  ep_underruns:    0
+  streaming_faults: 0
   health_checks:   1847/1847 passed
 
 Result: 4 FAILURES in 1847 cycles (0.22% failure rate)

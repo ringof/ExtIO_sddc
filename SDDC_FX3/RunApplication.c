@@ -254,9 +254,9 @@ void ApplicationThread ( uint32_t input)
 									rc = CyU3PGpifSMStart(0, 0);
 									CyU3PGpifControlSWInput(CyTrue);
 								}
-								glCounter[2]++;  /* watchdog recovery — shares the
-								                  * GETSTATS [15..18] slot with EP underrun
-								                  * count (both indicate streaming faults) */
+								glCounter[2]++;  /* streaming fault counter —
+								                  * GETSTATS [15..18]; also incremented
+								                  * by EP_UNDERRUN in USBHandler.c */
 								DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
 									pll_ok ? "DONE" : "WAIT", rc);
 								stallCount = 0;

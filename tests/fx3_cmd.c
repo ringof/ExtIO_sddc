@@ -1054,7 +1054,7 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [5..8]   uint32  PIB error count
  *   [9..10]  uint16  last PIB error arg
  *   [11..14] uint32  I2C failure count
- *   [15..18] uint32  EP underrun count
+ *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
 #define GETSTATS_LEN  20
@@ -1065,7 +1065,7 @@ struct fx3_stats {
     uint32_t pib_errors;
     uint16_t last_pib_arg;
     uint32_t i2c_failures;
-    uint32_t ep_underruns;
+    uint32_t streaming_faults;
     uint8_t  si5351_status;
 };
 
@@ -1080,7 +1080,7 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->pib_errors,   &buf[5],  4);
     memcpy(&s->last_pib_arg, &buf[9],  2);
     memcpy(&s->i2c_failures, &buf[11], 4);
-    memcpy(&s->ep_underruns, &buf[15], 4);
+    memcpy(&s->streaming_faults, &buf[15], 4);
     s->si5351_status = buf[19];
     return 0;
 }
@@ -1094,9 +1094,9 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u underrun=%u pll=0x%02X\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X\n",
            s.dma_count, s.gpif_state, s.pib_errors,
-           s.last_pib_arg, s.i2c_failures, s.ep_underruns,
+           s.last_pib_arg, s.i2c_failures, s.streaming_faults,
            s.si5351_status);
     return 0;
 }
@@ -1480,14 +1480,14 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
         printf("FAIL wedge_recovery: only %d bytes after recovery "
                "(expected >= 1024, device still wedged)\n",
                got < 0 ? 0 : got);
-        printf("#   GPIF state=%u, ep_underruns=%u\n",
-               s.gpif_state, s.ep_underruns);
+        printf("#   GPIF state=%u, streaming_faults=%u\n",
+               s.gpif_state, s.streaming_faults);
         return 1;
     }
 
     printf("PASS wedge_recovery: %d bytes after STOP+START recovery", got);
-    if (s.ep_underruns > 0)
-        printf(", watchdog_recoveries=%u", s.ep_underruns);
+    if (s.streaming_faults > 0)
+        printf(", watchdog_recoveries=%u", s.streaming_faults);
     printf("\n");
     return 0;
 }
