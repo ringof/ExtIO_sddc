@@ -43,7 +43,7 @@ extern CyU3PQueue glEventAvailable;
  * During sustained overflow PIB errors fire at ~64 MHz; the queue send
  * overhead per invocation starves the application thread.  Use a one-shot
  * flag so only the first error queues an event — subsequent interrupts
- * just bump the counter (cheap).  The flag is reset in StartApplication(). */
+ * just bump the counter (cheap).  The flag is reset in StartGPIF(). */
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
@@ -112,6 +112,7 @@ CyBool_t GpifPreflightCheck(void)
 CyU3PReturnStatus_t StartGPIF(void)
 {
 	CyU3PReturnStatus_t Status;
+	glPibNotified = CyFalse;  /* re-arm PIB error notification for this session */
 	DebugPrint(4, "\r\nGPIF file %s", glCyFxGpifName);
 	Status = CyU3PGpifLoad(&CyFxGpifConfig);
 	CheckStatus("GpifLoad", Status);
