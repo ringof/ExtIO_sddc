@@ -865,40 +865,43 @@ static int do_test_pib_overflow(libusb_device_handle *h)
 
     /* 5. Let DMA buffers fill and PIB errors fire.
      *    At 64 MS/s the 4 × 16 KB DMA buffers fill in < 1 ms, so
-     *    PIB error interrupts begin almost immediately.  However,
-     *    the interrupt rate (~64 MHz) saturates the ARM core and
-     *    starves the application thread — it can never wake from
-     *    CyU3PThreadSleep to dequeue events and format "PIB error"
-     *    text into the debug buffer.
-     *
-     *    Second problem: READINFODEBUG zeros glDebTxtLen after
-     *    reading only 63 bytes, discarding the rest of the buffer.
-     *    If trace output (~90 bytes) precedes PIB error text, the
-     *    first 63-byte read gets trace and the PIB text is lost.
-     *
-     *    Fix: drain trace output DURING the storm (app thread is
-     *    guaranteed starved, so only trace is in the buffer), then
-     *    stop GPIF, then let the app thread write PIB error text
-     *    into the now-empty buffer. */
+     *    PIB error interrupts begin almost immediately.  The one-shot
+     *    flag in PibErrorCallback (issue #50) queues a single event
+     *    and lets the app thread run, so "PIB error" text may appear
+     *    in the debug buffer at any point — during the storm or after
+     *    STOPFX3.  Collect ALL debug reads into the search buffer. */
     usleep(10000);  /* 10ms — DMA fills in < 1ms */
 
-    /* 6. Drain trace output while the interrupt storm guarantees
-     *    the app thread cannot run (no PIB error text yet). */
-    for (int i = 0; i < 5; i++)
-        ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+    /* 6. Read debug output during the storm — the app thread is now
+     *    responsive (issue #50 fix) so PIB error text may already
+     *    be here alongside trace output. */
+    for (int i = 0; i < 5; i++) {
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (r > 0) {
+            int copy = r - 1;
+            if (collected_len + copy >= (int)sizeof(collected) - 1)
+                copy = (int)sizeof(collected) - 1 - collected_len;
+            if (copy > 0) {
+                memcpy(collected + collected_len, buf, copy);
+                collected_len += copy;
+            }
+        }
+    }
+
+    if (strstr(collected, "PIB error"))
+        found_pib_error = 1;
 
     /* 7. Stop streaming — ends the PIB interrupt storm */
     cmd_u32(h, STOPFX3, 0);
 
-    /* 8. Let the application thread wake (100ms sleep cycle) and
-     *    process the queued PIB error events into the debug buffer.
-     *    The buffer now has only STOPFX3 trace (~12 bytes) followed
-     *    by PIB error text — well within the 63-byte read limit. */
-    usleep(300000);
+    /* 8. Let the application thread process any remaining queued
+     *    events into the debug buffer. */
+    if (!found_pib_error)
+        usleep(300000);
 
-    /* 9. Read the debug buffer.  STOPFX3 trace + PIB error text
-     *    fits in a single 63-byte read. */
-    for (int attempt = 0; attempt < 20; attempt++) {
+    /* 9. Read the debug buffer — may contain STOPFX3 trace and/or
+     *    PIB error text if not already captured in step 6. */
+    for (int attempt = 0; !found_pib_error && attempt < 20; attempt++) {
         r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
         if (r > 0) {
             int copy = r - 1;  /* strip NUL terminator */
