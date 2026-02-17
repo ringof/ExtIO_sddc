@@ -26,9 +26,9 @@ extern CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Th
 extern void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
 CyBool_t glDebugTxEnabled = CyFalse;	// Set true once I can output messages to the Console
-CyU3PDmaChannel glUARTtoCPU_Handle;		// Handle needed by Uart Callback routine
-char glConsoleInBuffer[32];				// Buffer for user Console Input
-uint32_t glConsoleInIndex;				// Index into ConsoleIn buffer
+static CyU3PDmaChannel glUARTtoCPU_Handle;	// Handle needed by Uart Callback routine
+static char glConsoleInBuffer[32];			// Buffer for user Console Input
+static uint32_t glConsoleInIndex;			// Index into ConsoleIn buffer
 uint32_t glCounter[20];					// Counters used to monitor GPIF
 extern uint32_t glQevent __attribute__ ((aligned (32)));
 
