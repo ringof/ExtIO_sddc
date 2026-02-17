@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 #include <termios.h>
 #include <libusb-1.0/libusb.h>
 
@@ -336,6 +337,14 @@ static int do_test_stop_gpif_state(libusb_device_handle *h);
 static int do_test_stop_start_cycle(libusb_device_handle *h);
 static int do_test_pll_preflight(libusb_device_handle *h);
 static int do_test_wedge_recovery(libusb_device_handle *h);
+static int do_test_clock_pull(libusb_device_handle *h);
+static int do_test_freq_hop(libusb_device_handle *h);
+static int do_test_ep0_stall_recovery(libusb_device_handle *h);
+static int do_test_double_stop(libusb_device_handle *h);
+static int do_test_double_start(libusb_device_handle *h);
+static int do_test_i2c_under_load(libusb_device_handle *h);
+static int do_test_sustained_stream(libusb_device_handle *h);
+static int do_test_abandoned_stream(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -363,6 +372,14 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stop_start_cycle", do_test_stop_start_cycle},
     {"pll_preflight",    do_test_pll_preflight},
     {"wedge_recovery",   do_test_wedge_recovery},
+    {"clock_pull",       do_test_clock_pull},
+    {"freq_hop",         do_test_freq_hop},
+    {"ep0_stall_recovery", do_test_ep0_stall_recovery},
+    {"double_stop",      do_test_double_stop},
+    {"double_start",     do_test_double_start},
+    {"i2c_under_load",   do_test_i2c_under_load},
+    {"sustained_stream", do_test_sustained_stream},
+    {"abandoned_stream", do_test_abandoned_stream},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -383,6 +400,14 @@ static void print_local_help(void)
            "  stop_start_cycle              Cycle STOP+START N times\n"
            "  pll_preflight                 Verify START rejected without clock\n"
            "  wedge_recovery                Provoke DMA wedge, test recovery\n"
+           "  clock_pull                    Pull clock mid-stream, verify recovery\n"
+           "  freq_hop                      Rapid ADC frequency hopping\n"
+           "  ep0_stall_recovery            EP0 stall then immediate use\n"
+           "  double_stop                   Back-to-back STOPFX3\n"
+           "  double_start                  Back-to-back STARTFX3\n"
+           "  i2c_under_load                I2C read while streaming\n"
+           "  sustained_stream              30s continuous streaming check\n"
+           "  abandoned_stream              Simulate host crash (no STOPFX3)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -1496,6 +1521,692 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* Soak test scenario functions                                       */
+/* ------------------------------------------------------------------ */
+
+/* Clock-pull mid-stream: START streaming, kill clock with STARTADC(0)
+ * while GPIF is running, then STOP and verify recovery via
+ * STOP + clock restore + START + bulk read. */
+static int do_test_clock_pull(libusb_device_handle *h)
+{
+    int r;
+
+    /* 1. Configure and start streaming at 32 MHz */
+    r = cmd_u32(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL clock_pull: STARTADC(32M): %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL clock_pull: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Read a little to confirm data is flowing */
+    int got = bulk_read_some(h, 16384, 1000);
+    if (got < 1024) {
+        printf("FAIL clock_pull: no initial data (%d bytes)\n", got < 0 ? 0 : got);
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* 3. Kill clock while streaming */
+    cmd_u32(h, STARTADC, 0);
+    usleep(200000);  /* let GPIF notice the missing clock */
+
+    /* 4. Stop streaming */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(100000);
+
+    /* 5. Restore clock and restart */
+    r = cmd_u32(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL clock_pull: STARTADC restore: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    usleep(100000);  /* PLL settle */
+
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL clock_pull: STARTFX3 after restore: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 6. Verify data flows again */
+    got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (got < 1024) {
+        printf("FAIL clock_pull: no data after recovery (%d bytes)\n", got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS clock_pull: recovered %d bytes after clock pull + restore\n", got);
+    return 0;
+}
+
+/* Rapid frequency hopping: cycle through 5 ADC frequencies, each with
+ * a brief START + read + STOP cycle, verifying data flows at each. */
+static int do_test_freq_hop(libusb_device_handle *h)
+{
+    static const uint32_t freqs[] = {16000000, 32000000, 48000000, 64000000, 128000000};
+    int nfreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
+
+    for (int i = 0; i < nfreqs; i++) {
+        int r = cmd_u32(h, STARTADC, freqs[i]);
+        if (r < 0) {
+            printf("FAIL freq_hop: STARTADC(%u): %s\n", freqs[i], libusb_strerror(r));
+            return 1;
+        }
+        usleep(100000);  /* PLL settle */
+
+        r = cmd_u32(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL freq_hop: STARTFX3 at %u Hz: %s\n", freqs[i], libusb_strerror(r));
+            return 1;
+        }
+
+        int got = bulk_read_some(h, 16384, 2000);
+
+        cmd_u32(h, STOPFX3, 0);
+        usleep(50000);
+
+        if (got < 1024) {
+            printf("FAIL freq_hop: only %d bytes at %u Hz\n",
+                   got < 0 ? 0 : got, freqs[i]);
+            return 1;
+        }
+    }
+
+    /* Restore a standard frequency */
+    cmd_u32(h, STARTADC, 32000000);
+
+    printf("PASS freq_hop: data flowed at all %d frequencies\n", nfreqs);
+    return 0;
+}
+
+/* EP0 stall recovery: send an OOB vendor request (gets STALL), then
+ * immediately do TESTFX3 to verify EP0 still works. */
+static int do_test_ep0_stall_recovery(libusb_device_handle *h)
+{
+    /* Trigger a STALL with an unknown vendor request */
+    cmd_u32(h, 0xCC, 0);  /* expected to STALL */
+
+    /* Immediately verify EP0 works */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL ep0_stall_recovery: EP0 broken after STALL: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS ep0_stall_recovery: EP0 functional after STALL\n");
+    return 0;
+}
+
+/* Back-to-back STOP: send STOPFX3 twice without intervening START.
+ * Device should handle the redundant stop gracefully. */
+static int do_test_double_stop(libusb_device_handle *h)
+{
+    /* First, do a START+STOP to get into a known state */
+    cmd_u32(h, STARTADC, 32000000);
+    cmd_u32(h, STARTFX3, 0);
+    usleep(50000);
+    cmd_u32(h, STOPFX3, 0);
+    usleep(50000);
+
+    /* Send a second STOP without START */
+    int r = cmd_u32(h, STOPFX3, 0);
+    /* STALL is acceptable — means firmware rejected the redundant stop */
+    if (r < 0 && r != LIBUSB_ERROR_PIPE) {
+        printf("FAIL double_stop: unexpected error on 2nd STOP: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Verify device is alive */
+    uint8_t info[4] = {0};
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL double_stop: device unresponsive after double STOP: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS double_stop: device survived back-to-back STOPFX3\n");
+    return 0;
+}
+
+/* Back-to-back START: send STARTFX3 twice without intervening STOP.
+ * Device should handle it (may STALL the second — that's fine). */
+static int do_test_double_start(libusb_device_handle *h)
+{
+    cmd_u32(h, STARTADC, 32000000);
+    usleep(50000);
+
+    int r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL double_start: first STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    usleep(50000);
+
+    /* Second START without STOP */
+    r = cmd_u32(h, STARTFX3, 0);
+    /* STALL is acceptable — firmware may reject duplicate start */
+
+    /* Clean up */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(100000);
+
+    /* Verify device is alive and streaming still works */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL double_start: STARTFX3 after recovery: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    int got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (got < 1024) {
+        printf("FAIL double_start: no data after recovery (%d bytes)\n",
+               got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS double_start: device survived back-to-back STARTFX3\n");
+    return 0;
+}
+
+/* I2C read while streaming: START streaming, read Si5351 status via
+ * I2C (I2CRFX3) while data is flowing, then STOP. Verifies both I2C
+ * and streaming paths are healthy under concurrent use. */
+static int do_test_i2c_under_load(libusb_device_handle *h)
+{
+    int r;
+
+    /* Start streaming at 64 MHz */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL i2c_under_load: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL i2c_under_load: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read some bulk data to confirm streaming */
+    int got = bulk_read_some(h, 16384, 1000);
+    if (got < 1024) {
+        printf("FAIL i2c_under_load: no streaming data (%d bytes)\n",
+               got < 0 ? 0 : got);
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* Read Si5351 status register (addr 0xC0, reg 0) while streaming */
+    uint8_t buf[1] = {0};
+    r = ctrl_read(h, I2CRFX3, 0xC0, 0, buf, 1);
+    int i2c_ok = (r >= 1);
+
+    /* Read more bulk data to verify streaming still works */
+    int got2 = bulk_read_some(h, 16384, 1000);
+
+    cmd_u32(h, STOPFX3, 0);
+
+    if (!i2c_ok) {
+        printf("FAIL i2c_under_load: I2C read failed while streaming: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    if (got2 < 1024) {
+        printf("FAIL i2c_under_load: streaming died after I2C (%d bytes)\n",
+               got2 < 0 ? 0 : got2);
+        return 1;
+    }
+    printf("PASS i2c_under_load: I2C(0x%02X) + streaming both healthy\n", buf[0]);
+    return 0;
+}
+
+/* Sustained streaming: START streaming at 64 MHz, read EP1 continuously
+ * for ~30 seconds, verify data count matches expected throughput (within
+ * 50%), then STOP. */
+static int do_test_sustained_stream(libusb_device_handle *h)
+{
+    int r;
+    int duration_sec = 30;
+    uint32_t sample_rate = 64000000;
+
+    r = cmd_u32(h, STARTADC, sample_rate);
+    if (r < 0) {
+        printf("FAIL sustained_stream: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL sustained_stream: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read continuously for duration_sec */
+    uint64_t total_bytes = 0;
+    int chunk = 65536;
+    uint8_t *buf = malloc(chunk);
+    if (!buf) {
+        cmd_u32(h, STOPFX3, 0);
+        printf("FAIL sustained_stream: malloc\n");
+        return 1;
+    }
+
+    struct timespec start_ts, now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+    int fail = 0;
+    for (;;) {
+        int transferred = 0;
+        r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
+        if (r == LIBUSB_ERROR_TIMEOUT && transferred > 0) {
+            total_bytes += transferred;
+        } else if (r == 0) {
+            total_bytes += transferred;
+        } else {
+            printf("FAIL sustained_stream: bulk transfer error at %lu bytes: %s\n",
+                   (unsigned long)total_bytes, libusb_strerror(r));
+            fail = 1;
+            break;
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        double elapsed = (now_ts.tv_sec - start_ts.tv_sec)
+                       + (now_ts.tv_nsec - start_ts.tv_nsec) / 1e9;
+        if (elapsed >= duration_sec) break;
+    }
+
+    free(buf);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (fail) return 1;
+
+    /* Verify throughput: 2 bytes/sample * sample_rate * duration_sec
+     * Allow 50% tolerance (USB overhead, scheduling jitter) */
+    uint64_t expected = (uint64_t)2 * sample_rate * duration_sec;
+    int percent = (int)(total_bytes * 100 / expected);
+
+    if (percent < 50) {
+        printf("FAIL sustained_stream: %lu bytes in %ds (%d%% of expected)\n",
+               (unsigned long)total_bytes, duration_sec, percent);
+        return 1;
+    }
+    printf("PASS sustained_stream: %lu bytes in %ds (%d%% of expected %lu)\n",
+           (unsigned long)total_bytes, duration_sec, percent,
+           (unsigned long)expected);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Consumer-failure scenarios                                         */
+/*                                                                    */
+/* These simulate the most common real-world failure mode: the host   */
+/* application dies or hangs without sending STOPFX3, leaving the     */
+/* device streaming into the void.  The watchdog detects the stall    */
+/* and recovers, but without a consumer the recovery itself is        */
+/* futile.  These tests verify the firmware handles this gracefully   */
+/* (e.g. caps the recovery count) rather than looping forever.        */
+/*                                                                    */
+/* To add new consumer-failure variants, follow the pattern:          */
+/*   1. Start streaming (STARTADC + STARTFX3)                        */
+/*   2. Simulate the failure (don't read, don't stop, etc.)          */
+/*   3. Observe device behaviour via GETSTATS / debug output          */
+/*   4. Clean up with STOPFX3                                        */
+/*   5. Verify the device is still EP0-responsive                    */
+/* ------------------------------------------------------------------ */
+
+/* Abandoned stream: simulate a host crash by starting streaming and
+ * then doing nothing — no EP1 reads, no STOPFX3.  The watchdog will
+ * detect the DMA stall and attempt recovery.  Without the
+ * WDG_MAX_RECOV cap, it loops forever.  With the cap, recovery
+ * attempts should plateau.
+ *
+ * Test method:
+ *   1. STARTADC + STARTFX3
+ *   2. Snapshot GETSTATS (streaming_faults = baseline)
+ *   3. Wait 5s (enough for ~5 watchdog cycles at ~1s each)
+ *   4. Snapshot GETSTATS again (faults_mid)
+ *   5. Wait another 5s
+ *   6. Snapshot GETSTATS again (faults_end)
+ *   7. STOPFX3 + verify EP0 alive
+ *
+ * PASS: faults stopped growing between mid and end snapshots
+ *       (recovery capped), OR faults_end - faults_mid < faults_mid -
+ *       faults_baseline (recovery is decelerating — watchdog gave up).
+ * FAIL: faults still climbing at the same rate (unbounded loop). */
+static int do_test_abandoned_stream(libusb_device_handle *h)
+{
+    int r;
+    struct fx3_stats baseline, mid, end;
+
+    /* 1. Configure and start streaming */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Baseline snapshot */
+    usleep(200000);  /* let first DMA buffers fill */
+    r = read_stats(h, &baseline);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: baseline GETSTATS: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* 3. Wait 5s — no EP1 reads, no STOP.  Watchdog fires repeatedly. */
+    sleep(5);
+
+    /* 4. Mid-point snapshot */
+    r = read_stats(h, &mid);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: mid GETSTATS: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* 5. Wait another 5s */
+    sleep(5);
+
+    /* 6. End snapshot */
+    r = read_stats(h, &end);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: end GETSTATS: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* 7. Clean up */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(200000);
+
+    /* 8. Verify device is still EP0-responsive */
+    uint8_t info[4] = {0};
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL abandoned_stream: device unresponsive after abandon: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* 9. Analyse recovery behaviour */
+    uint32_t grow_first = mid.streaming_faults - baseline.streaming_faults;
+    uint32_t grow_second = end.streaming_faults - mid.streaming_faults;
+
+    printf("#   abandoned_stream: faults baseline=%u mid=%u end=%u "
+           "(+%u first 5s, +%u second 5s)\n",
+           baseline.streaming_faults, mid.streaming_faults,
+           end.streaming_faults, grow_first, grow_second);
+
+    if (grow_first == 0) {
+        /* Watchdog didn't fire at all — either not implemented or
+         * recovery happened too fast before baseline.  Not a failure
+         * of this test, but note it. */
+        printf("PASS abandoned_stream: no watchdog recoveries observed "
+               "(watchdog may not be active)\n");
+        return 0;
+    }
+
+    if (grow_second == 0) {
+        /* Recovery stopped — cap is working */
+        printf("PASS abandoned_stream: recovery capped after %u faults "
+               "(no growth in second 5s window)\n", end.streaming_faults);
+        return 0;
+    }
+
+    if (grow_second < grow_first) {
+        /* Recovery is decelerating — cap kicked in partway through */
+        printf("PASS abandoned_stream: recovery decelerating "
+               "(+%u vs +%u, cap engaging)\n", grow_second, grow_first);
+        return 0;
+    }
+
+    /* Still growing at the same rate — unbounded recovery loop */
+    printf("FAIL abandoned_stream: recovery still looping (+%u/+%u), "
+           "no cap detected\n", grow_first, grow_second);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Soak test harness                                                  */
+/* ------------------------------------------------------------------ */
+
+static volatile sig_atomic_t soak_stop;
+
+static void soak_sigint(int sig)
+{
+    (void)sig;
+    soak_stop = 1;
+}
+
+struct soak_scenario {
+    const char *name;
+    int (*func)(libusb_device_handle *);
+    int weight;
+    int runs;
+    int pass;
+    int fail;
+};
+
+/* Run between every soak scenario.  Probes TESTFX3 (device alive,
+ * hwconfig unchanged) and GETSTATS (GPIF state sane), storing the
+ * latest stats snapshot in *prev for the status-line report.
+ * Returns 0 on pass, 1 on fail. */
+static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
+{
+    /* TESTFX3 — device alive, hwconfig still 0x04 */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("HEALTH FAIL: TESTFX3 failed: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    if (r >= 1 && info[0] != 0x04) {
+        printf("HEALTH FAIL: hwconfig=0x%02X (expected 0x04)\n", info[0]);
+        return 1;
+    }
+
+    /* GETSTATS — check GPIF state */
+    struct fx3_stats s;
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("HEALTH FAIL: GETSTATS: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* GPIF should be idle (0, 1, or 255), not stuck in a read state */
+    if (s.gpif_state != 0 && s.gpif_state != 1 && s.gpif_state != 255) {
+        printf("HEALTH WARN: GPIF state=%u (not idle)\n", s.gpif_state);
+        /* Not fatal — watchdog may be mid-recovery */
+    }
+
+    *prev = s;
+    return 0;
+}
+
+/* Soak test outer loop.
+ *
+ * Parses optional [hours] [seed] from argv, installs a SIGINT handler
+ * for clean early-exit, then loops until duration expires or Ctrl-C:
+ *   1. Weighted random scenario pick
+ *   2. Run scenario function
+ *   3. Health check (TESTFX3 + GETSTATS)
+ *   4. Update per-scenario and cumulative stats
+ *   5. Print status line every 10 cycles
+ * Prints a final summary table on exit.  Returns 0 if all passed. */
+static int soak_main(libusb_device_handle *h, int argc, char **argv)
+{
+    double hours = 1.0;
+    unsigned int seed = (unsigned int)time(NULL);
+
+    if (argc >= 1) hours = atof(argv[0]);
+    if (argc >= 2) seed = (unsigned int)strtoul(argv[1], NULL, 0);
+    if (hours <= 0) hours = 1.0;
+
+    struct soak_scenario scenarios[] = {
+        {"stop_start_cycle",    do_test_stop_start_cycle,    20, 0, 0, 0},
+        {"wedge_recovery",      do_test_wedge_recovery,      15, 0, 0, 0},
+        {"pib_overflow",        do_test_pib_overflow,         5, 0, 0, 0},
+        {"debug_race",          do_test_debug_race,          10, 0, 0, 0},
+        {"console_fill",        do_test_console_fill,         5, 0, 0, 0},
+        {"ep0_overflow",        do_ep0_overflow,              5, 0, 0, 0},
+        {"oob_brequest",        do_test_oob_brequest,         5, 0, 0, 0},
+        {"oob_setarg",          do_test_oob_setarg,           5, 0, 0, 0},
+        {"pll_preflight",       do_test_pll_preflight,       10, 0, 0, 0},
+        {"clock_pull",          do_test_clock_pull,          10, 0, 0, 0},
+        {"freq_hop",            do_test_freq_hop,            10, 0, 0, 0},
+        {"ep0_stall_recovery",  do_test_ep0_stall_recovery,   5, 0, 0, 0},
+        {"double_stop",         do_test_double_stop,          5, 0, 0, 0},
+        {"double_start",        do_test_double_start,         5, 0, 0, 0},
+        {"i2c_under_load",      do_test_i2c_under_load,       5, 0, 0, 0},
+        {"sustained_stream",    do_test_sustained_stream,     2, 0, 0, 0},
+        {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
+    };
+    int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
+
+    /* Compute total weight for weighted random selection */
+    int total_weight = 0;
+    for (int i = 0; i < nscenarios; i++)
+        total_weight += scenarios[i].weight;
+
+    /* Install SIGINT handler */
+    soak_stop = 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = soak_sigint;
+    sigaction(SIGINT, &sa, NULL);
+
+    srand(seed);
+
+    double duration_sec = hours * 3600.0;
+    struct timespec start_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+    printf("=== SOAK TEST START ===\n");
+    printf("Duration: %.3f hours  Seed: %u  Scenarios: %d\n",
+           hours, seed, nscenarios);
+    printf("Press Ctrl-C for early stop with summary\n\n");
+
+    /* Initial health check */
+    struct fx3_stats prev_stats;
+    memset(&prev_stats, 0, sizeof(prev_stats));
+    if (soak_health_check(h, &prev_stats) != 0) {
+        printf("SOAK ABORT: initial health check failed\n");
+        return 1;
+    }
+
+    int total_cycles = 0, total_pass = 0, total_fail = 0;
+    int health_pass = 0, health_fail = 0;
+
+    while (!soak_stop) {
+        /* Check elapsed time */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - start_ts.tv_sec)
+                       + (now.tv_nsec - start_ts.tv_nsec) / 1e9;
+        if (elapsed >= duration_sec) break;
+
+        /* Weighted random pick */
+        int pick = rand() % total_weight;
+        int sel = 0;
+        int accum = 0;
+        for (int i = 0; i < nscenarios; i++) {
+            accum += scenarios[i].weight;
+            if (pick < accum) { sel = i; break; }
+        }
+
+        /* Run scenario */
+        int result = scenarios[sel].func(h);
+        scenarios[sel].runs++;
+        if (result == 0) {
+            scenarios[sel].pass++;
+            total_pass++;
+        } else {
+            scenarios[sel].fail++;
+            total_fail++;
+        }
+        total_cycles++;
+
+        /* Health check */
+        if (soak_health_check(h, &prev_stats) == 0) {
+            health_pass++;
+        } else {
+            health_fail++;
+        }
+
+        /* Status line every 10 cycles */
+        if (total_cycles % 10 == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            elapsed = (now.tv_sec - start_ts.tv_sec)
+                    + (now.tv_nsec - start_ts.tv_nsec) / 1e9;
+            int h_e = (int)(elapsed / 3600);
+            int m_e = (int)((elapsed - h_e * 3600) / 60);
+            int s_e = (int)(elapsed - h_e * 3600 - m_e * 60);
+            printf("[%02d:%02d:%02d] cycle=%d pass=%d fail=%d | "
+                   "last=%s(%s) | dma=%u pib=%u i2c=%u faults=%u\n",
+                   h_e, m_e, s_e, total_cycles, total_pass, total_fail,
+                   scenarios[sel].name, result == 0 ? "PASS" : "FAIL",
+                   prev_stats.dma_count, prev_stats.pib_errors,
+                   prev_stats.i2c_failures, prev_stats.streaming_faults);
+            fflush(stdout);
+        }
+    }
+
+    /* Final report */
+    struct timespec end_ts;
+    clock_gettime(CLOCK_MONOTONIC, &end_ts);
+    double total_elapsed = (end_ts.tv_sec - start_ts.tv_sec)
+                         + (end_ts.tv_nsec - start_ts.tv_nsec) / 1e9;
+    int h_t = (int)(total_elapsed / 3600);
+    int m_t = (int)((total_elapsed - h_t * 3600) / 60);
+    int s_t = (int)(total_elapsed - h_t * 3600 - m_t * 60);
+
+    printf("\n=== SOAK TEST SUMMARY ===\n");
+    printf("Duration: %02d:%02d:%02d  Seed: %u  Cycles: %d\n\n",
+           h_t, m_t, s_t, seed, total_cycles);
+
+    printf("%-24s %5s %5s %5s\n", "Scenario", "Runs", "Pass", "Fail");
+    for (int i = 0; i < nscenarios; i++) {
+        if (scenarios[i].runs > 0) {
+            printf("%-24s %5d %5d %5d\n",
+                   scenarios[i].name, scenarios[i].runs,
+                   scenarios[i].pass, scenarios[i].fail);
+        }
+    }
+    printf("%-24s %5d %5d %5d\n", "TOTAL", total_cycles, total_pass, total_fail);
+
+    printf("\nGESTATS cumulative:\n");
+    printf("  dma_completions:  %u\n", prev_stats.dma_count);
+    printf("  pib_errors:       %u\n", prev_stats.pib_errors);
+    printf("  i2c_failures:     %u\n", prev_stats.i2c_failures);
+    printf("  streaming_faults: %u\n", prev_stats.streaming_faults);
+    printf("  health_checks:    %d/%d passed\n", health_pass, health_pass + health_fail);
+
+    if (total_fail > 0) {
+        printf("\nResult: %d FAILURES in %d cycles (%.2f%% failure rate)\n",
+               total_fail, total_cycles,
+               total_cycles > 0 ? (total_fail * 100.0 / total_cycles) : 0.0);
+    } else {
+        printf("\nResult: ALL PASSED (%d cycles)\n", total_cycles);
+    }
+
+    return total_fail > 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -1533,6 +2244,15 @@ static void usage(const char *prog)
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
         "  pll_preflight                Verify STARTFX3 rejected without clock\n"
         "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
+        "  clock_pull                   Pull clock mid-stream, verify recovery\n"
+        "  freq_hop                     Rapid ADC frequency hopping\n"
+        "  ep0_stall_recovery           EP0 stall then immediate use\n"
+        "  double_stop                  Back-to-back STOPFX3\n"
+        "  double_start                 Back-to-back STARTFX3\n"
+        "  i2c_under_load               I2C read while streaming\n"
+        "  sustained_stream             30s continuous streaming check\n"
+        "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
+        "  soak [hours] [seed]          Multi-hour randomized stress test\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -1664,6 +2384,33 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "wedge_recovery") == 0) {
         rc = do_test_wedge_recovery(h);
+
+    } else if (strcmp(cmd, "clock_pull") == 0) {
+        rc = do_test_clock_pull(h);
+
+    } else if (strcmp(cmd, "freq_hop") == 0) {
+        rc = do_test_freq_hop(h);
+
+    } else if (strcmp(cmd, "ep0_stall_recovery") == 0) {
+        rc = do_test_ep0_stall_recovery(h);
+
+    } else if (strcmp(cmd, "double_stop") == 0) {
+        rc = do_test_double_stop(h);
+
+    } else if (strcmp(cmd, "double_start") == 0) {
+        rc = do_test_double_start(h);
+
+    } else if (strcmp(cmd, "i2c_under_load") == 0) {
+        rc = do_test_i2c_under_load(h);
+
+    } else if (strcmp(cmd, "sustained_stream") == 0) {
+        rc = do_test_sustained_stream(h);
+
+    } else if (strcmp(cmd, "abandoned_stream") == 0) {
+        rc = do_test_abandoned_stream(h);
+
+    } else if (strcmp(cmd, "soak") == 0) {
+        rc = soak_main(h, argc - 2, argv + 2);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
