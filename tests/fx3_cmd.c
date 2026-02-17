@@ -122,6 +122,22 @@ static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
     return ctrl_write_buf(h, SETARGFX3, arg_val, arg_id, &zero, 1);
 }
 
+/* Retry a command once on timeout.  When a soak scenario starts right
+ * after a prior scenario triggered a watchdog recovery, the device may
+ * still be mid-recovery and unable to service the first control
+ * transfer within CTRL_TIMEOUT_MS.  This helper absorbs that by
+ * sleeping 500 ms and retrying once — enough to ride out a tail-end
+ * recovery without masking a genuinely wedged device (which will
+ * timeout on the retry too). */
+static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
+{
+    int r = cmd_u32(h, cmd, val);
+    if (r != LIBUSB_ERROR_TIMEOUT)
+        return r;
+    usleep(500000);
+    return cmd_u32(h, cmd, val);
+}
+
 /* ------------------------------------------------------------------ */
 /* Device open / close                                                */
 /* ------------------------------------------------------------------ */
@@ -1593,14 +1609,14 @@ static int do_test_freq_hop(libusb_device_handle *h)
     int nfreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
 
     for (int i = 0; i < nfreqs; i++) {
-        int r = cmd_u32(h, STARTADC, freqs[i]);
+        int r = cmd_u32_retry(h, STARTADC, freqs[i]);
         if (r < 0) {
             printf("FAIL freq_hop: STARTADC(%u): %s\n", freqs[i], libusb_strerror(r));
             return 1;
         }
         usleep(100000);  /* PLL settle */
 
-        r = cmd_u32(h, STARTFX3, 0);
+        r = cmd_u32_retry(h, STARTFX3, 0);
         if (r < 0) {
             printf("FAIL freq_hop: STARTFX3 at %u Hz: %s\n", freqs[i], libusb_strerror(r));
             return 1;
@@ -1680,10 +1696,10 @@ static int do_test_double_stop(libusb_device_handle *h)
  * Device should handle it (may STALL the second — that's fine). */
 static int do_test_double_start(libusb_device_handle *h)
 {
-    cmd_u32(h, STARTADC, 32000000);
+    cmd_u32_retry(h, STARTADC, 32000000);
     usleep(50000);
 
-    int r = cmd_u32(h, STARTFX3, 0);
+    int r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL double_start: first STARTFX3: %s\n", libusb_strerror(r));
         return 1;

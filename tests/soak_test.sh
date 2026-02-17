@@ -121,7 +121,7 @@ usb_reset_device() {
     # Try application PID first, then bootloader PID
     if lsusb -d "$APP_VID_PID" &>/dev/null; then
         echo "# Resetting device ($APP_VID_PID) back to bootloader state..."
-        usbreset "$APP_VID_PID" 2>/dev/null || true
+        usbreset "$APP_VID_PID" &>/dev/null || true
         sleep 2
         if lsusb -d "$BOOT_VID_PID" &>/dev/null; then
             echo "# Device reset to bootloader ($BOOT_VID_PID) — ready for next run"
