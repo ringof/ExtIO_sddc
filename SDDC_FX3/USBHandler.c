@@ -45,7 +45,7 @@ extern uint32_t glDMACount;
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
 static uint8_t  *glEp0Buffer = 0;       /* Buffer used to handle vendor specific control requests. */
-uint8_t  glVendorRqtCnt = 0;
+static uint8_t  glVendorRqtCnt = 0;
 
 #ifdef TRACESERIAL
 
