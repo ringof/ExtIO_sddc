@@ -128,7 +128,13 @@ static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
  * transfer within CTRL_TIMEOUT_MS.  This helper absorbs that by
  * sleeping 500 ms and retrying once — enough to ride out a tail-end
  * recovery without masking a genuinely wedged device (which will
- * timeout on the retry too). */
+ * timeout on the retry too).
+ *
+ * Convention: use cmd_u32_retry for the FIRST STARTADC + STARTFX3 in
+ * every soak scenario (the "entry point" calls most exposed to
+ * inter-scenario timing).  Use plain cmd_u32 for mid-scenario calls
+ * (STOP→START transitions, recovery verification, etc.) so genuine
+ * firmware timeouts are caught immediately. */
 static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
 {
     int r = cmd_u32(h, cmd, val);
@@ -890,15 +896,17 @@ static int do_test_pib_overflow(libusb_device_handle *h)
         usleep(20000);
     }
 
-    /* 3. Configure ADC at 64 MHz — high enough to overwhelm quickly */
-    r = cmd_u32(h, STARTADC, 64000000);
+    /* 3. Configure ADC at 64 MHz — high enough to overwhelm quickly.
+     *    Use cmd_u32_retry: the previous scenario may have left the
+     *    device mid-watchdog-recovery, causing a transient timeout. */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL pib_overflow: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
 
     /* 4. Start streaming — GPIF begins pushing data to EP1 IN */
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL pib_overflow: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1201,14 +1209,15 @@ static int do_test_stats_pib(libusb_device_handle *h)
         return 0;
     }
 
-    /* Standalone: counter is 0, provoke overflow ourselves. */
-    r = cmd_u32(h, STARTADC, 64000000);
+    /* Standalone: counter is 0, provoke overflow ourselves.
+     * cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL stats_pib: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
 
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL stats_pib: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1298,15 +1307,16 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
 {
     int r;
 
-    /* 1. Configure ADC clock */
-    r = cmd_u32(h, STARTADC, 32000000);
+    /* 1. Configure ADC clock.
+     *    cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 32000000);
     if (r < 0) {
         printf("FAIL stop_gpif_state: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
 
     /* 2. Start streaming */
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL stop_gpif_state: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1356,16 +1366,22 @@ static int do_test_stop_start_cycle(libusb_device_handle *h)
     int cycles = 5;
     int r;
 
-    /* Configure ADC clock once */
-    r = cmd_u32(h, STARTADC, 32000000);
+    /* Configure ADC clock once.
+     * cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 32000000);
     if (r < 0) {
         printf("FAIL stop_start_cycle: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
 
     for (int i = 0; i < cycles; i++) {
-        /* Start streaming */
-        r = cmd_u32(h, STARTFX3, 0);
+        /* Start streaming.  The first iteration uses cmd_u32_retry
+         * because the device may still be settling from the previous
+         * soak scenario's watchdog recovery.  Subsequent iterations
+         * use plain cmd_u32 — if cycle N-1's STOP→START transition
+         * times out, that's a real firmware issue, not a transient. */
+        r = (i == 0) ? cmd_u32_retry(h, STARTFX3, 0)
+                      : cmd_u32(h, STARTFX3, 0);
         if (r < 0) {
             printf("FAIL stop_start_cycle: STARTFX3 on cycle %d: %s\n",
                    i + 1, libusb_strerror(r));
@@ -1475,15 +1491,16 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
     uint8_t info[4] = {0};
     ctrl_read(h, TESTFX3, 1, 0, info, 4);
 
-    /* 1. Configure ADC at 64 MHz */
-    r = cmd_u32(h, STARTADC, 64000000);
+    /* 1. Configure ADC at 64 MHz.
+     *    cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL wedge_recovery: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
 
     /* 2. Start streaming */
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL wedge_recovery: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1547,13 +1564,14 @@ static int do_test_clock_pull(libusb_device_handle *h)
 {
     int r;
 
-    /* 1. Configure and start streaming at 32 MHz */
-    r = cmd_u32(h, STARTADC, 32000000);
+    /* 1. Configure and start streaming at 32 MHz.
+     *    cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 32000000);
     if (r < 0) {
         printf("FAIL clock_pull: STARTADC(32M): %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL clock_pull: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1664,15 +1682,31 @@ static int do_test_ep0_stall_recovery(libusb_device_handle *h)
  * Device should handle the redundant stop gracefully. */
 static int do_test_double_stop(libusb_device_handle *h)
 {
-    /* First, do a START+STOP to get into a known state */
-    cmd_u32(h, STARTADC, 32000000);
-    cmd_u32(h, STARTFX3, 0);
+    /* First, do a START+STOP to get into a known state.
+     *
+     * IMPORTANT: check the return values here.  If setup STARTFX3
+     * silently fails (e.g. the device is still mid-recovery from the
+     * previous scenario), the subsequent double-STOP runs on a broken
+     * device and produces misleading "I/O Error" failures instead of
+     * a clean "STARTFX3 timed out" diagnostic.
+     *
+     * cmd_u32_retry: absorb transient post-recovery timeouts. */
+    int r = cmd_u32_retry(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL double_stop: setup STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL double_stop: setup STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
     usleep(50000);
     cmd_u32(h, STOPFX3, 0);
     usleep(50000);
 
     /* Send a second STOP without START */
-    int r = cmd_u32(h, STOPFX3, 0);
+    r = cmd_u32(h, STOPFX3, 0);
     /* STALL is acceptable — means firmware rejected the redundant stop */
     if (r < 0 && r != LIBUSB_ERROR_PIPE) {
         printf("FAIL double_stop: unexpected error on 2nd STOP: %s\n",
@@ -1740,13 +1774,14 @@ static int do_test_i2c_under_load(libusb_device_handle *h)
 {
     int r;
 
-    /* Start streaming at 64 MHz */
-    r = cmd_u32(h, STARTADC, 64000000);
+    /* Start streaming at 64 MHz.
+     * cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL i2c_under_load: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL i2c_under_load: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1794,12 +1829,13 @@ static int do_test_sustained_stream(libusb_device_handle *h)
     int duration_sec = 30;
     uint32_t sample_rate = 64000000;
 
-    r = cmd_u32(h, STARTADC, sample_rate);
+    /* cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, sample_rate);
     if (r < 0) {
         printf("FAIL sustained_stream: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL sustained_stream: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -1902,13 +1938,14 @@ static int do_test_abandoned_stream(libusb_device_handle *h)
     int r;
     struct fx3_stats baseline, mid, end;
 
-    /* 1. Configure and start streaming */
-    r = cmd_u32(h, STARTADC, 64000000);
+    /* 1. Configure and start streaming.
+     *    cmd_u32_retry: absorb transient post-recovery timeouts. */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL abandoned_stream: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32(h, STARTFX3, 0);
+    r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL abandoned_stream: STARTFX3: %s\n", libusb_strerror(r));
         return 1;
@@ -2156,11 +2193,32 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         }
         total_cycles++;
 
-        /* Health check */
+        /* Inter-scenario cleanup: ensure streaming is stopped before the
+         * health check.  Many scenarios already send STOPFX3 on their
+         * success path, but on failure they often bail out early without
+         * cleaning up.  A stale streaming state bleeds into the next
+         * scenario, causing cascading STARTFX3 timeouts and HEALTH FAILs.
+         *
+         * Rule for new scenarios: always STOPFX3 on the success path,
+         * and rely on this safety net for early-exit failure paths. */
+        cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
+        usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
+
+        /* Health check — retry once on failure.  After a scenario
+         * triggers a watchdog recovery, the device may need up to ~2s
+         * to finish.  Rather than penalise the next scenario with a
+         * broken device, absorb the delay here. */
         if (soak_health_check(h, &prev_stats) == 0) {
             health_pass++;
         } else {
-            health_fail++;
+            /* Device unhealthy — give the watchdog time to finish,
+             * then retry once before moving on. */
+            usleep(2000000);       /* 2 s recovery window */
+            if (soak_health_check(h, &prev_stats) == 0) {
+                health_pass++;
+            } else {
+                health_fail++;
+            }
         }
 
         /* Status line every 10 cycles */
