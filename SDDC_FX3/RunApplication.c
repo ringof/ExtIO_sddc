@@ -229,7 +229,7 @@ void ApplicationThread ( uint32_t input)
 							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
 							{
 								CyU3PReturnStatus_t rc;
-								CyBool_t pll_ok;
+								CyBool_t hw_ok;
 
 								DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u",
 									gpifState, curDMA);
@@ -240,8 +240,8 @@ void ApplicationThread ( uint32_t input)
 								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
 								rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 
-								pll_ok = si5351_pll_locked();
-								if (pll_ok)
+								hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
+								if (hw_ok)
 								{
 									rc = CyU3PDmaMultiChannelSetXfer(
 										&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
@@ -252,7 +252,7 @@ void ApplicationThread ( uint32_t input)
 								                  * GETSTATS [15..18]; also incremented
 								                  * by EP_UNDERRUN in USBHandler.c */
 								DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
-									pll_ok ? "DONE" : "WAIT", rc);
+									hw_ok ? "DONE" : "WAIT", rc);
 								stallCount = 0;
 								prevDMACount = 0;
 								glDMACount = 0;
