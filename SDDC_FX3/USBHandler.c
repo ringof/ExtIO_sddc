@@ -195,6 +195,23 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint32_t freq;
 						memcpy(&freq, glEp0Buffer, 4);
+						/* If the GPIF SM is actively streaming, force-stop
+						 * it before reprogramming the Si5351 ADC clock.
+						 * Changing the clock while the SM is running will
+						 * wedge the PIB (no clock edges for soft-stop).
+						 * Host should send STOPFX3 first; this is a safety
+						 * net against a clock-pull wedge if it doesn't. */
+						{
+							uint8_t smState = 0xFF;
+							CyU3PGpifGetSMState(&smState);
+							if (smState != 0 && smState != 0xFF) {
+								DebugPrint(4, "\r\nSTARTADC: implicit GPIF stop (SM=%d)", smState);
+								CyU3PGpifControlSWInput(CyFalse);
+								CyU3PGpifDisable(CyTrue);
+								CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+								CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+							}
+						}
 						apiRetStatus = si5351aSetFrequencyA(freq);
 						if (apiRetStatus == CY_U3P_SUCCESS) {
 							CyU3PThreadSleep(1000);

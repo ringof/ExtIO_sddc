@@ -235,7 +235,11 @@ void ApplicationThread ( uint32_t input)
 									gpifState, curDMA);
 								CyU3PGpifControlSWInput(CyFalse);
 
-								CyU3PGpifDisable(CyFalse);
+								/* Force-stop (CyTrue): soft-stop requires clock
+								 * edges from the ADC, which may not be present
+								 * during a watchdog recovery (e.g. Si5351 disabled
+								 * or PLL unlocked).  Force-stop is unconditional. */
+								CyU3PGpifDisable(CyTrue);
 
 								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
 								rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
