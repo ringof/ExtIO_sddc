@@ -28,29 +28,29 @@ Verified: `git diff 6b35bcc~1 -- SDDC_FX3/USBHandler.c` shows zero diff.
 Test-side changes from #78 chain (libusb_clear_halt in open_rx888, GETSTATS
 diagnostics) are **kept** — they are host-side fixes independent of firmware.
 
-### 2. Restore GPIO in `do_test_gpio_extremes()` (fx3_cmd.c)
+### 2. [DONE] Restore GPIO in `do_test_gpio_extremes()` (fx3_cmd.c)
 
 After the extreme-pattern loop, restore GPIO to known-good state:
 ```c
 cmd_u32(h, GPIOFX3, 0x0800);  /* LED_BLUE — matches rx888r2_GpioInitialize() */
 ```
 
-### 3. Add GPIO restore to `device_quiesce()` in fw_test.sh
+### 3. [DONE] Add GPIO restore to `device_quiesce()` in fw_test.sh
 
 Safety net: restore GPIO to `LED_BLUE` (0x0800) during inter-test cleanup.
 ```bash
 "$FX3_CMD" gpio 0x0800 >/dev/null 2>&1 || true
 ```
 
-### 4. Add GPIO restore to soak runner quiesce (fx3_cmd.c)
+### 4. [DONE] Add GPIO restore to soak runner quiesce (fx3_cmd.c)
 
 Same GPIO restore in the soak runner's inter-scenario cleanup.
 
-### 5. Add `hw_smoke` test (fw_test.sh)
+### 5. [DONE] Add `hw_smoke` test (fw_test.sh + fx3_cmd.c)
 
 Minimal test after GPIO-manipulating tests: set known-good GPIO, set ADC clock,
 START, read data, STOP.  Directly verifies the RX888mk2 "still works" before
-the complex streaming tests.
+the complex streaming tests.  TAP plan bumped 35 → 36.
 
 ## Build/Validation
 

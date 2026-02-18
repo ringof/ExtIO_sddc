@@ -410,6 +410,7 @@ static int do_test_vendor_rqt_wrap(libusb_device_handle *h);
 static int do_test_stale_vendor_codes(libusb_device_handle *h);
 static int do_test_setarg_gap_index(libusb_device_handle *h);
 static int do_test_gpio_extremes(libusb_device_handle *h);
+static int do_test_hw_smoke(libusb_device_handle *h);
 static int do_test_i2c_write_bad_addr(libusb_device_handle *h);
 static int do_test_i2c_multibyte(libusb_device_handle *h);
 static int do_test_readinfodebug_flood(libusb_device_handle *h);
@@ -460,6 +461,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stale_vendor_codes", do_test_stale_vendor_codes},
     {"setarg_gap_index", do_test_setarg_gap_index},
     {"gpio_extremes",    do_test_gpio_extremes},
+    {"hw_smoke",         do_test_hw_smoke},
     {"i2c_write_bad_addr", do_test_i2c_write_bad_addr},
     {"i2c_multibyte",    do_test_i2c_multibyte},
     {"readinfodebug_flood", do_test_readinfodebug_flood},
@@ -504,6 +506,7 @@ static void print_local_help(void)
            "  stale_vendor_codes            Dead-zone bRequest values\n"
            "  setarg_gap_index              Near-miss SETARGFX3 wIndex\n"
            "  gpio_extremes                 Extreme GPIO patterns\n"
+           "  hw_smoke                      ADC alive check (stream after GPIO)\n"
            "  i2c_write_bad_addr            I2C write NACK counter\n"
            "  i2c_multibyte                 Multi-byte I2C round-trip\n"
            "  readinfodebug_flood           Debug buffer flood without drain\n"
@@ -2780,6 +2783,12 @@ static int do_test_gpio_extremes(libusb_device_handle *h)
         }
     }
 
+    /* Restore GPIO to known-good state: LED_BLUE (bit 11) matches
+     * rx888r2_GpioInitialize() default.  Without this, the 0x0001FFFF
+     * pattern leaves SHDWN (bit 5) set, putting the LTC2208 ADC to
+     * sleep and breaking all subsequent streaming tests. */
+    cmd_u32(h, GPIOFX3, 0x0800);
+
     /* Verify alive */
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
@@ -2789,6 +2798,39 @@ static int do_test_gpio_extremes(libusb_device_handle *h)
         return 1;
     }
     printf("PASS gpio_extremes: %d extreme patterns accepted\n", npatterns);
+    return 0;
+}
+
+/* hw_smoke — minimal streaming sanity check after GPIO-manipulating tests.
+ * Sets known-good GPIO, configures ADC clock, START, reads data, STOP.
+ * Catches the case where gpio_extremes left SHDWN set (ADC asleep). */
+static int do_test_hw_smoke(libusb_device_handle *h)
+{
+    int r;
+
+    /* Ensure GPIO is in known-good state */
+    cmd_u32(h, GPIOFX3, 0x0800);  /* LED_BLUE */
+
+    r = cmd_u32_retry(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL hw_smoke: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL hw_smoke: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (got < 1024) {
+        printf("FAIL hw_smoke: only %d bytes (expected >= 1024)\n",
+               got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS hw_smoke: %d bytes received — ADC alive\n", got);
     return 0;
 }
 
@@ -3831,6 +3873,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
          * Rule for new scenarios: always STOPFX3 on the success path,
          * and rely on this safety net for early-exit failure paths. */
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
+        cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
 
         /* Health check — retry once on failure.  After a scenario
@@ -4170,6 +4213,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "gpio_extremes") == 0) {
         rc = do_test_gpio_extremes(h);
+
+    } else if (strcmp(cmd, "hw_smoke") == 0) {
+        rc = do_test_hw_smoke(h);
 
     } else if (strcmp(cmd, "i2c_write_bad_addr") == 0) {
         rc = do_test_i2c_write_bad_addr(h);

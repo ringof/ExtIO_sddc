@@ -137,6 +137,7 @@ run_cmd() {
 #   3. Health check via TESTFX3; retry once after 2 s on failure
 device_quiesce() {
     "$FX3_CMD" stop >/dev/null 2>&1 || true
+    "$FX3_CMD" gpio 0x0800 >/dev/null 2>&1 || true   # LED_BLUE — clear SHDWN
     sleep 0.1
     if "$FX3_CMD" test >/dev/null 2>&1; then
         return 0
@@ -196,11 +197,12 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 #      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL
 #      + 5 new coverage-gap tests (vendor_rqt_wrap, stale_vendor_codes,
 #        setarg_gap_index, gpio_extremes, i2c_write_bad_addr)
+#      + 1 hw_smoke (ADC alive after GPIO extremes)
 #      + 4 GPIF wedge/recovery tests
 #      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=35
+PLANNED=36
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -538,7 +540,21 @@ output=$(run_cmd i2c_write_bad_addr) && {
 }
 
 # ==================================================================
-# 24. GPIF stop state verification
+# 24. Hardware smoke test — ADC alive after GPIO extremes
+# ==================================================================
+# Verifies the device can still stream data after gpio_extremes.
+# Catches the case where SHDWN was left set (ADC asleep).
+
+device_quiesce
+
+output=$(run_cmd hw_smoke) && {
+    tap_ok "hw_smoke: ADC alive — data flows after GPIO extremes"
+} || {
+    tap_fail "hw_smoke: no data — ADC may be in shutdown" "$output"
+}
+
+# ==================================================================
+# 25. GPIF stop state verification
 # ==================================================================
 # After STOPFX3, verify the GPIF SM is actually stopped (state 0 or 1).
 # Before the fix: SM stays running or stuck in BUSY/WAIT.
@@ -552,7 +568,7 @@ output=$(run_cmd stop_gpif_state) && {
 }
 
 # ==================================================================
-# 25. Stop/start cycle test
+# 26. Stop/start cycle test
 # ==================================================================
 # Cycle STOP+START 5 times, verifying data flows each cycle.
 # Before the fix: wedges on 2nd or 3rd cycle.
@@ -566,7 +582,7 @@ output=$(run_cmd stop_start_cycle) && {
 }
 
 # ==================================================================
-# 26. PLL pre-flight check
+# 27. PLL pre-flight check
 # ==================================================================
 # Verify STARTFX3 is rejected when ADC clock is off.
 # Before the fix: START succeeds and GPIF reads garbage.
@@ -580,7 +596,7 @@ output=$(run_cmd pll_preflight) && {
 }
 
 # ==================================================================
-# 27. Wedge recovery test
+# 28. Wedge recovery test
 # ==================================================================
 # Provoke DMA backpressure (start streaming, don't read EP1),
 # then STOP+START and verify recovery.
@@ -595,7 +611,7 @@ output=$(run_cmd wedge_recovery) && {
 }
 
 # ==================================================================
-# 28. PIB error detection (issue #10)
+# 29. PIB error detection (issue #10)
 # ==================================================================
 # Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
 # Verify the debug console reports "PIB error".
@@ -611,7 +627,7 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 29. GETSTATS PIB error counter
+# 30. GETSTATS PIB error counter
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
@@ -622,7 +638,7 @@ output=$(run_cmd stats_pib) && {
 }
 
 # ==================================================================
-# 30. Streaming test via rx888_stream
+# 31. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
