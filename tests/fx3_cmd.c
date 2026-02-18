@@ -122,10 +122,10 @@ static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
     return ctrl_write_buf(h, SETARGFX3, arg_val, arg_id, &zero, 1);
 }
 
-/* Retry a command once on a transient USB error.  When a soak scenario
- * starts right after a prior scenario triggered a watchdog recovery,
- * the device may still be mid-recovery and unable to service the first
- * control transfer.  This manifests as either:
+/* Retry a command on a transient USB error with escalating backoff.
+ * When a soak scenario starts right after a prior scenario triggered
+ * heavy watchdog activity, the device may still be mid-recovery and
+ * unable to service control transfers.  This manifests as either:
  *
  *   LIBUSB_ERROR_TIMEOUT  — transfer completed but device didn't ACK
  *                           within CTRL_TIMEOUT_MS
@@ -133,9 +133,12 @@ static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
  *                           NAK flood, etc.) while the FX3 is
  *                           resetting its DMA/GPIF state
  *
- * The helper sleeps 500 ms and retries once — enough to ride out a
- * tail-end recovery without masking a genuinely wedged device (which
- * will fail the retry too).
+ * The helper retries up to twice with escalating backoff (500 ms then
+ * 1 s, worst-case 1.5 s total).  STARTFX3 is especially sensitive
+ * because it restarts the GPIF state machine — unlike simple EP0
+ * reads (TESTFX3) which succeed sooner.  The 1.5 s budget matches the
+ * observed watchdog recovery window (~2 s) while still catching a
+ * genuinely wedged device within a few seconds.
  *
  * Convention: use cmd_u32_retry for the FIRST STARTADC + STARTFX3 in
  * every soak scenario (the "entry point" calls most exposed to
@@ -147,7 +150,11 @@ static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
     int r = cmd_u32(h, cmd, val);
     if (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO)
         return r;
-    usleep(500000);
+    usleep(500000);                    /* 500 ms backoff */
+    r = cmd_u32(h, cmd, val);
+    if (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO)
+        return r;
+    usleep(1000000);                   /* 1 s backoff */
     return cmd_u32(h, cmd, val);
 }
 
