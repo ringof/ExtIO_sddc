@@ -105,23 +105,11 @@ startup a clean grace period — the watchdog skips stall detection when
 `curDMA == 0`.  This prevents the watchdog from racing with STARTFX3's
 DMA/GPIF bring-up.
 
-### Change 4 (test harness) — Increase CTRL_TIMEOUT_MS safety margin
+### ~~Change 4~~ — Dropped
 
-**File:** `tests/fx3_cmd.c`, line 63
-
-Change:
-```c
-#define CTRL_TIMEOUT_MS  1000
-```
-To:
-```c
-#define CTRL_TIMEOUT_MS  2000
-```
-
-**Rationale:** Even after reducing STARTADC's blocking from 1 s to ~50 ms,
-a 2 s timeout provides a comfortable margin for any remaining jitter, USB bus
-delays, or future firmware changes.  The soak test already has its own timing
-controls; a 2 s EP0 timeout doesn't meaningfully affect test speed.
+CTRL_TIMEOUT_MS stays at 1000 ms.  Changes 1–3 reduce STARTADC blocking
+from 1 s to ~10–50 ms, which provides sufficient margin within the existing
+1 s host timeout.
 
 ## Validation
 
@@ -145,5 +133,4 @@ After applying these changes:
   STALL + isHandled.
 - Watchdog: `glDMACount = 0` in STARTFX3 is equivalent to what
   `StartApplication()` already does at USB enumeration time.
-- CTRL_TIMEOUT_MS increase: only affects the test harness, not firmware.
-  All assertions and scenario timeouts are independent of this value.
+- CTRL_TIMEOUT_MS: unchanged (1000 ms), no regression possible.

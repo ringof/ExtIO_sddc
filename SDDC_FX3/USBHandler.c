@@ -214,7 +214,23 @@ CyFxSlFifoApplnUSBSetupCB (
 						}
 						apiRetStatus = si5351aSetFrequencyA(freq);
 						if (apiRetStatus == CY_U3P_SUCCESS) {
-							CyU3PThreadSleep(1000);
+							/* Poll PLL lock — typically <10 ms for Si5351.
+							 * Max 100 iterations x 1 ms = 100 ms worst-case.
+							 * This keeps the USB thread unblocked so STARTFX3
+							 * arriving shortly after STARTADC is not delayed.
+							 *
+							 * We use si5351_pll_locked() rather than
+							 * GpifPreflightCheck() because we just called
+							 * si5351aSetFrequencyA(freq) with freq > 0, so
+							 * glAdcClockEnabled is already CyTrue — the
+							 * extra clk0_enabled check would be redundant. */
+							{
+								int i;
+								for (i = 0; i < 100; i++) {
+									CyU3PThreadSleep(1);
+									if (si5351_pll_locked()) break;
+								}
+							}
 							isHandled = CyTrue;
 						} else {
 							DebugPrint(4, "STARTADC si5351 failed: %d", apiRetStatus);
@@ -310,20 +326,25 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 				}
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
-    	 		 	CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
-					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0);
-					if (apiRetStatus == CY_U3P_SUCCESS)
-					{
-						apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
-					if (apiRetStatus == CY_U3P_SUCCESS)
-					{
-						CyU3PGpifControlSWInput ( CyTrue );
-						isHandled = CyTrue;
+				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
+				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
+				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+				if (apiRetStatus == CY_U3P_SUCCESS) {
+					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
+					if (apiRetStatus == CY_U3P_SUCCESS) {
+						CyU3PGpifControlSWInput(CyTrue);
 					}
-					}
-					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
-					  DebugPrint(4,"\r\nGO s=%d r=%d",_s,apiRetStatus); }
-					break;
+				}
+				if (apiRetStatus != CY_U3P_SUCCESS) {
+					/* DMA or GPIF setup failed — report to host and
+					 * ensure EP0 is left in a clean state. */
+					DebugPrint(4, "\r\nSTARTFX3 fail: %d", apiRetStatus);
+					CyU3PUsbStall(0, CyTrue, CyFalse);
+				}
+				isHandled = CyTrue;  /* always — GetEP0Data already consumed data phase */
+				{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+				  DebugPrint(4,"\r\nGO s=%d r=%d",_s,apiRetStatus); }
+				break;
 
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
