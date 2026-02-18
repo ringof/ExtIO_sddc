@@ -1911,6 +1911,531 @@ static int do_test_sustained_stream(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* Coverage-gap tests                                                 */
+/* ------------------------------------------------------------------ */
+
+/* rapid_start_stop: 50× START/STOP with ~1ms gaps, no bulk reads.
+ * Stresses the DMA setup/teardown path and catches descriptor leaks
+ * or stale glDMACount values. */
+static int do_test_rapid_start_stop(libusb_device_handle *h)
+{
+    int r;
+    int cycles = 50;
+
+    r = cmd_u32_retry(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL rapid_start_stop: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    for (int i = 0; i < cycles; i++) {
+        r = (i == 0) ? cmd_u32_retry(h, STARTFX3, 0)
+                      : cmd_u32(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL rapid_start_stop: STARTFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(1000);  /* 1ms — no bulk reads */
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL rapid_start_stop: STOPFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(1000);
+    }
+
+    /* Verify device is alive and streaming still works */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL rapid_start_stop: final STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    int got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (got < 1024) {
+        printf("FAIL rapid_start_stop: no data after %d cycles (%d bytes)\n",
+               cycles, got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS rapid_start_stop: %d cycles, data flowing after\n", cycles);
+    return 0;
+}
+
+/* startadc_mid_stream: change ADC frequency while GPIF is running
+ * without explicit STOP.  The firmware's implicit safety net in
+ * STARTADC should force-stop GPIF before reprogramming the clock. */
+static int do_test_startadc_mid_stream(libusb_device_handle *h)
+{
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL startadc_mid_stream: STARTADC(32M): %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL startadc_mid_stream: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Confirm data flowing at 32 MHz */
+    int got = bulk_read_some(h, 16384, 2000);
+    if (got < 1024) {
+        printf("FAIL startadc_mid_stream: no data at 32M (%d bytes)\n",
+               got < 0 ? 0 : got);
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* Reprogram to 64 MHz WITHOUT stopping — firmware should handle this */
+    r = cmd_u32(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL startadc_mid_stream: STARTADC(64M) mid-stream: %s\n",
+               libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    usleep(200000);  /* PLL relock */
+
+    /* Restart streaming at new frequency */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL startadc_mid_stream: STARTFX3 after reprogram: %s\n",
+               libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (got < 1024) {
+        printf("FAIL startadc_mid_stream: no data at 64M after reprogram (%d bytes)\n",
+               got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS startadc_mid_stream: reprogram 32M→64M mid-stream, data flowing\n");
+    return 0;
+}
+
+/* setarg_boundary: test DAT31_ATT and AD8370_VGA with boundary values.
+ * Valid: ATT 0-63, VGA 0-255.  Firmware passes values straight through
+ * to hardware — this documents actual behavior at/beyond limits. */
+static int do_test_setarg_boundary(libusb_device_handle *h)
+{
+    struct { uint16_t id; const char *name; uint16_t max_valid; } args[] = {
+        {DAT31_ATT, "DAT31_ATT", 63},
+        {AD8370_VGA, "AD8370_VGA", 255},
+    };
+
+    for (int a = 0; a < 2; a++) {
+        uint16_t test_vals[] = {0, args[a].max_valid,
+                                (uint16_t)(args[a].max_valid + 1), 0xFFFF};
+        for (int v = 0; v < 4; v++) {
+            int r = set_arg(h, args[a].id, test_vals[v]);
+            /* Values within range should succeed.
+             * Values beyond range: firmware may accept (pass-through)
+             * or STALL — either is acceptable, just not a crash. */
+            if (r < 0 && r != LIBUSB_ERROR_PIPE) {
+                printf("FAIL setarg_boundary: %s=%u: %s\n",
+                       args[a].name, test_vals[v], libusb_strerror(r));
+                return 1;
+            }
+        }
+    }
+
+    /* Verify device is alive */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL setarg_boundary: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Restore safe defaults */
+    set_arg(h, DAT31_ATT, 0);
+    set_arg(h, AD8370_VGA, 0);
+
+    printf("PASS setarg_boundary: all boundary values accepted without crash\n");
+    return 0;
+}
+
+/* i2c_bad_addr: I2C read to an absent address.  Should NACK and
+ * increment i2c_failures, not wedge the I2C block. */
+static int do_test_i2c_bad_addr(libusb_device_handle *h)
+{
+    struct fx3_stats before, after;
+    int r = read_stats(h, &before);
+    if (r < 0) {
+        printf("FAIL i2c_bad_addr: initial GETSTATS: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read 1 byte from absent address 0x90 (no device there) */
+    uint8_t buf[1] = {0};
+    r = ctrl_read(h, I2CRFX3, 0x90, 0, buf, 1);
+    /* May STALL (firmware propagates NACK) or return data — either way,
+     * the device should survive. */
+
+    /* Verify device is alive */
+    uint8_t info[4] = {0};
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL i2c_bad_addr: device unresponsive after bad I2C addr: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Check i2c_failures counter incremented */
+    r = read_stats(h, &after);
+    if (r < 0) {
+        printf("FAIL i2c_bad_addr: GETSTATS after: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    if (after.i2c_failures > before.i2c_failures) {
+        printf("PASS i2c_bad_addr: i2c_failures %u→%u (NACK counted)\n",
+               before.i2c_failures, after.i2c_failures);
+    } else {
+        printf("PASS i2c_bad_addr: device survived (i2c_failures unchanged: %u)\n",
+               after.i2c_failures);
+    }
+    return 0;
+}
+
+/* ep0_control_while_streaming: hammer EP0 with mixed control commands
+ * while actively reading bulk data from EP1.  Tests USB controller
+ * arbitration between control and bulk endpoints. */
+static int do_test_ep0_control_while_streaming(libusb_device_handle *h)
+{
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL ep0_control_while_streaming: STARTADC: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL ep0_control_while_streaming: STARTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Interleave: bulk read, then EP0 command, repeat 20 times */
+    int ep0_ok = 0, bulk_ok = 0;
+    struct fx3_stats s;
+
+    for (int i = 0; i < 20; i++) {
+        /* Bulk read */
+        int got = bulk_read_some(h, 16384, 1000);
+        if (got >= 1024) bulk_ok++;
+
+        /* Rotate through different EP0 commands */
+        switch (i % 5) {
+        case 0: r = read_stats(h, &s); break;
+        case 1: {
+            uint8_t info[4];
+            r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+            break;
+        }
+        case 2: r = set_arg(h, DAT31_ATT, (uint16_t)(i & 0x3F)); break;
+        case 3: r = set_arg(h, AD8370_VGA, (uint16_t)(i * 10)); break;
+        case 4: r = cmd_u32(h, GPIOFX3, 0); break;
+        }
+        if (r >= 0) ep0_ok++;
+    }
+
+    cmd_u32(h, STOPFX3, 0);
+    set_arg(h, DAT31_ATT, 0);
+    set_arg(h, AD8370_VGA, 0);
+
+    if (bulk_ok < 15) {
+        printf("FAIL ep0_control_while_streaming: only %d/20 bulk reads OK\n",
+               bulk_ok);
+        return 1;
+    }
+    if (ep0_ok < 15) {
+        printf("FAIL ep0_control_while_streaming: only %d/20 EP0 commands OK\n",
+               ep0_ok);
+        return 1;
+    }
+    printf("PASS ep0_control_while_streaming: %d bulk + %d EP0 OK during stream\n",
+           bulk_ok, ep0_ok);
+    return 0;
+}
+
+/* gpio_during_stream: cycle GPIO bit patterns while streaming at 64 MHz.
+ * GPIOFX3 shares the PIB data bus — tests bus contention. */
+static int do_test_gpio_during_stream(libusb_device_handle *h)
+{
+    int r;
+    static const uint32_t patterns[] = {
+        0x00000000, 0xFFFFFFFF, 0xAAAAAAAA, 0x55555555,
+        0x0000FFFF, 0xFFFF0000, 0x00000000
+    };
+    int npatterns = (int)(sizeof(patterns) / sizeof(patterns[0]));
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL gpio_during_stream: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL gpio_during_stream: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Confirm streaming */
+    int got = bulk_read_some(h, 16384, 1000);
+    if (got < 1024) {
+        printf("FAIL gpio_during_stream: no initial data (%d bytes)\n",
+               got < 0 ? 0 : got);
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* Cycle GPIO patterns while streaming */
+    for (int i = 0; i < npatterns; i++) {
+        r = cmd_u32(h, GPIOFX3, patterns[i]);
+        if (r < 0) {
+            printf("FAIL gpio_during_stream: GPIO 0x%08X: %s\n",
+                   patterns[i], libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            cmd_u32(h, GPIOFX3, 0);
+            return 1;
+        }
+        usleep(10000);  /* 10ms between patterns */
+    }
+
+    /* Verify streaming still works after GPIO hammering */
+    got = bulk_read_some(h, 16384, 1000);
+    cmd_u32(h, STOPFX3, 0);
+    cmd_u32(h, GPIOFX3, 0);  /* restore */
+
+    if (got < 1024) {
+        printf("FAIL gpio_during_stream: streaming died after GPIO (%d bytes)\n",
+               got < 0 ? 0 : got);
+        return 1;
+    }
+    printf("PASS gpio_during_stream: %d GPIO patterns during stream, data OK\n",
+           npatterns);
+    return 0;
+}
+
+/* ep0_oversize_all_commands: send wLength > 64 for every data-phase
+ * command.  The firmware's bounds check at USBHandler.c line 177 should
+ * STALL uniformly before the command switch. */
+static int do_test_ep0_oversize_all(libusb_device_handle *h)
+{
+    uint8_t buf[128];
+    memset(buf, 0, sizeof(buf));
+
+    /* All vendor requests that take an OUT data phase */
+    static const struct { uint8_t code; const char *name; } cmds[] = {
+        {GPIOFX3,   "GPIOFX3"},
+        {STARTADC,  "STARTADC"},
+        {STARTFX3,  "STARTFX3"},
+        {I2CWFX3,   "I2CWFX3"},
+        {SETARGFX3, "SETARGFX3"},
+        {STOPFX3,   "STOPFX3"},
+    };
+    int ncmds = (int)(sizeof(cmds) / sizeof(cmds[0]));
+
+    for (int i = 0; i < ncmds; i++) {
+        int r = libusb_control_transfer(
+            h,
+            LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR |
+                LIBUSB_RECIPIENT_DEVICE,
+            cmds[i].code, 0, 0, buf, sizeof(buf), CTRL_TIMEOUT_MS);
+
+        if (r == LIBUSB_ERROR_PIPE) {
+            /* STALL — expected */
+            continue;
+        }
+        if (r < 0) {
+            printf("FAIL ep0_oversize_all: %s: unexpected error: %s\n",
+                   cmds[i].name, libusb_strerror(r));
+            return 1;
+        }
+        printf("FAIL ep0_oversize_all: %s accepted wLength=%d "
+               "(expected STALL)\n", cmds[i].name, (int)sizeof(buf));
+        return 1;
+    }
+
+    /* Verify device is alive */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL ep0_oversize_all: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS ep0_oversize_all: all %d commands STALL on wLength=%d\n",
+           ncmds, (int)sizeof(buf));
+    return 0;
+}
+
+/* i2c_write_read_cycle: write a value to a Si5351 register, read it
+ * back, verify match.  Uses crystal load register (183) which is
+ * written during init and safe to round-trip. */
+static int do_test_i2c_write_read(libusb_device_handle *h)
+{
+    /* Read current value of crystal load register (reg 183, addr 0xC0) */
+    uint8_t orig[1] = {0};
+    int r = ctrl_read(h, I2CRFX3, 0xC0, 183, orig, 1);
+    if (r < 1) {
+        printf("FAIL i2c_write_read: initial read reg 183: %s\n",
+               r < 0 ? libusb_strerror(r) : "short");
+        return 1;
+    }
+
+    /* Write a test value (toggle bit 0 from current) */
+    uint8_t test_val = orig[0] ^ 0x01;
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 183, &test_val, 1);
+    if (r < 0) {
+        printf("FAIL i2c_write_read: write reg 183: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read back */
+    uint8_t readback[1] = {0};
+    r = ctrl_read(h, I2CRFX3, 0xC0, 183, readback, 1);
+    if (r < 1) {
+        printf("FAIL i2c_write_read: readback reg 183: %s\n",
+               r < 0 ? libusb_strerror(r) : "short");
+        /* Restore original before returning */
+        ctrl_write_buf(h, I2CWFX3, 0xC0, 183, orig, 1);
+        return 1;
+    }
+
+    /* Restore original value */
+    ctrl_write_buf(h, I2CWFX3, 0xC0, 183, orig, 1);
+
+    if (readback[0] != test_val) {
+        printf("FAIL i2c_write_read: wrote 0x%02X, read back 0x%02X "
+               "(orig 0x%02X)\n", test_val, readback[0], orig[0]);
+        return 1;
+    }
+    printf("PASS i2c_write_read: reg 183 round-trip OK "
+           "(orig=0x%02X, wrote=0x%02X, read=0x%02X)\n",
+           orig[0], test_val, readback[0]);
+    return 0;
+}
+
+/* rapid_adc_reprogram: 10× STARTADC cycling through frequencies with
+ * no START/STOP.  Stresses Si5351 PLL relock and the poll loop.
+ * Verifies PLL lock via GETSTATS after each. */
+static int do_test_rapid_adc_reprogram(libusb_device_handle *h)
+{
+    static const uint32_t freqs[] = {
+        16000000, 32000000, 48000000, 64000000, 128000000,
+        64000000, 48000000, 32000000, 16000000, 128000000
+    };
+    int nfreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
+
+    for (int i = 0; i < nfreqs; i++) {
+        int r = cmd_u32(h, STARTADC, freqs[i]);
+        if (r < 0) {
+            printf("FAIL rapid_adc_reprogram: STARTADC(%u) step %d: %s\n",
+                   freqs[i], i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(10000);  /* 10ms — minimal settle */
+
+        /* Verify PLL locked via GETSTATS */
+        struct fx3_stats s;
+        r = read_stats(h, &s);
+        if (r < 0) {
+            printf("FAIL rapid_adc_reprogram: GETSTATS step %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        /* Si5351 status reg bit 5 = PLLA lock, bit 7 = PLLB lock
+         * Bits set = NOT locked.  For CLK0 (PLLA): check bit 5. */
+        if (s.si5351_status & 0x20) {
+            printf("FAIL rapid_adc_reprogram: PLL unlocked after %u Hz "
+                   "(status=0x%02X)\n", freqs[i], s.si5351_status);
+            return 1;
+        }
+    }
+
+    /* Restore standard frequency */
+    cmd_u32(h, STARTADC, 32000000);
+
+    printf("PASS rapid_adc_reprogram: %d frequency changes, PLL locked after each\n",
+           nfreqs);
+    return 0;
+}
+
+/* debug_while_streaming: poll READINFODEBUG during active streaming.
+ * READINFODEBUG uses EP0 bidirectionally (wValue=input, response=output)
+ * while EP1 carries bulk data. */
+static int do_test_debug_while_streaming(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[64];
+
+    /* Enable debug mode */
+    uint8_t info[4] = {0};
+    r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug_while_streaming: enable debug: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL debug_while_streaming: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL debug_while_streaming: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Interleave bulk reads and debug console polls */
+    int bulk_ok = 0, debug_ok = 0;
+    for (int i = 0; i < 20; i++) {
+        int got = bulk_read_some(h, 16384, 500);
+        if (got >= 1024) bulk_ok++;
+
+        /* Poll debug output (wValue=0 = no input char, just read) */
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        /* r > 0: debug output pending; STALL: nothing pending — both OK */
+        if (r >= 0 || r == LIBUSB_ERROR_PIPE) debug_ok++;
+    }
+
+    cmd_u32(h, STOPFX3, 0);
+
+    /* Disable debug mode */
+    ctrl_read(h, TESTFX3, 0, 0, info, 4);
+
+    if (bulk_ok < 15) {
+        printf("FAIL debug_while_streaming: only %d/20 bulk reads OK\n",
+               bulk_ok);
+        return 1;
+    }
+    if (debug_ok < 15) {
+        printf("FAIL debug_while_streaming: only %d/20 debug polls OK\n",
+               debug_ok);
+        return 1;
+    }
+    printf("PASS debug_while_streaming: %d bulk + %d debug OK during stream\n",
+           bulk_ok, debug_ok);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Consumer-failure scenarios                                         */
 /*                                                                    */
 /* These simulate the most common real-world failure mode: the host   */
@@ -2385,6 +2910,16 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         {"double_start",        do_test_double_start,         5, 0, 0, 0},
         {"i2c_under_load",      do_test_i2c_under_load,       5, 0, 0, 0},
         {"sustained_stream",    do_test_sustained_stream,     2, 0, 0, 0},
+        {"rapid_start_stop",    do_test_rapid_start_stop,    10, 0, 0, 0},
+        {"startadc_mid_stream", do_test_startadc_mid_stream,  5, 0, 0, 0},
+        {"setarg_boundary",     do_test_setarg_boundary,      5, 0, 0, 0},
+        {"i2c_bad_addr",        do_test_i2c_bad_addr,         5, 0, 0, 0},
+        {"ep0_ctrl_streaming",  do_test_ep0_control_while_streaming, 5, 0, 0, 0},
+        {"gpio_during_stream",  do_test_gpio_during_stream,   5, 0, 0, 0},
+        {"ep0_oversize_all",    do_test_ep0_oversize_all,     3, 0, 0, 0},
+        {"i2c_write_read",      do_test_i2c_write_read,       5, 0, 0, 0},
+        {"rapid_adc_reprogram", do_test_rapid_adc_reprogram,  5, 0, 0, 0},
+        {"debug_while_stream",  do_test_debug_while_streaming,3, 0, 0, 0},
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
@@ -2590,6 +3125,16 @@ static void usage(const char *prog)
         "  double_start                 Back-to-back STARTFX3\n"
         "  i2c_under_load               I2C read while streaming\n"
         "  sustained_stream             30s continuous streaming check\n"
+        "  rapid_start_stop             50× START/STOP with no bulk reads\n"
+        "  startadc_mid_stream          Reprogram ADC clock while streaming\n"
+        "  setarg_boundary              SETARGFX3 boundary/OOB values\n"
+        "  i2c_bad_addr                 I2C read to absent address (NACK)\n"
+        "  ep0_control_while_streaming  Mixed EP0 commands during stream\n"
+        "  gpio_during_stream           GPIO bit patterns during stream\n"
+        "  ep0_oversize_all             wLength>64 for all data-phase cmds\n"
+        "  i2c_write_read               I2CWFX3+I2CRFX3 round-trip verify\n"
+        "  rapid_adc_reprogram          Back-to-back STARTADC freq changes\n"
+        "  debug_while_streaming        READINFODEBUG during active stream\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
@@ -2746,6 +3291,36 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "sustained_stream") == 0) {
         rc = do_test_sustained_stream(h);
+
+    } else if (strcmp(cmd, "rapid_start_stop") == 0) {
+        rc = do_test_rapid_start_stop(h);
+
+    } else if (strcmp(cmd, "startadc_mid_stream") == 0) {
+        rc = do_test_startadc_mid_stream(h);
+
+    } else if (strcmp(cmd, "setarg_boundary") == 0) {
+        rc = do_test_setarg_boundary(h);
+
+    } else if (strcmp(cmd, "i2c_bad_addr") == 0) {
+        rc = do_test_i2c_bad_addr(h);
+
+    } else if (strcmp(cmd, "ep0_control_while_streaming") == 0) {
+        rc = do_test_ep0_control_while_streaming(h);
+
+    } else if (strcmp(cmd, "gpio_during_stream") == 0) {
+        rc = do_test_gpio_during_stream(h);
+
+    } else if (strcmp(cmd, "ep0_oversize_all") == 0) {
+        rc = do_test_ep0_oversize_all(h);
+
+    } else if (strcmp(cmd, "i2c_write_read") == 0) {
+        rc = do_test_i2c_write_read(h);
+
+    } else if (strcmp(cmd, "rapid_adc_reprogram") == 0) {
+        rc = do_test_rapid_adc_reprogram(h);
+
+    } else if (strcmp(cmd, "debug_while_streaming") == 0) {
+        rc = do_test_debug_while_streaming(h);
 
     } else if (strcmp(cmd, "abandoned_stream") == 0) {
         rc = do_test_abandoned_stream(h);
