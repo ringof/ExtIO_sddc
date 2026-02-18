@@ -1,6 +1,11 @@
-# Plan: Watchdog Recovery Cap
+# Plan: Watchdog Recovery Cap + STOPFX3 Hardening
 
-## Problem
+Covers: [#73](https://github.com/ringof/ExtIO_sddc/issues/73),
+[#77](https://github.com/ringof/ExtIO_sddc/issues/77)
+
+## Problems
+
+### #73 — Watchdog loops forever when host crashes without STOPFX3
 
 When a host application crashes or is killed without sending STOPFX3, the
 device is left streaming with no consumer.  The watchdog detects the stall
@@ -8,6 +13,18 @@ and recovers, but since no consumer will ever appear, it loops forever —
 tearing down and rebuilding GPIF/DMA every ~1 second indefinitely.  This
 wastes FX3 CPU time, hammers I2C, and can cause transient EP0 timeouts
 under sustained churn.
+
+### #77 — Rapid START/STOP cycling causes hard lockup
+
+50× STARTFX3/STOPFX3 with ~1ms gaps and zero bulk reads causes a hard
+device lockup on the next STARTADC.  Two root causes:
+
+1. **`glDMACount` not reset in STOPFX3** — the watchdog sees the stale
+   count from the previous session, false-fires recovery, and races with
+   the EP0 callback setting up the next STARTFX3.
+2. **No DMA settle time in STOPFX3** — `CyU3PDmaMultiChannelReset()`
+   followed immediately by `SetXfer()` in the next STARTFX3 (~1ms later)
+   can accumulate DMA controller state corruption over many iterations.
 
 ## Design
 
@@ -71,7 +88,13 @@ The consecutive-recovery counter resets to 0 when:
 - SETARGFX3 switch: add `case WDG_MAX_RECOV:` that writes `wValue`
   to `glWdgMaxRecovery` (clamp wValue to uint8_t range)
 - STARTFX3 handler: reset `glWdgRecoveryCount = 0`
-- STOPFX3 handler: reset `glWdgRecoveryCount = 0`
+- STOPFX3 handler:
+  - Reset `glWdgRecoveryCount = 0`
+  - Add `glDMACount = 0` — prevents watchdog false-positive on stale
+    count from previous session (#77 root cause 1)
+  - Add `CyU3PThreadSleep(1)` after `CyU3PDmaMultiChannelReset()` —
+    lets DMA controller quiesce before the next STARTFX3 re-arms it
+    (#77 root cause 2)
 
 ### 5. `tests/fx3_cmd.c`
 
@@ -82,6 +105,17 @@ The consecutive-recovery counter resets to 0 when:
 ### 6. `tests/README.md`
 
 - Document new `wdg_max` command under fx3_cmd basic commands
+
+## Validation
+
+After applying these changes:
+
+1. **Soak test** — `./fx3_cmd soak 1` should show zero `STARTFX3`
+   failures from the `rapid_start_stop` scenario (previously ~3% fail).
+2. **Abandoned-stream test** — `./fx3_cmd abandoned_stream` should see
+   recovery count plateau at `WDG_MAX_RECOV` instead of climbing
+   indefinitely.
+3. **Normal streaming** — `./fx3_cmd sustained_stream` unaffected.
 
 ## Not Changed
 
