@@ -122,23 +122,30 @@ static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
     return ctrl_write_buf(h, SETARGFX3, arg_val, arg_id, &zero, 1);
 }
 
-/* Retry a command once on timeout.  When a soak scenario starts right
- * after a prior scenario triggered a watchdog recovery, the device may
- * still be mid-recovery and unable to service the first control
- * transfer within CTRL_TIMEOUT_MS.  This helper absorbs that by
- * sleeping 500 ms and retrying once — enough to ride out a tail-end
- * recovery without masking a genuinely wedged device (which will
- * timeout on the retry too).
+/* Retry a command once on a transient USB error.  When a soak scenario
+ * starts right after a prior scenario triggered a watchdog recovery,
+ * the device may still be mid-recovery and unable to service the first
+ * control transfer.  This manifests as either:
+ *
+ *   LIBUSB_ERROR_TIMEOUT  — transfer completed but device didn't ACK
+ *                           within CTRL_TIMEOUT_MS
+ *   LIBUSB_ERROR_IO       — low-level USB I/O failure (broken pipe,
+ *                           NAK flood, etc.) while the FX3 is
+ *                           resetting its DMA/GPIF state
+ *
+ * The helper sleeps 500 ms and retries once — enough to ride out a
+ * tail-end recovery without masking a genuinely wedged device (which
+ * will fail the retry too).
  *
  * Convention: use cmd_u32_retry for the FIRST STARTADC + STARTFX3 in
  * every soak scenario (the "entry point" calls most exposed to
  * inter-scenario timing).  Use plain cmd_u32 for mid-scenario calls
  * (STOP→START transitions, recovery verification, etc.) so genuine
- * firmware timeouts are caught immediately. */
+ * firmware failures are caught immediately. */
 static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
 {
     int r = cmd_u32(h, cmd, val);
-    if (r != LIBUSB_ERROR_TIMEOUT)
+    if (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO)
         return r;
     usleep(500000);
     return cmd_u32(h, cmd, val);
