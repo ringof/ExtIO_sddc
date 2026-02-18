@@ -2048,6 +2048,120 @@ static int do_test_abandoned_stream(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* Watchdog stress — prove unbounded recovery loop kills the device   */
+/* ------------------------------------------------------------------ */
+
+/* Start streaming at 64 MHz, never read bulk data, poll GETSTATS once
+ * per second.  The watchdog fires every ~300ms and unconditionally
+ * restarts GPIF, cycling DMA teardown+rebuild endlessly.  This test
+ * reports how many recovery cycles occur before the device stops
+ * responding to EP0 control transfers (hard lockup).
+ *
+ * Usage:  fx3_cmd watchdog_stress [max_seconds]
+ *   default max_seconds = 120
+ *
+ * Expected result (before fix): device dies after ~30-60 recoveries
+ * Expected result (after fix):  device survives, faults plateau */
+static int do_test_watchdog_stress(libusb_device_handle *h, int max_seconds)
+{
+    int r;
+    struct fx3_stats prev, cur;
+
+    if (max_seconds <= 0) max_seconds = 120;
+
+    /* 1. Configure 64 MHz and start streaming */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL watchdog_stress: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL watchdog_stress: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Baseline after first buffers fill */
+    usleep(500000);
+    r = read_stats(h, &prev);
+    if (r < 0) {
+        printf("FAIL watchdog_stress: baseline GETSTATS: %s\n",
+               libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    printf("#   watchdog_stress: baseline faults=%u gpif=%u\n",
+           prev.streaming_faults, prev.gpif_state);
+
+    /* 3. Poll loop — 1 second intervals, never read EP1 */
+    int died_at = -1;
+    uint32_t last_faults = prev.streaming_faults;
+    int stalled_seconds = 0;  /* consecutive seconds with no fault growth */
+
+    for (int sec = 1; sec <= max_seconds; sec++) {
+        sleep(1);
+
+        r = read_stats(h, &cur);
+        if (r < 0) {
+            died_at = sec;
+            printf("#   watchdog_stress: GETSTATS failed at t=%ds "
+                   "(last faults=%u): %s\n",
+                   sec, last_faults, libusb_strerror(r));
+            break;
+        }
+
+        printf("#   watchdog_stress: t=%3ds  faults=%u (+%u)  "
+               "gpif=%u  pib=%u  dma=%u\n",
+               sec, cur.streaming_faults,
+               cur.streaming_faults - prev.streaming_faults,
+               cur.gpif_state, cur.pib_errors, cur.dma_count);
+
+        if (cur.streaming_faults > last_faults) {
+            stalled_seconds = 0;
+        } else {
+            stalled_seconds++;
+        }
+        last_faults = cur.streaming_faults;
+        prev = cur;
+
+        /* If faults stopped growing for 10s, the cap is working */
+        if (stalled_seconds >= 10) {
+            printf("PASS watchdog_stress: faults plateaued at %u "
+                   "for %ds (cap working)\n",
+                   cur.streaming_faults, stalled_seconds);
+            cmd_u32(h, STOPFX3, 0);
+            return 0;
+        }
+    }
+
+    /* 4. Clean up (best-effort — device may be dead) */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(200000);
+
+    if (died_at > 0) {
+        /* Verify it's really dead */
+        uint8_t info[4] = {0};
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+        if (r < 0) {
+            printf("FAIL watchdog_stress: device hard-locked at t=%ds "
+                   "after %u watchdog recoveries — "
+                   "proves unbounded recovery loop kills the USB block\n",
+                   died_at, last_faults);
+        } else {
+            printf("FAIL watchdog_stress: GETSTATS failed at t=%ds but "
+                   "TESTFX3 still works (transient?)\n", died_at);
+        }
+        return 1;
+    }
+
+    /* Survived the full duration but faults never plateaued */
+    printf("WARN watchdog_stress: survived %ds but faults still growing "
+           "(last=%u) — increase duration or check recovery rate\n",
+           max_seconds, last_faults);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Soak test harness                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -2348,6 +2462,7 @@ static void usage(const char *prog)
         "  i2c_under_load               I2C read while streaming\n"
         "  sustained_stream             30s continuous streaming check\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
+        "  watchdog_stress [secs]       Prove unbounded WDG recovery kills device\n"
         "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
@@ -2504,6 +2619,10 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "abandoned_stream") == 0) {
         rc = do_test_abandoned_stream(h);
+
+    } else if (strcmp(cmd, "watchdog_stress") == 0) {
+        int secs = (argc >= 3) ? (int)parse_num(argv[2]) : 120;
+        rc = do_test_watchdog_stress(h, secs);
 
     } else if (strcmp(cmd, "soak") == 0) {
         rc = soak_main(h, argc - 2, argv + 2);
