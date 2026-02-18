@@ -2048,20 +2048,20 @@ static int do_test_abandoned_stream(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
-/* Watchdog stress — prove unbounded recovery loop kills the device   */
+/* Watchdog stress — observe watchdog recovery self-limiting behavior  */
 /* ------------------------------------------------------------------ */
 
 /* Start streaming at 64 MHz, never read bulk data, poll GETSTATS once
- * per second.  The watchdog fires every ~300ms and unconditionally
- * restarts GPIF, cycling DMA teardown+rebuild endlessly.  This test
- * reports how many recovery cycles occur before the device stops
- * responding to EP0 control transfers (hard lockup).
+ * per second.  The watchdog fires ~300ms after DMA stalls, does
+ * force-disable + DMA reset + restart.  After recovery, glDMACount is
+ * zeroed, which causes the curDMA > 0 guard to suppress further stall
+ * detection — the loop is self-limiting (~2 recoveries then dormant).
  *
  * Usage:  fx3_cmd watchdog_stress [max_seconds]
  *   default max_seconds = 120
  *
- * Expected result (before fix): device dies after ~30-60 recoveries
- * Expected result (after fix):  device survives, faults plateau */
+ * Typical result: faults plateau at baseline+2, GPIF state 255.
+ * A FAIL here means the self-limiting broke or EP0 died. */
 static int do_test_watchdog_stress(libusb_device_handle *h, int max_seconds)
 {
     int r;
@@ -2144,8 +2144,7 @@ static int do_test_watchdog_stress(libusb_device_handle *h, int max_seconds)
         r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
         if (r < 0) {
             printf("FAIL watchdog_stress: device hard-locked at t=%ds "
-                   "after %u watchdog recoveries — "
-                   "proves unbounded recovery loop kills the USB block\n",
+                   "after %u watchdog recoveries\n",
                    died_at, last_faults);
         } else {
             printf("FAIL watchdog_stress: GETSTATS failed at t=%ds but "
@@ -2158,6 +2157,136 @@ static int do_test_watchdog_stress(libusb_device_handle *h, int max_seconds)
     printf("WARN watchdog_stress: survived %ds but faults still growing "
            "(last=%u) — increase duration or check recovery rate\n",
            max_seconds, last_faults);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Watchdog race — provoke EP0-vs-watchdog thread collision           */
+/* ------------------------------------------------------------------ */
+
+/* The soak failure at chunk 80 showed a hard USB lockup during an
+ * abandoned_stream scenario.  The watchdog_stress test proved the
+ * recovery loop is self-limiting (~2 cycles), so the crash is not
+ * from unbounded cycling.  Hypothesis: a race between the watchdog
+ * recovery (application thread: GpifDisable + DmaReset + FlushEp +
+ * SetXfer + SMStart) and an EP0 control transfer (USB callback thread:
+ * SendEP0Data for GETSTATS/TESTFX3).
+ *
+ * This test maximises the collision window by:
+ *   - Starting streaming at 64 MHz with no host bulk reads
+ *   - Hammering EP0 with alternating GETSTATS + TESTFX3 every 50ms
+ *   - Cycling STOP/START every 5s to re-arm the watchdog
+ *     (since it self-limits after ~2 recoveries per START)
+ *
+ * Each 5s window: ~100 EP0 transfers overlapping ~2 watchdog recoveries.
+ * Over N rounds that's N*100 chances to hit the race.
+ *
+ * Usage:  fx3_cmd watchdog_race [rounds]
+ *   default rounds = 50  (~250s total)
+ *
+ * PASS: device survives all rounds
+ * FAIL: EP0 timeout or device disappears */
+static int do_test_watchdog_race(libusb_device_handle *h, int rounds)
+{
+    int r;
+
+    if (rounds <= 0) rounds = 50;
+
+    /* Configure 64 MHz clock once */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL watchdog_race: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int total_ep0 = 0;
+    int total_faults = 0;
+
+    for (int round = 1; round <= rounds; round++) {
+        /* Start streaming — watchdog will fire after ~300ms of no reads */
+        r = cmd_u32_retry(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL watchdog_race: STARTFX3 round %d: %s\n",
+                   round, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Hammer EP0 for 5 seconds at 50ms intervals.
+         * Alternate GETSTATS (20-byte IN) and TESTFX3 (4-byte IN)
+         * to exercise different response sizes during the race window. */
+        int ep0_ok = 0, ep0_fail = 0;
+        struct fx3_stats s;
+
+        for (int i = 0; i < 100; i++) {  /* 100 × 50ms = 5s */
+            usleep(50000);
+
+            if (i & 1) {
+                /* GETSTATS */
+                r = read_stats(h, &s);
+            } else {
+                /* TESTFX3 */
+                uint8_t info[4] = {0};
+                r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+            }
+
+            if (r < 0) {
+                ep0_fail++;
+                /* One failure might be transient — try one more before
+                 * declaring the device dead */
+                usleep(100000);
+                uint8_t probe[4] = {0};
+                r = ctrl_read(h, TESTFX3, 0, 0, probe, 4);
+                if (r < 0) {
+                    printf("FAIL watchdog_race: device dead at round %d, "
+                           "poll %d (%d EP0 ok, %d fail so far): %s\n",
+                           round, i, total_ep0 + ep0_ok,
+                           ep0_fail, libusb_strerror(r));
+                    /* Try to read final stats for diagnostics */
+                    cmd_u32(h, STOPFX3, 0);
+                    return 1;
+                }
+                /* Recovered from transient — continue */
+            } else {
+                ep0_ok++;
+            }
+        }
+
+        total_ep0 += ep0_ok;
+
+        /* Read faults before stopping */
+        r = read_stats(h, &s);
+        if (r < 0) {
+            printf("FAIL watchdog_race: GETSTATS before STOP round %d: %s\n",
+                   round, libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        total_faults = (int)s.streaming_faults;
+
+        /* Stop and let quiesce before next round */
+        cmd_u32(h, STOPFX3, 0);
+        usleep(200000);
+
+        /* Health check */
+        uint8_t info[4] = {0};
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+        if (r < 0) {
+            printf("FAIL watchdog_race: health check after round %d: %s\n",
+                   round, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Progress every 10 rounds */
+        if (round % 10 == 0 || round == 1) {
+            printf("#   watchdog_race: round %d/%d  ep0_ok=%d  "
+                   "ep0_fail=%d  faults=%d\n",
+                   round, rounds, total_ep0, ep0_fail, total_faults);
+        }
+    }
+
+    printf("PASS watchdog_race: %d rounds, %d EP0 transfers, "
+           "%d watchdog recoveries — no hard lockup\n",
+           rounds, total_ep0, total_faults);
     return 0;
 }
 
@@ -2462,7 +2591,8 @@ static void usage(const char *prog)
         "  i2c_under_load               I2C read while streaming\n"
         "  sustained_stream             30s continuous streaming check\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
-        "  watchdog_stress [secs]       Prove unbounded WDG recovery kills device\n"
+        "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
+        "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
         "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
@@ -2623,6 +2753,10 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "watchdog_stress") == 0) {
         int secs = (argc >= 3) ? (int)parse_num(argv[2]) : 120;
         rc = do_test_watchdog_stress(h, secs);
+
+    } else if (strcmp(cmd, "watchdog_race") == 0) {
+        int rnds = (argc >= 3) ? (int)parse_num(argv[2]) : 50;
+        rc = do_test_watchdog_race(h, rnds);
 
     } else if (strcmp(cmd, "soak") == 0) {
         rc = soak_main(h, argc - 2, argv + 2);
