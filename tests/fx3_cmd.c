@@ -58,6 +58,7 @@
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
 #define AD8370_VGA    11
+#define WDG_MAX_RECOV 14
 
 /* Timeouts */
 #define CTRL_TIMEOUT_MS  1000
@@ -270,6 +271,17 @@ static int do_vga(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
+static int do_wdg_max(libusb_device_handle *h, uint16_t val)
+{
+    int r = set_arg(h, WDG_MAX_RECOV, val);
+    if (r < 0) {
+        printf("FAIL wdg_max %u: %s\n", val, libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS wdg_max %u\n", val);
+    return 0;
+}
+
 static int do_start(libusb_device_handle *h)
 {
     int r = cmd_u32(h, STARTFX3, 0);
@@ -429,6 +441,7 @@ static void print_local_help(void)
            "  adc <freq>                    Set ADC clock frequency\n"
            "  att <0-63>                    Set DAT-31 attenuator\n"
            "  vga <0-255>                   Set AD8370 VGA gain\n"
+           "  wdg_max <0-255>              Set watchdog max recovery count (0=unlimited)\n"
            "  gpio <bits>                   Set GPIO word\n"
            "  stats                         Read GETSTATS counters\n"
            "  stats_i2c / stats_pib / stats_pll   Counter tests\n"
@@ -500,6 +513,10 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     if (strcmp(cmd, "vga") == 0) {
         if (!args) { printf("usage: vga <0-255>\n"); return 1; }
         return do_vga(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "wdg_max") == 0) {
+        if (!args) { printf("usage: wdg_max <0-255>\n"); return 1; }
+        return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }
@@ -3095,6 +3112,7 @@ static void usage(const char *prog)
         "  adc <freq_hz>               Set ADC clock frequency (STARTADC)\n"
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
+        "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
@@ -3199,6 +3217,10 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "vga") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_vga(h, (uint16_t)parse_num(argv[2]));
+
+    } else if (strcmp(cmd, "wdg_max") == 0) {
+        if (argc < 3) { usage(argv[0]); goto out; }
+        rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);

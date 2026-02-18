@@ -37,6 +37,8 @@ extern uint8_t glBufDebug[MAXLEN_D_USB];
 extern uint32_t glCounter[20];
 extern uint16_t glLastPibArg;
 extern uint32_t glDMACount;
+extern uint8_t glWdgMaxRecovery;
+extern uint8_t glWdgRecoveryCount;
 
 
 
@@ -298,6 +300,11 @@ CyFxSlFifoApplnUSBSetupCB (
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
+						case WDG_MAX_RECOV:
+							glWdgMaxRecovery = (uint8_t)(wValue & 0xFF);
+							glVendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
 						default:
 							/* Data phase already ACKed; stall status to
 							   signal the unrecognized wIndex to the host. */
@@ -328,6 +335,7 @@ CyFxSlFifoApplnUSBSetupCB (
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
+				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
 				if (apiRetStatus == CY_U3P_SUCCESS) {
 					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
@@ -355,7 +363,10 @@ CyFxSlFifoApplnUSBSetupCB (
 					 * block, causing the SM to auto-advance.  STARTFX3 will reload
 					 * the waveform via StartGPIF() when streaming resumes. */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
+					CyU3PThreadSleep(1);  /* let DMA controller quiesce before next STARTFX3 */
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
+					glWdgRecoveryCount = 0;  /* reset recovery cap */
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;

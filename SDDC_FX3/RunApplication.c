@@ -39,6 +39,9 @@ uint32_t glQevent __attribute__ ((aligned (32)));
 CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Threads
 void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
+uint8_t glWdgMaxRecovery = WDG_MAX_RECOVERY_DEFAULT;
+uint8_t glWdgRecoveryCount = 0;
+
 uint8_t glHWconfig = NORADIO;       // Hardware config type BBRF103
 uint16_t glFWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
 
@@ -228,38 +231,50 @@ void ApplicationThread ( uint32_t input)
 								stallCount, gpifState, curDMA);
 							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
 							{
-								CyU3PReturnStatus_t rc;
-								CyBool_t hw_ok;
-
-								DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u",
-									gpifState, curDMA);
-								CyU3PGpifControlSWInput(CyFalse);
-
-								/* Force-stop (CyTrue): soft-stop requires clock
-								 * edges from the ADC, which may not be present
-								 * during a watchdog recovery (e.g. Si5351 disabled
-								 * or PLL unlocked).  Force-stop is unconditional. */
-								CyU3PGpifDisable(CyTrue);
-
-								rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
-								rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
-
-								hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
-								if (hw_ok)
+								/* Check recovery cap before attempting */
+								if (glWdgMaxRecovery > 0 &&
+								    glWdgRecoveryCount >= glWdgMaxRecovery)
 								{
-									rc = CyU3PDmaMultiChannelSetXfer(
-										&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
-									rc = CyU3PGpifSMStart(0, 0);
-									CyU3PGpifControlSWInput(CyTrue);
+									DebugPrint(4, "\r\nWDG: recovery limit (%d), waiting for STARTFX3",
+										glWdgMaxRecovery);
+									stallCount = 0;
 								}
-								glCounter[2]++;  /* streaming fault counter —
-								                  * GETSTATS [15..18]; also incremented
-								                  * by EP_UNDERRUN in USBHandler.c */
-								DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
-									hw_ok ? "DONE" : "WAIT", rc);
-								stallCount = 0;
-								prevDMACount = 0;
-								glDMACount = 0;
+								else
+								{
+									CyU3PReturnStatus_t rc;
+									CyBool_t hw_ok;
+
+									glWdgRecoveryCount++;
+									DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u recov=%d/%d",
+										gpifState, curDMA, glWdgRecoveryCount, glWdgMaxRecovery);
+									CyU3PGpifControlSWInput(CyFalse);
+
+									/* Force-stop (CyTrue): soft-stop requires clock
+									 * edges from the ADC, which may not be present
+									 * during a watchdog recovery (e.g. Si5351 disabled
+									 * or PLL unlocked).  Force-stop is unconditional. */
+									CyU3PGpifDisable(CyTrue);
+
+									rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+									rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+
+									hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
+									if (hw_ok)
+									{
+										rc = CyU3PDmaMultiChannelSetXfer(
+											&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+										rc = CyU3PGpifSMStart(0, 0);
+										CyU3PGpifControlSWInput(CyTrue);
+									}
+									glCounter[2]++;  /* streaming fault counter —
+									                  * GETSTATS [15..18]; also incremented
+									                  * by EP_UNDERRUN in USBHandler.c */
+									DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
+										hw_ok ? "DONE" : "WAIT", rc);
+									stallCount = 0;
+									prevDMACount = 0;
+									glDMACount = 0;
+								}
 							}
 						}
 						else
@@ -276,6 +291,7 @@ void ApplicationThread ( uint32_t input)
 							DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
 								prevDMACount, curDMA);
 						stallCount = 0;
+						glWdgRecoveryCount = 0;
 						prevDMACount = curDMA;
 					}
 				}

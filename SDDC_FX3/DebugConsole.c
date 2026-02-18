@@ -70,7 +70,7 @@ const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 // ExtIO host DLL; not implemented in this firmware.
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
-"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR"
+"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR","WDG_MAX_RECOV"
 };
 #endif
 

@@ -32,6 +32,7 @@ PASS/FAIL.  The device must already have firmware loaded (PID 0x00F1).
 ./fx3_cmd adc 64000000                  # set ADC clock to 64 MHz
 ./fx3_cmd att 15                        # set attenuator (0-63)
 ./fx3_cmd vga 128                       # set VGA gain (0-255)
+./fx3_cmd wdg_max 5                     # set watchdog max recovery count (0=unlimited)
 ./fx3_cmd start                         # start GPIF streaming
 ./fx3_cmd stop                          # stop GPIF streaming
 ./fx3_cmd i2cr 0xC0 0 1                 # I2C read (Si5351 status)
