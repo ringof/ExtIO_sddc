@@ -338,13 +338,11 @@ CyFxSlFifoApplnUSBSetupCB (
 				    * left by the previous session; without this, zombie descriptors
 				    * accumulate across rapid stop/start cycles until the USB controller's
 				    * descriptor pool is exhausted and EP0 locks up. */
-				CyU3PUsbResetEp(CY_FX_EP_CONSUMER);  /* reset EP1 data toggle + sequence
-				    * number so the device and host agree on DATA0/DATA1 phase.
-				    * When the host closes and reopens the USB handle between streaming
-				    * sessions, libusb_release_interface resets the host-side toggle
-				    * to 0 via usb_hcd_reset_endpoint.  Without this matching device-side
-				    * reset, the device sends DATA1 while the host expects DATA0 —
-				    * silent discard, infinite retry, 0 bytes.  Issue #78. */
+				/* CyU3PUsbResetEp — DISABLED pending investigation (issue #78).
+				 * This call fixed toggle desync (tests 36-38) but broke the
+				 * GPIF→DMA data path (tests 31/33: DMA_count=0, PIB overflow).
+				 * Hypothesis: ResetEp disrupts the USB consumer socket that
+				 * the DMA channel depends on.  Reverting to isolate. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
 				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
