@@ -1361,17 +1361,6 @@ static int do_test_stats_pll(libusb_device_handle *h)
  * data within timeout_ms) returns 0. */
 static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
 {
-    /* One-shot: reset host-side EP1 data toggle on the first bulk read.
-     * libusb_release_interface may not reset the host toggle (HCD-dependent;
-     * XHCI does, EHCI often doesn't).  The firmware resets the device side
-     * via CyU3PUsbResetEp in STARTFX3, but only CLEAR_FEATURE(ENDPOINT_HALT)
-     * can reset the host side.  Issue #78. */
-    static int ep1_toggle_reset;
-    if (!ep1_toggle_reset) {
-        libusb_clear_halt(h, EP1_IN);
-        ep1_toggle_reset = 1;
-    }
-
     uint8_t *buf = malloc(len);
     if (!buf) return LIBUSB_ERROR_NO_MEM;
     int transferred = 0;
@@ -1478,9 +1467,18 @@ static int do_test_stop_start_cycle(libusb_device_handle *h)
         /* Read bulk data — should get at least 1 KB within 2 seconds */
         int got = bulk_read_some(h, 16384, 2000);
         if (got < 1024) {
+            /* Diagnostic: read GETSTATS before cleanup to see GPIF/DMA state */
+            struct fx3_stats s = {0};
+            read_stats(h, &s);
             printf("FAIL stop_start_cycle: cycle %d/%d: only %d bytes "
                    "(expected >= 1024, stream not flowing)\n",
                    i + 1, cycles, got < 0 ? 0 : got);
+            printf("#   libusb_rc=%d (%s), GPIF_state=%u, DMA_count=%u, "
+                   "PIB_err=%u, faults=%u\n",
+                   got < 0 ? got : 0,
+                   got < 0 ? libusb_strerror(got) : "TIMEOUT",
+                   s.gpif_state, s.dma_count,
+                   s.pib_errors, s.streaming_faults);
             /* Try to clean up */
             cmd_u32(h, STOPFX3, 0);
             return 1;
@@ -1616,6 +1614,10 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
     /* 6. Read bulk data — should flow if recovery worked */
     int got = bulk_read_some(h, 16384, 2000);
 
+    /* 6a. Diagnostic: snapshot GETSTATS while GPIF is still running */
+    struct fx3_stats s_live = {0};
+    read_stats(h, &s_live);
+
     /* 7. Clean up */
     cmd_u32(h, STOPFX3, 0);
     usleep(100000);
@@ -1628,7 +1630,12 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
         printf("FAIL wedge_recovery: only %d bytes after recovery "
                "(expected >= 1024, device still wedged)\n",
                got < 0 ? 0 : got);
-        printf("#   GPIF state=%u, streaming_faults=%u\n",
+        printf("#   libusb_rc=%d (%s), live: GPIF=%u DMA=%u PIB=%u faults=%u; "
+               "post-stop: GPIF=%u faults=%u\n",
+               got < 0 ? got : 0,
+               got < 0 ? libusb_strerror(got) : "TIMEOUT",
+               s_live.gpif_state, s_live.dma_count,
+               s_live.pib_errors, s_live.streaming_faults,
                s.gpif_state, s.streaming_faults);
         return 1;
     }
