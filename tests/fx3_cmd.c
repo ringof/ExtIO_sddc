@@ -191,6 +191,19 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
         return NULL;
     }
 
+    /* Restart the XHCI endpoint ring for EP1-IN.
+     *
+     * When the previous process closed its USB fd, the kernel killed
+     * pending URBs via xhci_urb_dequeue → Set TR Dequeue Pointer,
+     * which leaves the XHCI endpoint in the "stopped" state.  New TDs
+     * submitted by this process won't be processed until the endpoint
+     * is restarted.  libusb_clear_halt sends CLEAR_FEATURE(ENDPOINT_HALT)
+     * to the device (harmless: the device CLEAR_FEATURE handler resets
+     * and re-arms the DMA channel) AND calls usb_hcd_reset_endpoint
+     * which issues a Reset Endpoint command to the XHCI — clearing
+     * the stopped state.  Issue #78. */
+    libusb_clear_halt(h, 0x81);  /* EP1-IN */
+
     return h;
 }
 
