@@ -338,6 +338,10 @@ CyFxSlFifoApplnUSBSetupCB (
 				    * left by the previous session; without this, zombie descriptors
 				    * accumulate across rapid stop/start cycles until the USB controller's
 				    * descriptor pool is exhausted and EP0 locks up. */
+				CyU3PUsbResetEp(CY_FX_EP_CONSUMER);  /* clear data toggle and any
+				    * stale halt/error on the endpoint — matches CLEAR_FEATURE path;
+				    * without this, stop/start cycling fails with LIBUSB_ERROR_IO
+				    * even though FX3-side DMA is flowing. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
 				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);

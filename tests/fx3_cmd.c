@@ -2810,6 +2810,7 @@ static int do_test_hw_smoke(libusb_device_handle *h)
 
     /* Ensure GPIO is in known-good state */
     cmd_u32(h, GPIOFX3, 0x0800);  /* LED_BLUE */
+    usleep(200000);  /* let ADC wake from SHDWN after gpio_extremes */
 
     r = cmd_u32_retry(h, STARTADC, 32000000);
     if (r < 0) {
