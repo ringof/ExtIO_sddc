@@ -338,22 +338,14 @@ CyFxSlFifoApplnUSBSetupCB (
 				    * left by the previous session; without this, zombie descriptors
 				    * accumulate across rapid stop/start cycles until the USB controller's
 				    * descriptor pool is exhausted and EP0 locks up. */
-				CyU3PUsbResetEp(CY_FX_EP_CONSUMER);  /* reset EP1 data toggle so
-				    * device and host agree on DATA0/DATA1 phase.  Issue #78. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
 				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
-
-				/* Order matters: GpifLoad (inside StartGPIF) reinitializes the
-				 * GPIF/PIB block and its socket descriptors.  SetXfer must run
-				 * AFTER GpifLoad so the DMA channel connects to the freshly-
-				 * configured PIB producer sockets.  The SM starts in state 0
-				 * (idle) — no data flows until FW_TRG is asserted below. */
-				apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
+				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
 				if (apiRetStatus == CY_U3P_SUCCESS) {
-					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
-				}
-				if (apiRetStatus == CY_U3P_SUCCESS) {
-					CyU3PGpifControlSWInput(CyTrue);
+					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
+					if (apiRetStatus == CY_U3P_SUCCESS) {
+						CyU3PGpifControlSWInput(CyTrue);
+					}
 				}
 				if (apiRetStatus != CY_U3P_SUCCESS) {
 					/* DMA or GPIF setup failed — report to host and
