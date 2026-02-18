@@ -191,6 +191,16 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
         return NULL;
     }
 
+    /* Reset EP1 IN (0x81) host-side data toggle so it matches the device.
+     * When the previous process closed its handle, libusb_release_interface
+     * may or may not have reset the host-side toggle (depends on the HCD
+     * driver — XHCI does, EHCI often doesn't).  The firmware's STARTFX3
+     * handler resets the device-side toggle via CyU3PUsbResetEp, but only
+     * CLEAR_FEATURE(ENDPOINT_HALT) can reset the host side.  Without this,
+     * bulk reads return 0 bytes due to silent DATA0/DATA1 mismatch.
+     * Issue #78. */
+    libusb_clear_halt(h, 0x81);
+
     return h;
 }
 
