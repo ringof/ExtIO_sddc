@@ -334,6 +334,10 @@ CyFxSlFifoApplnUSBSetupCB (
 				}
 				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
+				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
+				    * left by the previous session; without this, zombie descriptors
+				    * accumulate across rapid stop/start cycles until the USB controller's
+				    * descriptor pool is exhausted and EP0 locks up. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
 				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
