@@ -18,6 +18,10 @@
 #   --seed S               PRNG seed for reproducibility (default: time-based)
 #   --rx888-stream PATH    Path to rx888_stream binary (default: search PATH)
 #   --no-reset             Skip USB reset on exit (leave device as-is)
+#   --reload-interval N    Every N scenarios, reset device to DFU, re-upload
+#                          firmware, and resume the soak.  Default: 0 (disabled).
+#                          Tests whether a freshly loaded firmware image handles
+#                          stress correctly, not just an already-warm instance.
 #
 
 set -euo pipefail
@@ -27,6 +31,7 @@ HOURS="1"
 SEED=""
 RX888_STREAM=""
 USB_RESET=1
+RELOAD_INTERVAL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FX3_CMD="$SCRIPT_DIR/fx3_cmd"
 
@@ -42,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --seed)            SEED="$2"; shift 2 ;;
         --rx888-stream)    RX888_STREAM="$2"; shift 2 ;;
         --no-reset)        USB_RESET=0; shift ;;
+        --reload-interval) RELOAD_INTERVAL="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^$/s/^# \?//p' "$0"
             exit 0
@@ -158,11 +164,126 @@ echo "# Hours: $HOURS  Seed: ${SEED:-auto}"
 if [[ $USB_RESET -eq 1 ]]; then
     echo "# USB reset on exit: enabled (--no-reset to disable)"
 fi
+if [[ $RELOAD_INTERVAL -gt 0 ]]; then
+    echo "# Reload interval: every $RELOAD_INTERVAL scenarios"
+fi
 
-# ---- Run soak ----
+# ---- Resolve seed ----
+# If no seed was given, pick one now so all chunks are deterministic.
 
+if [[ -z "$SEED" ]]; then
+    SEED=$(date +%s)
+    echo "# Auto-seed: $SEED"
+fi
+
+# ---- Upload firmware helper (reused for reload cycles) ----
+
+upload_firmware() {
+    timeout 15 "$RX888_STREAM" -f "$FIRMWARE" -s 32000000 \
+        > /dev/null 2>/dev/null &
+    local pid=$!
+    sleep 4
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    sleep 2
+    if ! lsusb -d "$APP_VID_PID" &>/dev/null; then
+        echo "# Error: device not at app PID ($APP_VID_PID) after firmware upload" >&2
+        return 1
+    fi
+    return 0
+}
+
+# ---- Run soak (with optional reload-interval chunking) ----
+
+START_EPOCH=$(date +%s)
+TOTAL_SEC=$(awk "BEGIN{printf \"%d\", $HOURS * 3600}")
+CHUNK=0
+CHUNK_FAILS=0
 SOAK_RC=0
-"$FX3_CMD" soak "$HOURS" ${SEED:+"$SEED"} || SOAK_RC=$?
+
+while true; do
+    # Calculate remaining time
+    NOW_EPOCH=$(date +%s)
+    ELAPSED=$(( NOW_EPOCH - START_EPOCH ))
+    REMAINING_SEC=$(( TOTAL_SEC - ELAPSED ))
+    if (( REMAINING_SEC <= 0 )); then break; fi
+    REMAINING_HOURS=$(awk "BEGIN{printf \"%.4f\", $REMAINING_SEC / 3600}")
+
+    CHUNK_SEED=$(( SEED + CHUNK ))
+
+    # Build fx3_cmd soak args: hours seed [max_scenarios]
+    SOAK_ARGS="$REMAINING_HOURS $CHUNK_SEED"
+    if (( RELOAD_INTERVAL > 0 )); then
+        SOAK_ARGS="$SOAK_ARGS $RELOAD_INTERVAL"
+    fi
+
+    if (( CHUNK > 0 )); then
+        echo ""
+        echo "# ---- Chunk $((CHUNK + 1)): seed=$CHUNK_SEED remaining=${REMAINING_HOURS}h ----"
+    fi
+
+    CHUNK_RC=0
+    "$FX3_CMD" soak $SOAK_ARGS || CHUNK_RC=$?
+
+    if [[ $CHUNK_RC -ne 0 ]]; then
+        CHUNK_FAILS=$((CHUNK_FAILS + 1))
+        SOAK_RC=1
+    fi
+    CHUNK=$((CHUNK + 1))
+
+    # If reload disabled, single run — we're done
+    if (( RELOAD_INTERVAL == 0 )); then break; fi
+
+    # Check if time expired
+    NOW_EPOCH=$(date +%s)
+    ELAPSED=$(( NOW_EPOCH - START_EPOCH ))
+    if (( ELAPSED >= TOTAL_SEC )); then break; fi
+
+    # ---- Reload cycle: usbreset → bootloader → re-upload firmware ----
+    echo ""
+    echo "# ---- Reload cycle $CHUNK: reset → DFU → firmware upload ----"
+
+    if ! command -v usbreset &>/dev/null; then
+        echo "# Error: usbreset not found — cannot perform reload" >&2
+        echo "#   Install with: sudo apt install usbutils" >&2
+        break
+    fi
+
+    usbreset "$APP_VID_PID" &>/dev/null || true
+    sleep 2
+
+    # Wait for bootloader PID (up to 5s)
+    BOOT_OK=0
+    for i in 1 2 3 4 5; do
+        if lsusb -d "$BOOT_VID_PID" &>/dev/null; then
+            BOOT_OK=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ $BOOT_OK -eq 0 ]]; then
+        echo "# Error: device not in bootloader ($BOOT_VID_PID) after reset — aborting" >&2
+        SOAK_RC=1
+        break
+    fi
+
+    echo "# Device in bootloader — uploading firmware..."
+    if ! upload_firmware; then
+        echo "# Error: firmware reload failed — aborting" >&2
+        SOAK_RC=1
+        break
+    fi
+    echo "# Reload $CHUNK complete — resuming soak"
+done
+
+# ---- Summary for multi-chunk runs ----
+
+if (( RELOAD_INTERVAL > 0 && CHUNK > 1 )); then
+    echo ""
+    echo "# ---- Reload summary ----"
+    echo "# Chunks: $CHUNK  Reloads: $((CHUNK - 1))  Failed chunks: $CHUNK_FAILS"
+fi
 
 # ---- Cleanup: reset device to bootloader state ----
 

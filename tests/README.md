@@ -200,6 +200,11 @@ Handles firmware upload and device probe before invoking `fx3_cmd soak`.
 --hours N              Soak duration in hours (default: 1, fractional OK)
 --seed S               PRNG seed for reproducibility (default: time-based)
 --rx888-stream PATH    Path to rx888_stream binary
+--no-reset             Skip USB reset on exit (leave device as-is)
+--reload-interval N    Every N scenarios, reset device to DFU, re-upload
+                       firmware, and resume.  Default: 0 (disabled).
+                       Each reload adds ~10s.  Tests whether a freshly
+                       loaded firmware handles stress correctly.
 ```
 
 ## fw_test.sh -- Automated TAP Test Suite

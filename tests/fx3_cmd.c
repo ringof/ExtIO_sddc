@@ -2118,9 +2118,11 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
 {
     double hours = 1.0;
     unsigned int seed = (unsigned int)time(NULL);
+    int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
 
     if (argc >= 1) hours = atof(argv[0]);
     if (argc >= 2) seed = (unsigned int)strtoul(argv[1], NULL, 0);
+    if (argc >= 3) max_scenarios = atoi(argv[2]);
     if (hours <= 0) hours = 1.0;
 
     struct soak_scenario scenarios[] = {
@@ -2163,8 +2165,11 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
     clock_gettime(CLOCK_MONOTONIC, &start_ts);
 
     printf("=== SOAK TEST START ===\n");
-    printf("Duration: %.3f hours  Seed: %u  Scenarios: %d\n",
+    printf("Duration: %.3f hours  Seed: %u  Scenarios: %d",
            hours, seed, nscenarios);
+    if (max_scenarios > 0)
+        printf("  MaxCycles: %d", max_scenarios);
+    printf("\n");
     printf("Press Ctrl-C for early stop with summary\n\n");
 
     /* Initial health check */
@@ -2185,6 +2190,9 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         double elapsed = (now.tv_sec - start_ts.tv_sec)
                        + (now.tv_nsec - start_ts.tv_nsec) / 1e9;
         if (elapsed >= duration_sec) break;
+
+        /* Check scenario count limit (for chunked reload runs) */
+        if (max_scenarios > 0 && total_cycles >= max_scenarios) break;
 
         /* Weighted random pick */
         int pick = rand() % total_weight;
@@ -2340,7 +2348,7 @@ static void usage(const char *prog)
         "  i2c_under_load               I2C read while streaming\n"
         "  sustained_stream             30s continuous streaming check\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
-        "  soak [hours] [seed]          Multi-hour randomized stress test\n"
+        "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
