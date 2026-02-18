@@ -191,16 +191,6 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
         return NULL;
     }
 
-    /* Reset EP1 IN (0x81) host-side data toggle so it matches the device.
-     * When the previous process closed its handle, libusb_release_interface
-     * may or may not have reset the host-side toggle (depends on the HCD
-     * driver — XHCI does, EHCI often doesn't).  The firmware's STARTFX3
-     * handler resets the device-side toggle via CyU3PUsbResetEp, but only
-     * CLEAR_FEATURE(ENDPOINT_HALT) can reset the host side.  Without this,
-     * bulk reads return 0 bytes due to silent DATA0/DATA1 mismatch.
-     * Issue #78. */
-    libusb_clear_halt(h, 0x81);
-
     return h;
 }
 
@@ -1371,6 +1361,17 @@ static int do_test_stats_pll(libusb_device_handle *h)
  * data within timeout_ms) returns 0. */
 static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
 {
+    /* One-shot: reset host-side EP1 data toggle on the first bulk read.
+     * libusb_release_interface may not reset the host toggle (HCD-dependent;
+     * XHCI does, EHCI often doesn't).  The firmware resets the device side
+     * via CyU3PUsbResetEp in STARTFX3, but only CLEAR_FEATURE(ENDPOINT_HALT)
+     * can reset the host side.  Issue #78. */
+    static int ep1_toggle_reset;
+    if (!ep1_toggle_reset) {
+        libusb_clear_halt(h, EP1_IN);
+        ep1_toggle_reset = 1;
+    }
+
     uint8_t *buf = malloc(len);
     if (!buf) return LIBUSB_ERROR_NO_MEM;
     int transferred = 0;
