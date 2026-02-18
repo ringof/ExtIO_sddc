@@ -130,6 +130,26 @@ run_cmd() {
     [[ "$output" == PASS* ]]
 }
 
+# Ensure device is in a known-clean state before streaming tests.
+# Mirrors the soak runner's inter-scenario cleanup (soak_main lines 3794-3820):
+#   1. Unconditional STOPFX3 (may already be stopped — that's fine)
+#   2. 100 ms quiesce for GPIF/DMA to settle
+#   3. Health check via TESTFX3; retry once after 2 s on failure
+device_quiesce() {
+    "$FX3_CMD" stop >/dev/null 2>&1 || true
+    sleep 0.1
+    if "$FX3_CMD" test >/dev/null 2>&1; then
+        return 0
+    fi
+    # Device unhealthy — give watchdog time to finish, retry once
+    sleep 2
+    if "$FX3_CMD" test >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "# WARNING: device_quiesce: health check failed after retry"
+    return 1
+}
+
 # ---- Preflight checks ----
 
 if [[ ! -x "$FX3_CMD" ]]; then
@@ -523,6 +543,8 @@ output=$(run_cmd i2c_write_bad_addr) && {
 # After STOPFX3, verify the GPIF SM is actually stopped (state 0 or 1).
 # Before the fix: SM stays running or stuck in BUSY/WAIT.
 
+device_quiesce
+
 output=$(run_cmd stop_gpif_state) && {
     tap_ok "stop_gpif_state: GPIF SM properly stopped after STOPFX3"
 } || {
@@ -535,6 +557,8 @@ output=$(run_cmd stop_gpif_state) && {
 # Cycle STOP+START 5 times, verifying data flows each cycle.
 # Before the fix: wedges on 2nd or 3rd cycle.
 
+device_quiesce
+
 output=$(run_cmd stop_start_cycle) && {
     tap_ok "stop_start_cycle: 5 stop/start cycles completed"
 } || {
@@ -546,6 +570,8 @@ output=$(run_cmd stop_start_cycle) && {
 # ==================================================================
 # Verify STARTFX3 is rejected when ADC clock is off.
 # Before the fix: START succeeds and GPIF reads garbage.
+
+device_quiesce
 
 output=$(run_cmd pll_preflight) && {
     tap_ok "pll_preflight: STARTFX3 rejected without ADC clock"
@@ -560,6 +586,8 @@ output=$(run_cmd pll_preflight) && {
 # then STOP+START and verify recovery.
 # Before the fix: device is wedged, no recovery.
 
+device_quiesce
+
 output=$(run_cmd wedge_recovery) && {
     tap_ok "wedge_recovery: recovered from DMA backpressure wedge"
 } || {
@@ -573,6 +601,8 @@ output=$(run_cmd wedge_recovery) && {
 # Verify the debug console reports "PIB error".
 # NOTE: This test wedges the DMA/GPIF path.  All tests that need
 # clean device state must run BEFORE this point.
+
+device_quiesce
 
 output=$(run_cmd pib_overflow) && {
     tap_ok "pib_overflow: PIB error detected in debug output (issue #10)"
