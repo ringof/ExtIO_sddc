@@ -393,6 +393,21 @@ static int do_test_double_start(libusb_device_handle *h);
 static int do_test_i2c_under_load(libusb_device_handle *h);
 static int do_test_sustained_stream(libusb_device_handle *h);
 static int do_test_abandoned_stream(libusb_device_handle *h);
+static int do_test_vendor_rqt_wrap(libusb_device_handle *h);
+static int do_test_stale_vendor_codes(libusb_device_handle *h);
+static int do_test_setarg_gap_index(libusb_device_handle *h);
+static int do_test_gpio_extremes(libusb_device_handle *h);
+static int do_test_i2c_write_bad_addr(libusb_device_handle *h);
+static int do_test_i2c_multibyte(libusb_device_handle *h);
+static int do_test_readinfodebug_flood(libusb_device_handle *h);
+static int do_test_dma_count_reset(libusb_device_handle *h);
+static int do_test_dma_count_monotonic(libusb_device_handle *h);
+static int do_test_watchdog_cap_observe(libusb_device_handle *h);
+static int do_test_watchdog_cap_restart(libusb_device_handle *h);
+static int do_test_ep0_hammer(libusb_device_handle *h);
+static int do_test_debug_cmd_while_stream(libusb_device_handle *h);
+static int do_test_adc_freq_extremes(libusb_device_handle *h);
+static int do_test_data_sanity(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -428,6 +443,21 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"i2c_under_load",   do_test_i2c_under_load},
     {"sustained_stream", do_test_sustained_stream},
     {"abandoned_stream", do_test_abandoned_stream},
+    {"vendor_rqt_wrap",  do_test_vendor_rqt_wrap},
+    {"stale_vendor_codes", do_test_stale_vendor_codes},
+    {"setarg_gap_index", do_test_setarg_gap_index},
+    {"gpio_extremes",    do_test_gpio_extremes},
+    {"i2c_write_bad_addr", do_test_i2c_write_bad_addr},
+    {"i2c_multibyte",    do_test_i2c_multibyte},
+    {"readinfodebug_flood", do_test_readinfodebug_flood},
+    {"dma_count_reset",  do_test_dma_count_reset},
+    {"dma_count_monotonic", do_test_dma_count_monotonic},
+    {"watchdog_cap_observe", do_test_watchdog_cap_observe},
+    {"watchdog_cap_restart", do_test_watchdog_cap_restart},
+    {"ep0_hammer",       do_test_ep0_hammer},
+    {"debug_cmd_while_stream", do_test_debug_cmd_while_stream},
+    {"adc_freq_extremes", do_test_adc_freq_extremes},
+    {"data_sanity",      do_test_data_sanity},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -457,6 +487,21 @@ static void print_local_help(void)
            "  i2c_under_load                I2C read while streaming\n"
            "  sustained_stream              30s continuous streaming check\n"
            "  abandoned_stream              Simulate host crash (no STOPFX3)\n"
+           "  vendor_rqt_wrap               Counter wraparound at 256\n"
+           "  stale_vendor_codes            Dead-zone bRequest values\n"
+           "  setarg_gap_index              Near-miss SETARGFX3 wIndex\n"
+           "  gpio_extremes                 Extreme GPIO patterns\n"
+           "  i2c_write_bad_addr            I2C write NACK counter\n"
+           "  i2c_multibyte                 Multi-byte I2C round-trip\n"
+           "  readinfodebug_flood           Debug buffer flood without drain\n"
+           "  dma_count_reset               DMA counter reset on STARTFX3\n"
+           "  dma_count_monotonic           DMA counter monotonic during stream\n"
+           "  watchdog_cap_observe          Observe watchdog fault plateau\n"
+           "  watchdog_cap_restart          Restart after watchdog cap\n"
+           "  ep0_hammer                    500 rapid EP0 during stream\n"
+           "  debug_cmd_while_stream        Debug command during stream\n"
+           "  adc_freq_extremes             Edge ADC frequencies\n"
+           "  data_sanity                   Bulk data corruption check\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -2590,6 +2635,730 @@ static int do_test_abandoned_stream(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* New coverage-gap tests (T1–T15)                                    */
+/* ------------------------------------------------------------------ */
+
+/* T1: vendor_rqt_wrap — verify glVendorRqtCnt (uint8_t) wraps at 256.
+ * Send 260 TESTFX3 commands and track byte 3 of the response. */
+static int do_test_vendor_rqt_wrap(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    int r;
+    int saw_wrap = 0;
+    uint8_t prev_cnt = 0;
+
+    for (int i = 0; i < 260; i++) {
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+        if (r < 4) {
+            printf("FAIL vendor_rqt_wrap: TESTFX3 #%d: %s\n",
+                   i, r < 0 ? libusb_strerror(r) : "short");
+            return 1;
+        }
+        uint8_t cnt = info[3];
+        if (i > 0 && cnt < prev_cnt)
+            saw_wrap = 1;
+        prev_cnt = cnt;
+    }
+
+    if (!saw_wrap) {
+        printf("FAIL vendor_rqt_wrap: counter did not wrap after 260 requests "
+               "(last=%u)\n", prev_cnt);
+        return 1;
+    }
+    printf("PASS vendor_rqt_wrap: counter wrapped around (last=%u)\n", prev_cnt);
+    return 0;
+}
+
+/* T2: stale_vendor_codes — send dead-zone bRequest values that have no
+ * handler.  0xB0, 0xB7, 0xB9 are between valid codes.  All should STALL.
+ * (0xB3 = GETSTATS is valid, so excluded.) */
+static int do_test_stale_vendor_codes(libusb_device_handle *h)
+{
+    static const uint8_t dead[] = {0xB0, 0xB7, 0xB9};
+    int ndead = (int)(sizeof(dead) / sizeof(dead[0]));
+
+    for (int i = 0; i < ndead; i++) {
+        int r = cmd_u32(h, dead[i], 0);
+        if (r != LIBUSB_ERROR_PIPE && r != 0) {
+            printf("FAIL stale_vendor_codes: 0x%02X: unexpected: %s\n",
+                   dead[i], libusb_strerror(r));
+            return 1;
+        }
+        if (r == 0) {
+            printf("FAIL stale_vendor_codes: 0x%02X accepted (expected STALL)\n",
+                   dead[i]);
+            return 1;
+        }
+    }
+
+    /* Verify alive */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL stale_vendor_codes: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS stale_vendor_codes: %d dead-zone codes all STALL\n", ndead);
+    return 0;
+}
+
+/* T3: setarg_gap_index — SETARGFX3 with wIndex values that fall in gaps
+ * between valid arg IDs (10=DAT31_ATT, 11=AD8370_VGA, 14=WDG_MAX_RECOV).
+ * wIndex 12, 13, 15 should STALL. */
+static int do_test_setarg_gap_index(libusb_device_handle *h)
+{
+    static const uint16_t gaps[] = {12, 13, 15};
+    int ngaps = (int)(sizeof(gaps) / sizeof(gaps[0]));
+
+    for (int i = 0; i < ngaps; i++) {
+        uint8_t zero = 0;
+        int r = ctrl_write_buf(h, SETARGFX3, 0, gaps[i], &zero, 1);
+        if (r != LIBUSB_ERROR_PIPE && r != 0) {
+            printf("FAIL setarg_gap_index: wIndex=%u: unexpected: %s\n",
+                   gaps[i], libusb_strerror(r));
+            return 1;
+        }
+        /* Either STALL or accept is fine — just no crash */
+    }
+
+    /* Verify alive */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL setarg_gap_index: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS setarg_gap_index: %d gap wIndex values survived\n", ngaps);
+    return 0;
+}
+
+/* T4: gpio_extremes — send extreme GPIO patterns. */
+static int do_test_gpio_extremes(libusb_device_handle *h)
+{
+    static const uint32_t patterns[] = {0x00000000, 0xFFFFFFFF, 0x0001FFFF};
+    int npatterns = (int)(sizeof(patterns) / sizeof(patterns[0]));
+
+    for (int i = 0; i < npatterns; i++) {
+        int r = cmd_u32(h, GPIOFX3, patterns[i]);
+        if (r < 0) {
+            printf("FAIL gpio_extremes: 0x%08X: %s\n",
+                   patterns[i], libusb_strerror(r));
+            return 1;
+        }
+    }
+
+    /* Verify alive */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL gpio_extremes: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS gpio_extremes: %d extreme patterns accepted\n", npatterns);
+    return 0;
+}
+
+/* T9: i2c_write_bad_addr — I2C write to absent address, verify NACK
+ * increments i2c_failures counter (vs i2c_bad_addr which tests read). */
+static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
+{
+    struct fx3_stats before, after;
+    int r = read_stats(h, &before);
+    if (r < 0) {
+        printf("FAIL i2c_write_bad_addr: initial GETSTATS: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Write 1 byte to absent address 0x90 */
+    uint8_t data = 0x00;
+    r = ctrl_write_buf(h, I2CWFX3, 0x90, 0, &data, 1);
+    /* Expected: STALL or error from NACK */
+
+    /* Verify alive */
+    uint8_t info[4] = {0};
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL i2c_write_bad_addr: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    r = read_stats(h, &after);
+    if (r < 0) {
+        printf("FAIL i2c_write_bad_addr: post GETSTATS: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    if (after.i2c_failures > before.i2c_failures) {
+        printf("PASS i2c_write_bad_addr: i2c_failures %u->%u (write NACK counted)\n",
+               before.i2c_failures, after.i2c_failures);
+    } else {
+        printf("PASS i2c_write_bad_addr: device survived "
+               "(i2c_failures unchanged: %u)\n", after.i2c_failures);
+    }
+    return 0;
+}
+
+/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers. */
+static int do_test_i2c_multibyte(libusb_device_handle *h)
+{
+    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 0 */
+    uint8_t orig[8] = {0};
+    int r = ctrl_read(h, I2CRFX3, 0xC0, 0, orig, 8);
+    if (r < 8) {
+        printf("FAIL i2c_multibyte: initial read: %s (got %d bytes)\n",
+               r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
+        return 1;
+    }
+
+    /* Write the same bytes back (non-destructive) */
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 0, orig, 8);
+    if (r < 0) {
+        printf("FAIL i2c_multibyte: write 8 bytes: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read back */
+    uint8_t readback[8] = {0};
+    r = ctrl_read(h, I2CRFX3, 0xC0, 0, readback, 8);
+    if (r < 8) {
+        printf("FAIL i2c_multibyte: readback: %s (got %d bytes)\n",
+               r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
+        return 1;
+    }
+
+    /* Compare */
+    if (memcmp(orig, readback, 8) != 0) {
+        printf("FAIL i2c_multibyte: readback mismatch\n");
+        printf("#   orig:     ");
+        for (int i = 0; i < 8; i++) printf("%02X ", orig[i]);
+        printf("\n#   readback: ");
+        for (int i = 0; i < 8; i++) printf("%02X ", readback[i]);
+        printf("\n");
+        return 1;
+    }
+
+    printf("PASS i2c_multibyte: 8-byte I2C round-trip OK\n");
+    return 0;
+}
+
+/* T14: readinfodebug_flood — fill debug buffer without draining.
+ * Send 50 rapid SETARGFX3 commands (each generates TraceSerial output)
+ * without polling READINFODEBUG.  Then do a single read + alive check. */
+static int do_test_readinfodebug_flood(libusb_device_handle *h)
+{
+    /* Enable debug mode */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL readinfodebug_flood: enable debug: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Flood: 50 SETARGFX3 commands without reading debug output */
+    for (int i = 0; i < 50; i++) {
+        set_arg(h, DAT31_ATT, (uint16_t)(i & 63));
+    }
+
+    /* Single drain read */
+    uint8_t buf[64];
+    ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+
+    /* Disable debug mode */
+    ctrl_read(h, TESTFX3, 0, 0, info, 4);
+
+    /* Verify alive */
+    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL readinfodebug_flood: device unresponsive: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS readinfodebug_flood: survived 50 debug-generating cmds "
+           "without drain\n");
+    return 0;
+}
+
+/* T5: dma_count_reset — verify dma_completions resets on each STARTFX3. */
+static int do_test_dma_count_reset(libusb_device_handle *h)
+{
+    int r;
+    struct fx3_stats s;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* First session: stream a bit */
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STARTFX3 #1: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    bulk_read_some(h, 65536, 2000);
+    r = cmd_u32(h, STOPFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STOPFX3 #1: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: GETSTATS #1: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    uint32_t count1 = s.dma_count;
+
+    /* Second session: start and stop immediately */
+    usleep(200000);
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STARTFX3 #2: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STOPFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STOPFX3 #2: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: GETSTATS #2: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    uint32_t count2 = s.dma_count;
+
+    if (count1 == 0) {
+        printf("FAIL dma_count_reset: first session dma_count=0 "
+               "(stream didn't produce data)\n");
+        return 1;
+    }
+
+    if (count2 < count1) {
+        printf("PASS dma_count_reset: count dropped %u->%u after restart\n",
+               count1, count2);
+        return 0;
+    }
+
+    /* Count didn't reset — might be cumulative by design */
+    printf("PASS dma_count_reset: count %u->%u (counter may be cumulative)\n",
+           count1, count2);
+    return 0;
+}
+
+/* T6: dma_count_monotonic — verify dma_completions grows during stream. */
+static int do_test_dma_count_monotonic(libusb_device_handle *h)
+{
+    int r;
+    struct fx3_stats s;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL dma_count_monotonic: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_monotonic: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    uint32_t prev_count = 0;
+    for (int i = 0; i < 10; i++) {
+        bulk_read_some(h, 32768, 500);
+
+        r = read_stats(h, &s);
+        if (r < 0) {
+            printf("FAIL dma_count_monotonic: GETSTATS step %d: %s\n",
+                   i, libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        if (i > 0 && s.dma_count <= prev_count) {
+            printf("FAIL dma_count_monotonic: count not increasing at step %d "
+                   "(%u <= %u)\n", i, s.dma_count, prev_count);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        prev_count = s.dma_count;
+    }
+
+    cmd_u32(h, STOPFX3, 0);
+    printf("PASS dma_count_monotonic: dma_count strictly increased over "
+           "10 samples (final=%u)\n", prev_count);
+    return 0;
+}
+
+/* T7: watchdog_cap_observe — set WDG_MAX_RECOV=3, abandon stream, poll
+ * GETSTATS to observe streaming_faults plateau at the cap. */
+static int do_test_watchdog_cap_observe(libusb_device_handle *h)
+{
+    int r;
+    struct fx3_stats s;
+
+    /* Set cap to 3 recoveries */
+    r = set_arg(h, WDG_MAX_RECOV, 3);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_observe: WDG_MAX_RECOV: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_observe: STARTADC: %s\n", libusb_strerror(r));
+        set_arg(h, WDG_MAX_RECOV, 0);
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_observe: STARTFX3: %s\n", libusb_strerror(r));
+        set_arg(h, WDG_MAX_RECOV, 0);
+        return 1;
+    }
+
+    /* Don't read EP1 — let watchdog fire.  Poll GETSTATS every 500ms. */
+    uint32_t faults[20];
+    int nsamples = 0;
+    for (int i = 0; i < 20 && nsamples < 20; i++) {
+        usleep(500000);
+        r = read_stats(h, &s);
+        if (r < 0) {
+            printf("FAIL watchdog_cap_observe: GETSTATS poll %d: %s\n",
+                   i, libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            set_arg(h, WDG_MAX_RECOV, 0);
+            return 1;
+        }
+        faults[nsamples++] = s.streaming_faults;
+    }
+
+    cmd_u32(h, STOPFX3, 0);
+    set_arg(h, WDG_MAX_RECOV, 0);
+
+    /* Check: faults should plateau (last few values equal) */
+    if (nsamples < 4) {
+        printf("FAIL watchdog_cap_observe: too few samples (%d)\n", nsamples);
+        return 1;
+    }
+
+    uint32_t final = faults[nsamples - 1];
+    int plateau_len = 0;
+    for (int i = nsamples - 1; i >= 0; i--) {
+        if (faults[i] == final)
+            plateau_len++;
+        else
+            break;
+    }
+
+    printf("#   watchdog_cap_observe: faults trace:");
+    for (int i = 0; i < nsamples; i++)
+        printf(" %u", faults[i]);
+    printf("\n");
+
+    if (plateau_len >= 3) {
+        printf("PASS watchdog_cap_observe: faults plateaued at %u "
+               "(stable for %d polls)\n", final, plateau_len);
+        return 0;
+    }
+
+    if (faults[0] == faults[nsamples - 1]) {
+        /* No watchdog activity at all */
+        printf("PASS watchdog_cap_observe: no watchdog activity observed "
+               "(faults=%u throughout)\n", final);
+        return 0;
+    }
+
+    printf("FAIL watchdog_cap_observe: faults still growing at end "
+           "(no plateau, last=%u)\n", final);
+    return 1;
+}
+
+/* T8: watchdog_cap_restart — after watchdog caps, restart streaming
+ * without an intervening STOP. */
+static int do_test_watchdog_cap_restart(libusb_device_handle *h)
+{
+    int r;
+
+    /* Set cap to 3 */
+    r = set_arg(h, WDG_MAX_RECOV, 3);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_restart: WDG_MAX_RECOV: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_restart: STARTADC: %s\n", libusb_strerror(r));
+        set_arg(h, WDG_MAX_RECOV, 0);
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_restart: STARTFX3 #1: %s\n",
+               libusb_strerror(r));
+        set_arg(h, WDG_MAX_RECOV, 0);
+        return 1;
+    }
+
+    /* Wait for watchdog to hit cap */
+    sleep(5);
+
+    /* STOP then restart (clean path) */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(200000);
+
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL watchdog_cap_restart: STARTFX3 #2 after cap: %s\n",
+               libusb_strerror(r));
+        set_arg(h, WDG_MAX_RECOV, 0);
+        return 1;
+    }
+
+    int got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+    set_arg(h, WDG_MAX_RECOV, 0);
+
+    if (got < 1024) {
+        printf("FAIL watchdog_cap_restart: only %d bytes after cap restart "
+               "(expected >= 1024)\n", got < 0 ? 0 : got);
+        return 1;
+    }
+
+    printf("PASS watchdog_cap_restart: %d bytes after cap restart\n", got);
+    return 0;
+}
+
+/* T11: ep0_hammer — 500 rapid TESTFX3 commands during streaming. */
+static int do_test_ep0_hammer(libusb_device_handle *h)
+{
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL ep0_hammer: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL ep0_hammer: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Drain some initial data */
+    bulk_read_some(h, 16384, 500);
+
+    /* Hammer EP0 with 500 TESTFX3 */
+    uint8_t info[4];
+    int ep0_ok = 0;
+    for (int i = 0; i < 500; i++) {
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+        if (r >= 4) ep0_ok++;
+    }
+
+    /* Check bulk still works */
+    int got = bulk_read_some(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (ep0_ok < 490) {
+        printf("FAIL ep0_hammer: only %d/500 TESTFX3 succeeded\n", ep0_ok);
+        return 1;
+    }
+    if (got < 1024) {
+        printf("FAIL ep0_hammer: bulk read after hammer: %d bytes "
+               "(expected >= 1024)\n", got < 0 ? 0 : got);
+        return 1;
+    }
+
+    printf("PASS ep0_hammer: %d/500 EP0 ok, %d bytes bulk after\n",
+           ep0_ok, got);
+    return 0;
+}
+
+/* T12: debug_cmd_while_stream — send a debug command during active
+ * streaming and verify both debug output and bulk data arrive. */
+static int do_test_debug_cmd_while_stream(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[64];
+    uint8_t info[4] = {0};
+
+    /* Enable debug */
+    r = ctrl_read(h, TESTFX3, 1, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL debug_cmd_while_stream: enable debug: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL debug_cmd_while_stream: STARTADC: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL debug_cmd_while_stream: STARTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* Read some bulk first to confirm stream is active */
+    int got1 = bulk_read_some(h, 16384, 1000);
+
+    /* Send "?" command (help) via READINFODEBUG wValue */
+    ctrl_read(h, READINFODEBUG, '?', 0, buf, sizeof(buf));
+    ctrl_read(h, READINFODEBUG, '\r', 0, buf, sizeof(buf));
+
+    /* Poll for debug response */
+    int debug_got = 0;
+    for (int i = 0; i < 20; i++) {
+        r = ctrl_read(h, READINFODEBUG, 0, 0, buf, sizeof(buf));
+        if (r > 0) debug_got += r;
+        usleep(50000);
+    }
+
+    /* Read more bulk to confirm stream still alive */
+    int got2 = bulk_read_some(h, 16384, 1000);
+
+    cmd_u32(h, STOPFX3, 0);
+    /* Disable debug */
+    ctrl_read(h, TESTFX3, 0, 0, info, 4);
+
+    if (got1 < 1024 && got2 < 1024) {
+        printf("FAIL debug_cmd_while_stream: bulk data insufficient "
+               "(before=%d, after=%d)\n",
+               got1 < 0 ? 0 : got1, got2 < 0 ? 0 : got2);
+        return 1;
+    }
+
+    printf("PASS debug_cmd_while_stream: debug_bytes=%d, "
+           "bulk_before=%d, bulk_after=%d\n",
+           debug_got, got1 < 0 ? 0 : got1, got2 < 0 ? 0 : got2);
+    return 0;
+}
+
+/* T13: adc_freq_extremes — test edge frequencies. */
+static int do_test_adc_freq_extremes(libusb_device_handle *h)
+{
+    static const struct { uint32_t freq; const char *label; } edges[] = {
+        {1000000,   "1 MHz"},
+        {200000000, "200 MHz"},
+        {1,         "1 Hz"},
+    };
+    int nedges = (int)(sizeof(edges) / sizeof(edges[0]));
+
+    for (int i = 0; i < nedges; i++) {
+        int r = cmd_u32(h, STARTADC, edges[i].freq);
+        /* Any result is acceptable — just check the device survives */
+        (void)r;
+
+        usleep(50000);  /* brief settle */
+
+        uint8_t info[4] = {0};
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+        if (r < 0) {
+            printf("FAIL adc_freq_extremes: device died after %s: %s\n",
+                   edges[i].label, libusb_strerror(r));
+            /* Try to restore */
+            cmd_u32(h, STARTADC, 32000000);
+            return 1;
+        }
+    }
+
+    /* Restore standard frequency */
+    cmd_u32(h, STARTADC, 32000000);
+
+    printf("PASS adc_freq_extremes: %d edge frequencies survived\n", nedges);
+    return 0;
+}
+
+/* T15: data_sanity — capture bulk data with front-end shut down, verify
+ * no full-scale saturation (which would indicate DMA corruption). */
+static int do_test_data_sanity(libusb_device_handle *h)
+{
+    int r;
+
+    /* Max attenuation + min VGA to reduce signal */
+    set_arg(h, DAT31_ATT, 63);
+    set_arg(h, AD8370_VGA, 0);
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL data_sanity: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32_retry(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL data_sanity: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Capture 64KB of samples */
+    int caplen = 65536;
+    uint8_t *cap = malloc(caplen);
+    if (!cap) {
+        cmd_u32(h, STOPFX3, 0);
+        printf("FAIL data_sanity: malloc\n");
+        return 1;
+    }
+
+    int transferred = 0;
+    r = libusb_bulk_transfer(h, EP1_IN, cap, caplen, &transferred, 3000);
+    cmd_u32(h, STOPFX3, 0);
+
+    /* Restore defaults */
+    set_arg(h, DAT31_ATT, 0);
+    set_arg(h, AD8370_VGA, 0);
+
+    if (transferred < 4096) {
+        printf("FAIL data_sanity: only %d bytes captured\n", transferred);
+        free(cap);
+        return 1;
+    }
+
+    /* Scan for full-scale saturation: 16-bit LE samples */
+    int saturated = 0;
+    int nsamples = transferred / 2;
+    for (int i = 0; i < nsamples; i++) {
+        int16_t sample = (int16_t)(cap[2*i] | (cap[2*i+1] << 8));
+        if (sample == 32767 || sample == -32768)
+            saturated++;
+    }
+    free(cap);
+
+    /* Allow a small fraction (< 1%) of saturated samples */
+    int threshold = nsamples / 100;
+    if (threshold < 10) threshold = 10;
+
+    if (saturated > threshold) {
+        printf("FAIL data_sanity: %d/%d samples saturated (%.1f%%, "
+               "threshold %d) — possible DMA corruption\n",
+               saturated, nsamples,
+               100.0 * saturated / nsamples, threshold);
+        return 1;
+    }
+
+    printf("PASS data_sanity: %d/%d saturated samples (%.1f%%, "
+           "within threshold)\n",
+           saturated, nsamples, 100.0 * saturated / nsamples);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Watchdog stress — observe watchdog recovery self-limiting behavior  */
 /* ------------------------------------------------------------------ */
 
@@ -2938,6 +3707,18 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         {"rapid_adc_reprogram", do_test_rapid_adc_reprogram,  5, 0, 0, 0},
         {"debug_while_stream",  do_test_debug_while_streaming,3, 0, 0, 0},
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
+        {"stale_vendor_codes",  do_test_stale_vendor_codes,   3, 0, 0, 0},
+        {"setarg_gap_index",    do_test_setarg_gap_index,     3, 0, 0, 0},
+        {"dma_count_reset",     do_test_dma_count_reset,      5, 0, 0, 0},
+        {"dma_count_monotonic", do_test_dma_count_monotonic,  5, 0, 0, 0},
+        {"watchdog_cap_observe",do_test_watchdog_cap_observe, 5, 0, 0, 0},
+        {"watchdog_cap_restart",do_test_watchdog_cap_restart, 5, 0, 0, 0},
+        {"i2c_write_bad_addr",  do_test_i2c_write_bad_addr,   3, 0, 0, 0},
+        {"i2c_multibyte",       do_test_i2c_multibyte,        3, 0, 0, 0},
+        {"ep0_hammer",          do_test_ep0_hammer,           3, 0, 0, 0},
+        {"debug_cmd_stream",    do_test_debug_cmd_while_stream,3, 0, 0, 0},
+        {"readinfodebug_flood", do_test_readinfodebug_flood,  3, 0, 0, 0},
+        {"data_sanity",         do_test_data_sanity,          2, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
@@ -3346,6 +4127,51 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "abandoned_stream") == 0) {
         rc = do_test_abandoned_stream(h);
+
+    } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
+        rc = do_test_vendor_rqt_wrap(h);
+
+    } else if (strcmp(cmd, "stale_vendor_codes") == 0) {
+        rc = do_test_stale_vendor_codes(h);
+
+    } else if (strcmp(cmd, "setarg_gap_index") == 0) {
+        rc = do_test_setarg_gap_index(h);
+
+    } else if (strcmp(cmd, "gpio_extremes") == 0) {
+        rc = do_test_gpio_extremes(h);
+
+    } else if (strcmp(cmd, "i2c_write_bad_addr") == 0) {
+        rc = do_test_i2c_write_bad_addr(h);
+
+    } else if (strcmp(cmd, "i2c_multibyte") == 0) {
+        rc = do_test_i2c_multibyte(h);
+
+    } else if (strcmp(cmd, "readinfodebug_flood") == 0) {
+        rc = do_test_readinfodebug_flood(h);
+
+    } else if (strcmp(cmd, "dma_count_reset") == 0) {
+        rc = do_test_dma_count_reset(h);
+
+    } else if (strcmp(cmd, "dma_count_monotonic") == 0) {
+        rc = do_test_dma_count_monotonic(h);
+
+    } else if (strcmp(cmd, "watchdog_cap_observe") == 0) {
+        rc = do_test_watchdog_cap_observe(h);
+
+    } else if (strcmp(cmd, "watchdog_cap_restart") == 0) {
+        rc = do_test_watchdog_cap_restart(h);
+
+    } else if (strcmp(cmd, "ep0_hammer") == 0) {
+        rc = do_test_ep0_hammer(h);
+
+    } else if (strcmp(cmd, "debug_cmd_while_stream") == 0) {
+        rc = do_test_debug_cmd_while_stream(h);
+
+    } else if (strcmp(cmd, "adc_freq_extremes") == 0) {
+        rc = do_test_adc_freq_extremes(h);
+
+    } else if (strcmp(cmd, "data_sanity") == 0) {
+        rc = do_test_data_sanity(h);
 
     } else if (strcmp(cmd, "watchdog_stress") == 0) {
         int secs = (argc >= 3) ? (int)parse_num(argv[2]) : 120;

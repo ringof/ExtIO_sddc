@@ -174,11 +174,13 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
 #      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL
+#      + 5 new coverage-gap tests (vendor_rqt_wrap, stale_vendor_codes,
+#        setarg_gap_index, gpio_extremes, i2c_write_bad_addr)
 #      + 4 GPIF wedge/recovery tests
 #      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=30
+PLANNED=35
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -466,7 +468,57 @@ output=$(run_cmd stats_pll) && {
 }
 
 # ==================================================================
-# 19. GPIF stop state verification
+# 19. Vendor request counter wraparound
+# ==================================================================
+
+output=$(run_cmd vendor_rqt_wrap) && {
+    tap_ok "vendor_rqt_wrap: counter wraps at 256"
+} || {
+    tap_fail "vendor_rqt_wrap: counter did not wrap" "$output"
+}
+
+# ==================================================================
+# 20. Stale vendor codes (dead-zone bRequest values)
+# ==================================================================
+
+output=$(run_cmd stale_vendor_codes) && {
+    tap_ok "stale_vendor_codes: dead-zone bRequest values STALL"
+} || {
+    tap_fail "stale_vendor_codes: dead-zone codes not handled" "$output"
+}
+
+# ==================================================================
+# 21. SETARGFX3 near-miss wIndex values
+# ==================================================================
+
+output=$(run_cmd setarg_gap_index) && {
+    tap_ok "setarg_gap_index: near-miss wIndex values survived"
+} || {
+    tap_fail "setarg_gap_index: device crashed on gap wIndex" "$output"
+}
+
+# ==================================================================
+# 22. GPIO extreme patterns
+# ==================================================================
+
+output=$(run_cmd gpio_extremes) && {
+    tap_ok "gpio_extremes: all-zeros/all-ones GPIO survived"
+} || {
+    tap_fail "gpio_extremes: device crashed on extreme pattern" "$output"
+}
+
+# ==================================================================
+# 23. I2C write NACK counter
+# ==================================================================
+
+output=$(run_cmd i2c_write_bad_addr) && {
+    tap_ok "i2c_write_bad_addr: write NACK path survived"
+} || {
+    tap_fail "i2c_write_bad_addr: device crashed on write NACK" "$output"
+}
+
+# ==================================================================
+# 24. GPIF stop state verification
 # ==================================================================
 # After STOPFX3, verify the GPIF SM is actually stopped (state 0 or 1).
 # Before the fix: SM stays running or stuck in BUSY/WAIT.
@@ -478,7 +530,7 @@ output=$(run_cmd stop_gpif_state) && {
 }
 
 # ==================================================================
-# 20. Stop/start cycle test
+# 25. Stop/start cycle test
 # ==================================================================
 # Cycle STOP+START 5 times, verifying data flows each cycle.
 # Before the fix: wedges on 2nd or 3rd cycle.
@@ -490,7 +542,7 @@ output=$(run_cmd stop_start_cycle) && {
 }
 
 # ==================================================================
-# 21. PLL pre-flight check
+# 26. PLL pre-flight check
 # ==================================================================
 # Verify STARTFX3 is rejected when ADC clock is off.
 # Before the fix: START succeeds and GPIF reads garbage.
@@ -502,7 +554,7 @@ output=$(run_cmd pll_preflight) && {
 }
 
 # ==================================================================
-# 22. Wedge recovery test
+# 27. Wedge recovery test
 # ==================================================================
 # Provoke DMA backpressure (start streaming, don't read EP1),
 # then STOP+START and verify recovery.
@@ -515,7 +567,7 @@ output=$(run_cmd wedge_recovery) && {
 }
 
 # ==================================================================
-# 23. PIB error detection (issue #10)
+# 28. PIB error detection (issue #10)
 # ==================================================================
 # Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
 # Verify the debug console reports "PIB error".
@@ -529,7 +581,7 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 24. GETSTATS PIB error counter
+# 29. GETSTATS PIB error counter
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
@@ -540,7 +592,7 @@ output=$(run_cmd stats_pib) && {
 }
 
 # ==================================================================
-# 25. Streaming test via rx888_stream
+# 30. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then
