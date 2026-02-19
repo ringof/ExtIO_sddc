@@ -2187,33 +2187,71 @@ static int do_test_rapid_start_stop(libusb_device_handle *h)
 static int do_test_startadc_mid_stream(libusb_device_handle *h)
 {
     int r;
+    struct fx3_stats entry_stats, fail_stats;
+
+    /* Capture entry state — on failure we print this to reveal what the
+     * previous scenario (or a fresh firmware reload) left behind. */
+    memset(&entry_stats, 0, sizeof(entry_stats));
+    read_stats(h, &entry_stats);
 
     r = cmd_u32_retry(h, STARTADC, 32000000);
     if (r < 0) {
         printf("FAIL startadc_mid_stream: STARTADC(32M): %s\n", libusb_strerror(r));
+        printf("  diag: entry gpif=%u dma=%u pib=%u faults=%u pll=0x%02X\n",
+               entry_stats.gpif_state, entry_stats.dma_count,
+               entry_stats.pib_errors, entry_stats.streaming_faults,
+               entry_stats.si5351_status);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL startadc_mid_stream: STARTFX3: %s\n", libusb_strerror(r));
+        printf("  diag: entry gpif=%u dma=%u pib=%u faults=%u pll=0x%02X\n",
+               entry_stats.gpif_state, entry_stats.dma_count,
+               entry_stats.pib_errors, entry_stats.streaming_faults,
+               entry_stats.si5351_status);
         return 1;
     }
 
     /* Confirm data flowing at 32 MHz */
     int got = bulk_read_some(h, 16384, 2000);
     if (got < 1024) {
+        /* Read GETSTATS BEFORE any cleanup — captures actual GPIF state
+         * at the moment of failure, not the post-STOPFX3 state (255). */
+        memset(&fail_stats, 0, sizeof(fail_stats));
+        read_stats(h, &fail_stats);
         printf("FAIL startadc_mid_stream: no data at 32M (%d bytes)\n",
                got < 0 ? 0 : got);
-        cmd_u32(h, STOPFX3, 0);
+        printf("  diag: entry gpif=%u dma=%u pib=%u faults=%u pll=0x%02X\n",
+               entry_stats.gpif_state, entry_stats.dma_count,
+               entry_stats.pib_errors, entry_stats.streaming_faults,
+               entry_stats.si5351_status);
+        printf("  diag: fail  gpif=%u dma=%u pib=%u pib_arg=0x%04X faults=%u pll=0x%02X\n",
+               fail_stats.gpif_state, fail_stats.dma_count,
+               fail_stats.pib_errors, fail_stats.last_pib_arg,
+               fail_stats.streaming_faults, fail_stats.si5351_status);
+        printf("  diag: bulk_read_some returned %d\n", got);
+        /* No STOPFX3 — follow soak convention (line 4068): let the soak
+         * loop's inter-scenario cleanup handle it so its GETSTATS read
+         * also captures the real device state. */
         return 1;
     }
 
     /* Reprogram to 64 MHz WITHOUT stopping — firmware should handle this */
     r = cmd_u32(h, STARTADC, 64000000);
     if (r < 0) {
+        memset(&fail_stats, 0, sizeof(fail_stats));
+        read_stats(h, &fail_stats);
         printf("FAIL startadc_mid_stream: STARTADC(64M) mid-stream: %s\n",
                libusb_strerror(r));
-        cmd_u32(h, STOPFX3, 0);
+        printf("  diag: entry gpif=%u dma=%u pib=%u faults=%u pll=0x%02X\n",
+               entry_stats.gpif_state, entry_stats.dma_count,
+               entry_stats.pib_errors, entry_stats.streaming_faults,
+               entry_stats.si5351_status);
+        printf("  diag: fail  gpif=%u dma=%u pib=%u pib_arg=0x%04X faults=%u pll=0x%02X\n",
+               fail_stats.gpif_state, fail_stats.dma_count,
+               fail_stats.pib_errors, fail_stats.last_pib_arg,
+               fail_stats.streaming_faults, fail_stats.si5351_status);
         return 1;
     }
     usleep(200000);  /* PLL relock */
@@ -2223,7 +2261,6 @@ static int do_test_startadc_mid_stream(libusb_device_handle *h)
     if (r < 0) {
         printf("FAIL startadc_mid_stream: STARTFX3 after reprogram: %s\n",
                libusb_strerror(r));
-        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
 
@@ -3919,10 +3956,21 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
     double hours = 1.0;
     unsigned int seed = (unsigned int)time(NULL);
     int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
+    int quiet = 0;           /* -q: suppress PASS output */
 
-    if (argc >= 1) hours = atof(argv[0]);
-    if (argc >= 2) seed = (unsigned int)strtoul(argv[1], NULL, 0);
-    if (argc >= 3) max_scenarios = atoi(argv[2]);
+    /* Strip -q flag from argv before positional parsing */
+    int pos_argc = 0;
+    char *pos_argv[16];
+    for (int i = 0; i < argc && pos_argc < 16; i++) {
+        if (strcmp(argv[i], "-q") == 0)
+            quiet = 1;
+        else
+            pos_argv[pos_argc++] = argv[i];
+    }
+
+    if (pos_argc >= 1) hours = atof(pos_argv[0]);
+    if (pos_argc >= 2) seed = (unsigned int)strtoul(pos_argv[1], NULL, 0);
+    if (pos_argc >= 3) max_scenarios = atoi(pos_argv[2]);
     if (hours <= 0) hours = 1.0;
 
     struct soak_scenario scenarios[] = {
@@ -4026,8 +4074,34 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
             if (pick < accum) { sel = i; break; }
         }
 
-        /* Run scenario */
+        /* Run scenario — in quiet mode, capture stdout to a tmpfile
+         * and only replay it if the scenario fails. */
+        int saved_fd = -1;
+        FILE *tmpf = NULL;
+        if (quiet) {
+            fflush(stdout);
+            saved_fd = dup(STDOUT_FILENO);
+            tmpf = tmpfile();
+            if (tmpf && saved_fd >= 0)
+                dup2(fileno(tmpf), STDOUT_FILENO);
+        }
         int result = scenarios[sel].func(h);
+        if (quiet && saved_fd >= 0) {
+            fflush(stdout);
+            if (result != 0 && tmpf) {
+                /* Replay captured output on failure */
+                rewind(tmpf);
+                char replay_buf[4096];
+                size_t n;
+                while ((n = fread(replay_buf, 1, sizeof(replay_buf), tmpf)) > 0) {
+                    ssize_t w = write(saved_fd, replay_buf, n);
+                    (void)w;
+                }
+            }
+            dup2(saved_fd, STDOUT_FILENO);
+            close(saved_fd);
+            if (tmpf) fclose(tmpf);
+        }
         scenarios[sel].runs++;
         if (result == 0) {
             scenarios[sel].pass++;

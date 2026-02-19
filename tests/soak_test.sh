@@ -18,6 +18,7 @@
 #   --seed S               PRNG seed for reproducibility (default: time-based)
 #   --rx888-stream PATH    Path to rx888_stream binary (default: search PATH)
 #   --no-reset             Skip USB reset on exit (leave device as-is)
+#   --quiet, -q            Suppress PASS messages; only show FAILs and status
 #   --reload-interval N    Every N scenarios, reset device to DFU, re-upload
 #                          firmware, and resume the soak.  Default: 0 (disabled).
 #                          Tests whether a freshly loaded firmware image handles
@@ -32,6 +33,7 @@ SEED=""
 RX888_STREAM=""
 USB_RESET=1
 RELOAD_INTERVAL=0
+QUIET=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FX3_CMD="$SCRIPT_DIR/fx3_cmd"
 
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --seed)            SEED="$2"; shift 2 ;;
         --rx888-stream)    RX888_STREAM="$2"; shift 2 ;;
         --no-reset)        USB_RESET=0; shift ;;
+        --quiet|-q)        QUIET="-q"; shift ;;
         --reload-interval) RELOAD_INTERVAL="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^$/s/^# \?//p' "$0"
@@ -211,10 +214,13 @@ while true; do
 
     CHUNK_SEED=$(( SEED + CHUNK ))
 
-    # Build fx3_cmd soak args: hours seed [max_scenarios]
+    # Build fx3_cmd soak args: hours seed [max_scenarios] [-q]
     SOAK_ARGS="$REMAINING_HOURS $CHUNK_SEED"
     if (( RELOAD_INTERVAL > 0 )); then
         SOAK_ARGS="$SOAK_ARGS $RELOAD_INTERVAL"
+    fi
+    if [[ -n "$QUIET" ]]; then
+        SOAK_ARGS="$SOAK_ARGS $QUIET"
     fi
 
     if (( CHUNK > 0 )); then
