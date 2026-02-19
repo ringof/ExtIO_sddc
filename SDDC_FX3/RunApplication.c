@@ -241,7 +241,8 @@ void ApplicationThread ( uint32_t input)
 								}
 								else
 								{
-									CyU3PReturnStatus_t rc;
+									CyU3PReturnStatus_t rc_reset, rc_flush;
+									CyU3PReturnStatus_t rc_xfer = 0, rc_sm = 0;
 									CyBool_t hw_ok;
 
 									glWdgRecoveryCount++;
@@ -255,22 +256,23 @@ void ApplicationThread ( uint32_t input)
 									 * or PLL unlocked).  Force-stop is unconditional. */
 									CyU3PGpifDisable(CyTrue);
 
-									rc = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
-									rc = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+									rc_reset = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+									rc_flush = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 
 									hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
 									if (hw_ok)
 									{
-										rc = CyU3PDmaMultiChannelSetXfer(
+										rc_xfer = CyU3PDmaMultiChannelSetXfer(
 											&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
-										rc = CyU3PGpifSMStart(0, 0);
+										rc_sm = CyU3PGpifSMStart(0, 0);
 										CyU3PGpifControlSWInput(CyTrue);
 									}
 									glCounter[2]++;  /* streaming fault counter —
 									                  * GETSTATS [15..18]; also incremented
 									                  * by EP_UNDERRUN in USBHandler.c */
-									DebugPrint(4, "\r\nWDG: === RECOVERY %s === rc=%d",
-										hw_ok ? "DONE" : "WAIT", rc);
+									DebugPrint(4, "\r\nWDG: === RECOVERY %s === rst=%d flush=%d xfer=%d sm=%d",
+										hw_ok ? "DONE" : "WAIT",
+										rc_reset, rc_flush, rc_xfer, rc_sm);
 									stallCount = 0;
 									prevDMACount = 0;
 									glDMACount = 0;

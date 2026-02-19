@@ -2745,12 +2745,26 @@ static int do_test_setarg_gap_index(libusb_device_handle *h)
     static const uint16_t gaps[] = {12, 13, 15};
     int ngaps = (int)(sizeof(gaps) / sizeof(gaps[0]));
 
+    struct fx3_stats before, after;
+    int have_before = (read_stats(h, &before) == 0);
+
     for (int i = 0; i < ngaps; i++) {
         uint8_t zero = 0;
         int r = ctrl_write_buf(h, SETARGFX3, 0, gaps[i], &zero, 1);
-        if (r != LIBUSB_ERROR_PIPE && r != 0) {
+        if (r == LIBUSB_ERROR_PIPE)
+            printf("#   setarg_gap_index: wIndex=%u STALL (expected)\n", gaps[i]);
+        else if (r == 0)
+            printf("#   setarg_gap_index: wIndex=%u accepted\n", gaps[i]);
+        else {
+            int have_after = (read_stats(h, &after) == 0);
             printf("FAIL setarg_gap_index: wIndex=%u: unexpected: %s\n",
                    gaps[i], libusb_strerror(r));
+            if (have_before && have_after)
+                printf("#   STATS: gpif=%u pib=%u->%u i2c=%u->%u faults=%u->%u\n",
+                       after.gpif_state,
+                       before.pib_errors, after.pib_errors,
+                       before.i2c_failures, after.i2c_failures,
+                       before.streaming_faults, after.streaming_faults);
             return 1;
         }
         /* Either STALL or accept is fine — just no crash */
@@ -2760,8 +2774,15 @@ static int do_test_setarg_gap_index(libusb_device_handle *h)
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
+        int have_after = (read_stats(h, &after) == 0);
         printf("FAIL setarg_gap_index: device unresponsive: %s\n",
                libusb_strerror(r));
+        if (have_before && have_after)
+            printf("#   STATS: gpif=%u pib=%u->%u i2c=%u->%u faults=%u->%u\n",
+                   after.gpif_state,
+                   before.pib_errors, after.pib_errors,
+                   before.i2c_failures, after.i2c_failures,
+                   before.streaming_faults, after.streaming_faults);
         return 1;
     }
     printf("PASS setarg_gap_index: %d gap wIndex values survived\n", ngaps);
@@ -3034,21 +3055,32 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
 {
     int r;
     struct fx3_stats s;
+    struct fx3_stats entry_stats;
+    int have_entry = (read_stats(h, &entry_stats) == 0);
 
     r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL dma_count_monotonic: STARTADC: %s\n", libusb_strerror(r));
+        if (have_entry)
+            printf("#   entry STATS: gpif=%u dma=%u pib=%u faults=%u\n",
+                   entry_stats.gpif_state, entry_stats.dma_count,
+                   entry_stats.pib_errors, entry_stats.streaming_faults);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL dma_count_monotonic: STARTFX3: %s\n", libusb_strerror(r));
+        if (have_entry)
+            printf("#   entry STATS: gpif=%u dma=%u pib=%u faults=%u\n",
+                   entry_stats.gpif_state, entry_stats.dma_count,
+                   entry_stats.pib_errors, entry_stats.streaming_faults);
         return 1;
     }
 
     uint32_t prev_count = 0;
+    uint32_t entry_faults = have_entry ? entry_stats.streaming_faults : 0;
     for (int i = 0; i < 10; i++) {
-        bulk_read_some(h, 32768, 500);
+        int got = bulk_read_some(h, 32768, 500);
 
         r = read_stats(h, &s);
         if (r < 0) {
@@ -3058,9 +3090,16 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
             return 1;
         }
 
+        printf("#   dma_monotonic[%d]: read=%d dma=%u gpif=%u pib=%u faults=%u%s\n",
+               i, got, s.dma_count, s.gpif_state, s.pib_errors,
+               s.streaming_faults,
+               s.streaming_faults > entry_faults ? " [WATCHDOG]" : "");
+
         if (i > 0 && s.dma_count <= prev_count) {
             printf("FAIL dma_count_monotonic: count not increasing at step %d "
                    "(%u <= %u)\n", i, s.dma_count, prev_count);
+            printf("#   faults delta: %u->%u\n",
+                   entry_faults, s.streaming_faults);
             cmd_u32(h, STOPFX3, 0);
             return 1;
         }
@@ -3832,6 +3871,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
 
     int total_cycles = 0, total_pass = 0, total_fail = 0;
     int health_pass = 0, health_fail = 0;
+    int prev_sel = -1;
 
     while (!soak_stop) {
         /* Check elapsed time */
@@ -3862,8 +3902,28 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         } else {
             scenarios[sel].fail++;
             total_fail++;
+            /* Capture device state at moment of failure */
+            struct fx3_stats fail_stats;
+            if (read_stats(h, &fail_stats) == 0) {
+                printf(">>> FAIL %s: gpif=%u dma=%u pib=%u i2c=%u faults=%u si5351=0x%02X",
+                       scenarios[sel].name, fail_stats.gpif_state,
+                       fail_stats.dma_count, fail_stats.pib_errors,
+                       fail_stats.i2c_failures, fail_stats.streaming_faults,
+                       fail_stats.si5351_status);
+                if (prev_sel >= 0)
+                    printf(" prev=%s", scenarios[prev_sel].name);
+                printf("\n");
+            } else {
+                printf(">>> FAIL %s: GETSTATS unreadable at failure",
+                       scenarios[sel].name);
+                if (prev_sel >= 0)
+                    printf(" prev=%s", scenarios[prev_sel].name);
+                printf("\n");
+            }
+            fflush(stdout);
         }
         total_cycles++;
+        prev_sel = sel;
 
         /* Inter-scenario cleanup: ensure streaming is stopped before the
          * health check.  Many scenarios already send STOPFX3 on their
