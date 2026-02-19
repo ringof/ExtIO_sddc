@@ -144,6 +144,50 @@ usb_reset_device() {
     fi
 }
 
+# ---- Ensure device is in bootloader mode before firmware upload ----
+#
+# If the device is in application mode (e.g. previous run crashed, Ctrl-C
+# skipped cleanup, or another tool left it running), reset it back to
+# bootloader.  Without this, rx888_stream can't do an FX3 boot-protocol
+# upload and just streams with whatever old firmware is already loaded.
+#
+# Prefer usbreset (USB bus-level reset — works even if firmware is wedged)
+# over fx3_cmd reset (sends RESETFX3 vendor command — requires firmware to
+# be responsive enough to ACK).  fx3_cmd reset is the fallback for systems
+# without the usbreset utility (apt install usbutils).
+#
+# Note: this block intentionally does NOT reuse usb_reset_device() above.
+# That function is for best-effort cleanup on exit (warn-and-continue).
+# Here we need a hard guarantee: if we can't get to bootloader, we must
+# abort rather than silently run with stale firmware.
+
+if lsusb -d "$APP_VID_PID" &>/dev/null; then
+    echo "# Device in application mode ($APP_VID_PID) — resetting to bootloader..."
+    if command -v usbreset &>/dev/null; then
+        usbreset "$APP_VID_PID" &>/dev/null || true
+        sleep 2   # bus reset re-enumeration is fast
+    else
+        echo "# Warning: usbreset not found — trying fx3_cmd reset (RESETFX3)..." >&2
+        "$FX3_CMD" reset 2>/dev/null || true
+        sleep 3   # RESETFX3 triggers full FX3 reboot — slower than bus reset
+    fi
+    # Wait for bootloader PID (up to 5s)
+    for i in 1 2 3 4 5; do
+        if lsusb -d "$BOOT_VID_PID" &>/dev/null; then break; fi
+        sleep 1
+    done
+    if ! lsusb -d "$BOOT_VID_PID" &>/dev/null; then
+        echo "Error: device not in bootloader ($BOOT_VID_PID) after reset — cannot upload firmware" >&2
+        exit 1
+    fi
+    echo "# Device reset to bootloader ($BOOT_VID_PID)"
+elif lsusb -d "$BOOT_VID_PID" &>/dev/null; then
+    echo "# Device already in bootloader mode ($BOOT_VID_PID)"
+else
+    echo "Error: no RX888 device found at either PID ($APP_VID_PID / $BOOT_VID_PID)" >&2
+    exit 1
+fi
+
 # ---- Upload firmware ----
 
 echo "# Uploading firmware: $FIRMWARE"
