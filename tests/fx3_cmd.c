@@ -3168,7 +3168,17 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
     return 0;
 }
 
-/* T6: dma_count_monotonic — verify dma_completions grows during stream. */
+/* T6: dma_count_monotonic — verify dma_completions grows during stream.
+ *
+ * Uses primed_start_and_read to queue a bulk TD before STARTFX3.
+ * At 64 MS/s the 4×16 KB DMA buffers fill in ~500 µs.  The old
+ * synchronous approach (cmd_u32(STARTFX3) then bulk_read_some) left
+ * a multi-millisecond gap where PIB errors accumulated unchecked;
+ * after ~8 loop iterations the overflow occasionally stalled the DMA
+ * pipeline, causing dma_count to plateau and the test to fail
+ * (observed: step 8, count 23<=23, pib=141).  The primed start
+ * eliminates the initial overflow storm so subsequent synchronous
+ * reads can keep the pipeline drained. */
 static int do_test_dma_count_monotonic(libusb_device_handle *h)
 {
     int r;
@@ -3185,9 +3195,14 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
                    entry_stats.pib_errors, entry_stats.streaming_faults);
         return 1;
     }
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_monotonic: STARTFX3: %s\n", libusb_strerror(r));
+
+    /* Primed read: queue async bulk TD before STARTFX3 to avoid the
+     * PIB overflow race at 64 MS/s (see function comment). */
+    int got = primed_start_and_read_retry(h, 32768, 2000);
+    if (got < 0) {
+        printf("FAIL dma_count_monotonic: primed start: %s\n",
+               libusb_strerror(got));
+        cmd_u32(h, STOPFX3, 0);
         if (have_entry)
             printf("#   entry STATS: gpif=%u dma=%u pib=%u faults=%u\n",
                    entry_stats.gpif_state, entry_stats.dma_count,
@@ -3198,7 +3213,7 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
     uint32_t prev_count = 0;
     uint32_t entry_faults = have_entry ? entry_stats.streaming_faults : 0;
     for (int i = 0; i < 10; i++) {
-        int got = bulk_read_some(h, 32768, 500);
+        got = bulk_read_some(h, 32768, 500);
 
         r = read_stats(h, &s);
         if (r < 0) {
