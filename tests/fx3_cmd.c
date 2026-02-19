@@ -201,8 +201,8 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
      * to the device AND calls usb_hcd_reset_endpoint which issues a
      * Reset Endpoint command to the XHCI — clearing the stopped state.
      *
-     * The firmware CLEAR_FEATURE handler now only clears the stall +
-     * toggle (no DMA teardown), so this is safe.  Issue #78. */
+     * The firmware CLEAR_FEATURE handler now just ACKs the setup
+     * (no stall-clear, no DMA teardown), so this is safe. */
     libusb_clear_halt(h, 0x81);  /* EP1-IN — restart XHCI endpoint ring */
 
     return h;
