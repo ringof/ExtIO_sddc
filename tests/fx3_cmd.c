@@ -201,8 +201,13 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
      * to the device (harmless: the device CLEAR_FEATURE handler resets
      * and re-arms the DMA channel) AND calls usb_hcd_reset_endpoint
      * which issues a Reset Endpoint command to the XHCI — clearing
-     * the stopped state.  Issue #78. */
-    libusb_clear_halt(h, 0x81);  /* EP1-IN */
+     * the stopped state.  Issue #78.
+     *
+     * DISABLED: suspected of triggering FX3 stop-command failures.
+     * Removed to isolate whether CLEAR_FEATURE(ENDPOINT_HALT) on
+     * EP 0x81 causes the firmware to enter a bad state.  See ongoing
+     * investigation.  */
+    /* libusb_clear_halt(h, 0x81); */  /* EP1-IN — disabled */
 
     return h;
 }
