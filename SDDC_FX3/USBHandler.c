@@ -338,10 +338,18 @@ CyFxSlFifoApplnUSBSetupCB (
 				    * left by the previous session; without this, zombie descriptors
 				    * accumulate across rapid stop/start cycles until the USB controller's
 				    * descriptor pool is exhausted and EP0 locks up. */
-				CyU3PUsbResetEp(CY_FX_EP_CONSUMER);  /* clear data toggle and any
-				    * stale halt/error on the endpoint — matches CLEAR_FEATURE path;
-				    * without this, stop/start cycling fails with LIBUSB_ERROR_IO
-				    * even though FX3-side DMA is flowing. */
+				/* DO NOT call CyU3PUsbResetEp() here.  It resets the FX3-side
+				 * data toggle / sequence number without the host knowing, which
+				 * desyncs the endpoint and silently kills all subsequent bulk
+				 * transfers (dma_completions=0, PIB errors climb, GPIF stuck
+				 * at 255).  The host-side libusb_clear_halt() at device open
+				 * already handles the one-time toggle sync.  This call was
+				 * added in 6b35bcc, reverted in 86a7e26, re-added in 2482476,
+				 * and broke streaming every time.  See soak_test evidence:
+				 * 1a97a30 (without) = 60 MiB/s; 2482476 (with) = 0 bytes.
+				 * If you think you need this back, you must first identify
+				 * what is actually wrong — the symptom it masked was an
+				 * xHCI endpoint-ring issue fixed host-side by clear_halt. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
 				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);

@@ -3905,9 +3905,10 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
             /* Capture device state at moment of failure */
             struct fx3_stats fail_stats;
             if (read_stats(h, &fail_stats) == 0) {
-                printf(">>> FAIL %s: gpif=%u dma=%u pib=%u i2c=%u faults=%u si5351=0x%02X",
+                printf(">>> FAIL %s: gpif=%u dma=%u pib=%u pib_arg=0x%04X i2c=%u faults=%u si5351=0x%02X",
                        scenarios[sel].name, fail_stats.gpif_state,
                        fail_stats.dma_count, fail_stats.pib_errors,
+                       fail_stats.last_pib_arg,
                        fail_stats.i2c_failures, fail_stats.streaming_faults,
                        fail_stats.si5351_status);
                 if (prev_sel >= 0)
