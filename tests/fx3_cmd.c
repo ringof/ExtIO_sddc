@@ -1403,10 +1403,15 @@ static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
  * sending STARTFX3.  This helper does the same thing for the test
  * harness:
  *
- *   1. libusb_clear_halt(EP1_IN)  — reset xHCI endpoint ring
- *   2. libusb_submit_transfer()   — queue one async bulk read TD
- *   3. cmd_u32(STARTFX3, 0)       — start GPIF; data lands in the TD
- *   4. libusb_handle_events()     — wait for completion
+ *   1. libusb_submit_transfer()   — queue one async bulk read TD
+ *   2. cmd_u32(STARTFX3, 0)       — start GPIF; data lands in the TD
+ *   3. libusb_handle_events()     — wait for completion
+ *
+ * Note: libusb_clear_halt is NOT called here.  Between clean stop/start
+ * cycles the endpoint is not halted, and clear_halt on a non-stalled EP
+ * corrupts USB controller ERDY state via the firmware's CLEAR_FEATURE
+ * handler.  The retry variant (primed_start_and_read_retry) calls
+ * clear_halt between attempts to recover from genuine endpoint errors.
  *
  * Returns bytes received (>= 0) or a negative libusb error code.
  * On success the caller still owns the STOPFX3 responsibility. */
@@ -1436,11 +1441,15 @@ static int primed_start_and_read(libusb_device_handle *h,
 
     struct primed_xfer_state st = { .completed = 0 };
 
-    /* 1. Clear halt — reset xHCI endpoint ring so stale error state
-     *    from a prior test doesn't block the new transfer. */
-    libusb_clear_halt(h, EP1_IN);
+    /* Note: do NOT call libusb_clear_halt here.  Between clean stop/start
+     * cycles the endpoint is not halted, and clear_halt on a non-stalled
+     * endpoint triggers CyU3PUsbStall(CyFalse, CyTrue) in the firmware's
+     * CLEAR_FEATURE handler, which corrupts USB controller ERDY state
+     * after data has flowed.  The clear_halt at device open (open_rx888)
+     * handles the initial xHCI endpoint reset; error recovery is handled
+     * by the retry variant below. */
 
-    /* 2. Fill and submit async bulk transfer BEFORE starting GPIF */
+    /* 1. Fill and submit async bulk transfer BEFORE starting GPIF */
     libusb_fill_bulk_transfer(xfer, h, EP1_IN, buf, len,
                               primed_xfer_cb, &st, timeout_ms);
     int r = libusb_submit_transfer(xfer);
@@ -1450,7 +1459,7 @@ static int primed_start_and_read(libusb_device_handle *h,
         return r;
     }
 
-    /* 3. Start GPIF — data flows into the already-queued TD */
+    /* 2. Start GPIF — data flows into the already-queued TD */
     r = cmd_u32(h, STARTFX3, 0);
     if (r < 0) {
         libusb_cancel_transfer(xfer);
@@ -1462,7 +1471,7 @@ static int primed_start_and_read(libusb_device_handle *h,
         return r;
     }
 
-    /* 4. Wait for the bulk transfer to complete */
+    /* 3. Wait for the bulk transfer to complete */
     while (!st.completed)
         libusb_handle_events_completed(g_ctx, &st.completed);
 
@@ -1493,14 +1502,19 @@ static int primed_start_and_read_retry(libusb_device_handle *h,
     int r = primed_start_and_read(h, len, timeout_ms);
     if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
         return r;
-    /* First retry — the STARTFX3 inside failed; GPIF never started,
-     * so no STOPFX3 needed before retrying. */
+    /* First retry — previous attempt may have started GPIF (STARTFX3
+     * succeeded but bulk read failed).  Stop streaming, clear the
+     * xHCI endpoint error state, then retry. */
+    cmd_u32(h, STOPFX3, 0);
     usleep(500000);
+    libusb_clear_halt(h, EP1_IN);
     r = primed_start_and_read(h, len, timeout_ms);
     if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
         return r;
     /* Second retry */
+    cmd_u32(h, STOPFX3, 0);
     usleep(1000000);
+    libusb_clear_halt(h, EP1_IN);
     return primed_start_and_read(h, len, timeout_ms);
 }
 
