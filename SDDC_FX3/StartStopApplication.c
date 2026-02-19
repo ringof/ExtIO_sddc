@@ -13,8 +13,10 @@
 
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
+#include "Si5351.h"
 uint32_t glDMACount;
 uint16_t glLastPibArg;
+static volatile CyBool_t glPibNotified = CyFalse;  /* one-shot flag for PIB error queue event */
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -31,22 +33,31 @@ void StartApplication(void);
 void StopApplication(void);
 
 const char* glBusSpeed[] = { "Not Connected", "Full ", "High ", "Super" };
-char* glCyFxGpifName = { "HF103.h" };
+static const char *const glCyFxGpifName = { "HF103.h" };
 
 CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;   /* DMA Channel handle for P2U transfer. */
 
 extern CyU3PQueue glEventAvailable;
 
+/* PIB interrupt context — must not block or call CyU3PThread* APIs.
+ * During sustained overflow PIB errors fire at ~64 MHz; the queue send
+ * overhead per invocation starves the application thread.  Use a one-shot
+ * flag so only the first error queues an event — subsequent interrupts
+ * just bump the counter (cheap).  The flag is reset in StartGPIF(). */
 void PibErrorCallback(CyU3PPibIntrType cbType, uint16_t cbArg) {
 	if (cbType == CYU3P_PIB_INTR_ERROR)
 	{
 		glCounter[0]++;
 		glLastPibArg = cbArg;
-		uint32_t evt = (2 << 24) | cbArg;
-		CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
+		if (!glPibNotified)
+		{
+			uint32_t evt = (2 << 24) | cbArg;
+			CyU3PQueueSend(&glEventAvailable, &evt, CYU3P_NO_WAIT);
+			glPibNotified = CyTrue;
+		}
 	}
 }
-/* Callback funtion for the DMA event notification. */
+/* DMA system thread context — keep lightweight, avoid long operations. */
 void DmaCallback (
         CyU3PDmaChannel   *chHandle, /* Handle to the DMA channel. */
         CyU3PDmaCbType_t  type,      /* Callback type.             */
@@ -62,9 +73,46 @@ void DmaCallback (
 }
 
 
+/*
+ * GpifPreflightCheck — verify hardware preconditions before starting
+ * the GPIF state machine.
+ *
+ * The GPIF II state machine in this design is synchronous: it clocks
+ * data in on edges of the external ADC sample clock, which is generated
+ * by the Si5351 PLL.  If the SM is started without that clock, it will
+ * stall in a read state waiting for DATA_CNT_HIT, which never fires.
+ * The SM has no state-count timeout (STATE_COUNT_CONFIG = 0), so the
+ * wedge is permanent — only CyU3PGpifDisable(CyTrue) can recover it.
+ *
+ * This function is called from any code path that is about to assert
+ * FW_TRG and begin data flow (currently: the STARTFX3 vendor command).
+ * It is intentionally NOT called from StartApplication(), because that
+ * path loads the SM into IDLE where it waits for FW_TRG — the external
+ * clock is not needed until FW_TRG transitions the SM into read states.
+ *
+ * Today this only checks the Si5351 PLL lock.  Future checks (e.g. DMA
+ * health, VBUS level) can be added here without changing call sites.
+ *
+ * Returns CyTrue  if all checks pass and GPIF may be started.
+ * Returns CyFalse if any check fails — caller must NOT start GPIF.
+ */
+CyBool_t GpifPreflightCheck(void)
+{
+	if (!si5351_clk0_enabled()) {
+		DebugPrint(4, "\r\nPreflight FAIL: ADC clock not enabled");
+		return CyFalse;
+	}
+	if (!si5351_pll_locked()) {
+		DebugPrint(4, "\r\nPreflight FAIL: Si5351 PLL_A not locked");
+		return CyFalse;
+	}
+	return CyTrue;
+}
+
 CyU3PReturnStatus_t StartGPIF(void)
 {
 	CyU3PReturnStatus_t Status;
+	glPibNotified = CyFalse;  /* re-arm PIB error notification for this session */
 	DebugPrint(4, "\r\nGPIF file %s", glCyFxGpifName);
 	Status = CyU3PGpifLoad(&CyFxGpifConfig);
 	CheckStatus("GpifLoad", Status);
@@ -101,6 +149,7 @@ void StartApplication ( void ) {
     glDMACount= 0;
     glCounter[0] = glCounter[1] = glCounter[2] = 0;
     glLastPibArg = 0;
+    glPibNotified = CyFalse;
     /* Consumer endpoint configuration */
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epCfg);
     CheckStatus("CyU3PSetEpConfig Consumer", Status);

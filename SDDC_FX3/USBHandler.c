@@ -20,6 +20,9 @@
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
 extern void StopApplication(void);
+extern CyU3PReturnStatus_t StartGPIF(void);
+extern CyBool_t GpifPreflightCheck(void);  /* StartStopApplication.c */
+extern const CyU3PGpifConfig_t CyFxGpifConfig;
 extern CyU3PReturnStatus_t SetUSBdescriptors(uint8_t hwconfig);
 
 // Declare external data
@@ -34,6 +37,8 @@ extern uint8_t glBufDebug[MAXLEN_D_USB];
 extern uint32_t glCounter[20];
 extern uint16_t glLastPibArg;
 extern uint32_t glDMACount;
+extern uint8_t glWdgMaxRecovery;
+extern uint8_t glWdgRecoveryCount;
 
 
 
@@ -41,9 +46,8 @@ extern uint32_t glDMACount;
 
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
-CyU3PDmaChannel glGPIF2USB_Handle;
-uint8_t  *glEp0Buffer = 0;              /* Buffer used to handle vendor specific control requests. */
-uint8_t  glVendorRqtCnt = 0;
+static uint8_t  *glEp0Buffer = 0;       /* Buffer used to handle vendor specific control requests. */
+static uint8_t  glVendorRqtCnt = 0;
 
 #ifdef TRACESERIAL
 
@@ -71,12 +75,17 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 			break;
 
 		case GPIOFX3:
-			DebugPrint(4, "\t0x%x", * (uint32_t *) pdata);
+			{
+				uint32_t val; memcpy(&val, pdata, 4);
+				DebugPrint(4, "\t0x%x", val);
+			}
 			break;
 
-
 		case STARTADC:
-			DebugPrint(4, "%d", * (uint32_t *) pdata);
+			{
+				uint32_t val; memcpy(&val, pdata, 4);
+				DebugPrint(4, "%d", val);
+			}
 			break;
 
 		case STARTFX3:
@@ -93,7 +102,7 @@ TraceSerial( uint8_t  bRequest, uint8_t * pdata, uint16_t wValue, uint16_t wInde
 }
 #endif
 
-/* Callback to handle the USB setup requests. */
+/* USB driver thread context — blocking calls (e.g. CyU3PThreadSleep) are safe. */
 CyBool_t
 CyFxSlFifoApplnUSBSetupCB (
         uint32_t setupdat0,
@@ -137,28 +146,30 @@ CyFxSlFifoApplnUSBSetupCB (
             isHandled = CyTrue;
         }
 
-        /* CLEAR_FEATURE request for endpoint is always passed to the setup callback
-         * regardless of the enumeration model used. When a clear feature is received,
-         * the previous transfer has to be flushed and cleaned up. This is done at the
-         * protocol level. So flush the EP memory and reset the DMA channel associated
-         * with it. If there are more than one EP associated with the channel reset both
-         * the EPs. The endpoint stall and toggle / sequence number is also expected to be
-         * reset. Return CyFalse to make the library clear the stall and reset the endpoint
-         * toggle. Or invoke the CyU3PUsbStall (ep, CyFalse, CyTrue) and return CyTrue.
-         * Here we are clearing the stall. */
+        /* CLEAR_FEATURE(ENDPOINT_HALT) — clear stall/toggle, then flush.
+         *
+         * This path fires when the host sends libusb_clear_halt() at
+         * device-open time to restart the XHCI endpoint ring.
+         *
+         * CyU3PUsbStall(ep, CyFalse, CyTrue) is required — without it
+         * (ACK-only) the USB controller never re-arms the endpoint and
+         * all bulk transfers fail with IO errors.  However, on a
+         * non-stalled endpoint it has side-effects that corrupt
+         * internal USB controller state across repeated open/close
+         * cycles.  CyU3PUsbFlushEp immediately after clears any stale
+         * FIFO state left by the stall-clear, making the endpoint
+         * ready for the next STARTFX3.
+         *
+         * Do NOT add CyU3PUsbResetEp or CyU3PDmaMultiChannelReset
+         * here — those desync the data toggle or corrupt the DMA
+         * pipeline (see STARTFX3 comment block). */
         if ((bTarget == CY_U3P_USB_TARGET_ENDPT) && (bRequest == CY_U3P_USB_SC_CLEAR_FEATURE)
                 && (wValue == CY_U3P_USBX_FS_EP_HALT))
         {
             if (glIsApplnActive)
             {
-                if (wIndex == CY_FX_EP_CONSUMER)
-                {
-                    CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
-                    CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
-                    CyU3PUsbResetEp (CY_FX_EP_CONSUMER);
-                    CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU,FIFO_DMA_RX_SIZE,0);
-                }
                 CyU3PUsbStall (wIndex, CyFalse, CyTrue);
+                CyU3PUsbFlushEp (CY_FX_EP_CONSUMER);
                 isHandled = CyTrue;
             }
         }
@@ -177,7 +188,7 @@ CyFxSlFifoApplnUSBSetupCB (
 			case GPIOFX3:
 					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
 					{
-						uint32_t mdata = * (uint32_t *) &glEp0Buffer[0];
+						uint32_t mdata; memcpy(&mdata, glEp0Buffer, 4);
 						rx888r2_GpioSet(mdata);
 						isHandled = CyTrue;
 					}
@@ -187,10 +198,43 @@ CyFxSlFifoApplnUSBSetupCB (
 					if(CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL)== CY_U3P_SUCCESS)
 					{
 						uint32_t freq;
-						freq = *(uint32_t *) &glEp0Buffer[0];
+						memcpy(&freq, glEp0Buffer, 4);
+						/* If the GPIF SM is actively streaming, force-stop
+						 * it before reprogramming the Si5351 ADC clock.
+						 * Changing the clock while the SM is running will
+						 * wedge the PIB (no clock edges for soft-stop).
+						 * Host should send STOPFX3 first; this is a safety
+						 * net against a clock-pull wedge if it doesn't. */
+						{
+							uint8_t smState = 0xFF;
+							CyU3PGpifGetSMState(&smState);
+							if (smState != 0 && smState != 0xFF) {
+								DebugPrint(4, "\r\nSTARTADC: implicit GPIF stop (SM=%d)", smState);
+								CyU3PGpifControlSWInput(CyFalse);
+								CyU3PGpifDisable(CyTrue);
+								CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+								CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+							}
+						}
 						apiRetStatus = si5351aSetFrequencyA(freq);
 						if (apiRetStatus == CY_U3P_SUCCESS) {
-							CyU3PThreadSleep(1000);
+							/* Poll PLL lock — typically <10 ms for Si5351.
+							 * Max 100 iterations x 1 ms = 100 ms worst-case.
+							 * This keeps the USB thread unblocked so STARTFX3
+							 * arriving shortly after STARTADC is not delayed.
+							 *
+							 * We use si5351_pll_locked() rather than
+							 * GpifPreflightCheck() because we just called
+							 * si5351aSetFrequencyA(freq) with freq > 0, so
+							 * glAdcClockEnabled is already CyTrue — the
+							 * extra clk0_enabled check would be redundant. */
+							{
+								int i;
+								for (i = 0; i < 100; i++) {
+									CyU3PThreadSleep(1);
+									if (si5351_pll_locked()) break;
+								}
+							}
 							isHandled = CyTrue;
 						} else {
 							DebugPrint(4, "STARTADC si5351 failed: %d", apiRetStatus);
@@ -258,6 +302,11 @@ CyFxSlFifoApplnUSBSetupCB (
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
+						case WDG_MAX_RECOV:
+							glWdgMaxRecovery = (uint8_t)(wValue & 0xFF);
+							glVendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
 						default:
 							/* Data phase already ACKed; stall status to
 							   signal the unrecognized wIndex to the host. */
@@ -270,23 +319,74 @@ CyFxSlFifoApplnUSBSetupCB (
     	 	case STARTFX3:
 					CyU3PUsbLPMDisable();
     	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-    	 		    CyU3PGpifControlSWInput ( CyFalse );
-    	 		 	CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);  // Reset existing channel
-					apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE,0); //start
-					if (apiRetStatus == CY_U3P_SUCCESS)
-					{
-						isHandled = CyTrue;
-					}
-					CyU3PGpifControlSWInput ( CyTrue );
+				/*
+				 * Preflight: verify the ADC clock is running before
+				 * starting the GPIF state machine.  The SM is clocked
+				 * by the Si5351 output; without it the SM will wedge
+				 * in a read state with no timeout-based recovery.
+				 * See GpifPreflightCheck() in StartStopApplication.c
+				 * and si5351_pll_locked() in Si5351.c for details.
+				 */
+				if (!GpifPreflightCheck()) {
+					/* Data phase already ACKed by GetEP0Data;
+					 * stall status phase so host sees rejection. */
+					CyU3PUsbStall(0, CyTrue, CyFalse);
+					isHandled = CyTrue;
 					break;
+				}
+				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
+				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
+				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
+				    * left by the previous session; without this, zombie descriptors
+				    * accumulate across rapid stop/start cycles until the USB controller's
+				    * descriptor pool is exhausted and EP0 locks up. */
+				/* DO NOT call CyU3PUsbResetEp() here.  It resets the FX3-side
+				 * data toggle / sequence number without the host knowing, which
+				 * desyncs the endpoint and silently kills all subsequent bulk
+				 * transfers (dma_completions=0, PIB errors climb, GPIF stuck
+				 * at 255).  The host-side libusb_clear_halt() at device open
+				 * already handles the one-time toggle sync.  This call was
+				 * added in 6b35bcc, reverted in 86a7e26, re-added in 2482476,
+				 * and broke streaming every time.  See soak_test evidence:
+				 * 1a97a30 (without) = 60 MiB/s; 2482476 (with) = 0 bytes.
+				 * If you think you need this back, you must first identify
+				 * what is actually wrong — the symptom it masked was an
+				 * xHCI endpoint-ring issue fixed host-side by clear_halt. */
+				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
+				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
+				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+				if (apiRetStatus == CY_U3P_SUCCESS) {
+					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
+					if (apiRetStatus == CY_U3P_SUCCESS) {
+						CyU3PGpifControlSWInput(CyTrue);
+					}
+				}
+				if (apiRetStatus != CY_U3P_SUCCESS) {
+					/* DMA or GPIF setup failed — report to host and
+					 * ensure EP0 is left in a clean state. */
+					DebugPrint(4, "\r\nSTARTFX3 fail: %d", apiRetStatus);
+					CyU3PUsbStall(0, CyTrue, CyFalse);
+				}
+				isHandled = CyTrue;  /* always — GetEP0Data already consumed data phase */
+				{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+				  DebugPrint(4,"\r\nGO s=%d r=%d",_s,apiRetStatus); }
+				break;
 
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					CyU3PGpifControlSWInput ( CyFalse   );
-					CyU3PThreadSleep(10);
+					CyU3PGpifControlSWInput(CyFalse);  /* deassert FW_TRG before disable */
+					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
+					/* Do NOT call CyU3PGpifLoad() here — it re-enables the GPIF
+					 * block, causing the SM to auto-advance.  STARTFX3 will reload
+					 * the waveform via StartGPIF() when streaming resumes. */
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
+					CyU3PThreadSleep(1);  /* let DMA controller quiesce before next STARTFX3 */
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
+					glWdgRecoveryCount = 0;  /* reset recovery cap */
+					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
+					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;
 					break;
 
@@ -331,7 +431,10 @@ CyFxSlFifoApplnUSBSetupCB (
 							if (len > CYFX_SDRAPP_MAX_EP0LEN - 1)
 								len = CYFX_SDRAPP_MAX_EP0LEN - 1;
 							memcpy(glEp0Buffer, glBufDebug, len);
-							glDebTxtLen=0;
+							uint16_t remain = glDebTxtLen - len;
+							if (remain > 0)
+								memmove(glBufDebug, glBufDebug + len, remain);
+							glDebTxtLen = remain;
 							CyU3PVicEnableInterrupts(intMask);
 							glEp0Buffer[len] = '\0';
 							CyU3PUsbSendEP0Data (len + 1, glEp0Buffer);
@@ -360,7 +463,7 @@ CyFxSlFifoApplnUSBSetupCB (
 }
 
 
-/* This is the callback function to handle the USB events. */
+/* USB driver thread context — blocking calls are safe. */
 void USBEventCallback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
 {
 	uint32_t event = evtype;
@@ -397,13 +500,10 @@ void USBEventCallback ( CyU3PUsbEventType_t evtype, uint16_t evdata)
             break;
     }
 }
-/* Callback function to handle LPM requests from the USB 3.0 host. This function is invoked by the API
-   whenever a state change from U0 -> U1 or U0 -> U2 happens. If we return CyTrue from this function, the
-   FX3 device is retained in the low power state. If we return CyFalse, the FX3 device immediately tries
-   to trigger an exit back to U0.
-   This application does not have any state in which we should not allow U1/U2 transitions; and therefore
-   the function always return CyTrue.
- */
+/* USB driver thread context.
+   Invoked on U0 -> U1/U2 state change.  Return CyTrue to stay in low-power
+   state, CyFalse to immediately exit back to U0.  This application always
+   allows U1/U2 transitions. */
 CyBool_t  LPMRequestCallback ( CyU3PUsbLinkPowerMode link_mode)
 {
 	return CyTrue;

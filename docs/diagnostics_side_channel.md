@@ -4,7 +4,7 @@
 >
 > The core diagnostic side-channel is live as **GETSTATS (`0xB3`)**, a
 > 20-byte EP0 vendor request returning DMA counts, GPIF state, PIB
-> error counts, I2C failure counts, EP underrun counts, and Si5351 PLL status.  See
+> error counts, I2C failure counts, streaming fault counts, and Si5351 PLL status.  See
 > [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md) for
 > the implemented wire format and host usage.
 >
@@ -68,7 +68,7 @@ and alignment ambiguity on the ARM926EJ-S target.
 | 5--8   | 4    | PIB error count        | `pib_overrun_count` | **Implemented** (combined, not split by type) |
 | 9--10  | 2    | Last PIB error arg     | *(not in proposal)* | **Implemented** (bonus diagnostic) |
 | 11--14 | 4    | I2C failure count      | *(not in proposal)* | **Implemented** (bonus diagnostic) |
-| 15--18 | 4    | EP underrun count      | `usb_ep_underrun` | **Implemented** |
+| 15--18 | 4    | Streaming fault count  | `streaming_faults` | **Implemented** (EP underruns + watchdog recoveries) |
 | 19     | 1    | Si5351 status (reg 0)  | `si5351_status`   | **Implemented** |
 
 **Not yet implemented** from the original proposal:
@@ -98,7 +98,7 @@ typedef struct fx3_diag {
     /* ---- Error counters ---- */
     uint16_t pib_overrun_count; /* PIB write overrun events (thread 0+1) */
     uint16_t pib_underrun_count;/* PIB read underrun events */
-    uint16_t usb_ep_underrun;   /* USB endpoint underrun events */
+    uint16_t streaming_faults;  /* EP underruns + watchdog recoveries */
     uint16_t usb_phy_errors;    /* USB 3.0 PHY error count (8b10b, CRC) */
     uint16_t usb_link_errors;   /* USB 3.0 link error count */
 
@@ -124,7 +124,7 @@ count) as a superset.
 | `timestamp_ms` | `CyU3PGetTime()` from ThreadX | No | Host-side timestamps suffice |
 | `pib_overrun_count` | `glCounter[0]` via `PibErrorCallback` | **Yes** | Offset 5--8 (combined, not split by type) |
 | `pib_underrun_count` | `PibErrorCallback` on `RD_UNDERRUN` | No | Folded into combined PIB count |
-| `usb_ep_underrun` | `glCounter[2]` via `USBEventCallback` | **Yes** | Offset 15--18 |
+| `streaming_faults` | `glCounter[2]` via `USBEventCallback` + watchdog | **Yes** | Offset 15--18 |
 | `usb_phy_errors` | `CyU3PUsbGetErrorCounts(&phy, &link)` | No | SDK API available, not yet wired |
 | `usb_link_errors` | Same API, second output | No | SDK API available, not yet wired |
 | `gpif_state` | `CyU3PGpifGetSMState(&state)` | **Yes** | Offset 4 |
@@ -269,9 +269,9 @@ if diag.pib_overrun_count > prev.pib_overrun_count:
     # GPIF is writing faster than DMA can drain
     # ADC clock may be too fast, or USB is congested
 
-if diag.usb_ep_underrun > prev.usb_ep_underrun:
-    # USB endpoint ran out of data (transient)
-    # May cause a glitch in the sample stream
+if diag.streaming_faults > prev.streaming_faults:
+    # Streaming pipeline fault (EP underrun or watchdog recovery)
+    # May cause a glitch or gap in the sample stream
 
 if diag.usb_phy_errors > threshold:
     # USB cable/connector quality issue
@@ -321,7 +321,7 @@ signal processing pipeline:
 | USB overrun | Dropped sample blocks, periodic clicks in audio | `pib_overrun_count` increasing |
 | USB link errors | Bit errors in sample data, CRC failures | `usb_phy_errors`, `usb_link_errors` |
 | GPIF stall | Stream stops, application hangs | `gpif_state` stuck in BUSY/WAIT |
-| Endpoint underrun | Gap in sample stream | `usb_ep_underrun` increasing |
+| Streaming fault | Gap in sample stream | `streaming_faults` increasing |
 
 A host application like HDSDR or SDR# (via ExtIO) could use this
 telemetry to:
@@ -352,7 +352,7 @@ void fx3_diag_snapshot(fx3_diag_t *diag)
 
     diag->pib_overrun_count  = glPibOverrunCount;   /* new global */
     diag->pib_underrun_count = glPibUnderrunCount;  /* new global */
-    diag->usb_ep_underrun    = glEpUnderrunCount;   /* new global */
+    diag->streaming_faults   = glCounter[2];         /* EP underruns + watchdog */
 
     CyU3PUsbGetErrorCounts(&diag->usb_phy_errors,
                            &diag->usb_link_errors);

@@ -26,13 +26,10 @@ extern CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Th
 extern void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
 CyBool_t glDebugTxEnabled = CyFalse;	// Set true once I can output messages to the Console
-CyU3PDmaChannel glUARTtoCPU_Handle;		// Handle needed by Uart Callback routine
-char glConsoleInBuffer[32];				// Buffer for user Console Input
-uint32_t glConsoleInIndex;				// Index into ConsoleIn buffer
+static CyU3PDmaChannel glUARTtoCPU_Handle;	// Handle needed by Uart Callback routine
+static char glConsoleInBuffer[32];			// Buffer for user Console Input
+static uint32_t glConsoleInIndex;			// Index into ConsoleIn buffer
 uint32_t glCounter[20];					// Counters used to monitor GPIF
-uint32_t glMaxClockValue = 10;
-uint32_t glClockValue;	// Used to Set/Display GPIF clock
-uint8_t glToggle;
 extern uint32_t glQevent __attribute__ ((aligned (32)));
 
 CyBool_t glFlagDebug = false;
@@ -58,15 +55,22 @@ const char* EventName[] = {
 
 #ifdef TRACESERIAL
 // For Debug and display the name of the FX3Command
+// Slots 0xB4, 0xB5, 0xB8: removed tuner commands (TUNERINIT, TUNERTUNE,
+// TUNERSTDBY) from the R82xx driver (GPL, removed).  Kept as hex
+// placeholders so the trace table indices stay aligned with bRequest codes.
 const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 "STARTFX3", "STOPFX3", "TESTFX3", "GPIOFX3", "I2CWFX3","I2CRFX3", "0xB0", "RESETFX3",
 "STARTADC", "GETSTATS", "0xB4","0xB5","SETARGFX3","0xB7", "0xB8","0xB9","READINFODEBUG"
 };
 
 // For Debug and display the name of the SETARGFX3 argument
+// Indices 1-4 were R82xx tuner parameters (removed with GPL driver).
+// Indices 5-9 were never assigned.
+// Indices 12-13 (PRESELECTOR, VHF_ATTENUATOR) are heritage names from the
+// ExtIO host DLL; not implemented in this firmware.
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
-"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR"
+"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR","WDG_MAX_RECOV"
 };
 #endif
 
@@ -253,7 +257,11 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 		va_end (argp);
 		if ( stat == CY_U3P_SUCCESS )
 		{
-			if (glDebTxtLen+len > MAXLEN_D_USB) CyU3PThreadSleep(100);
+			/* Never sleep here — this function is called from the USB
+			 * EP0 callback (STARTFX3/STOPFX3 handlers) in the USB
+			 * thread context.  Sleeping blocks the EP0 response and
+			 * causes host-side timeouts.  If the buffer is full, just
+			 * drop the message silently. */
 			uint32_t intMask = CyU3PVicDisableAllInterrupts();
 			if (glDebTxtLen+len < MAXLEN_D_USB)
 			{
@@ -265,8 +273,8 @@ void DebugPrint2USB ( uint8_t priority, char *msg, ...)
 }
 
 
+/* UART driver thread context — avoid heavy operations. */
 void UartCallback(CyU3PUartEvt_t Event, CyU3PUartError_t Error)
-// Handle characters typed in by the developer
 {
 	CyU3PDmaBuffer_t ConsoleInDmaBuffer;
 	char InputChar;

@@ -59,7 +59,7 @@ scientific measurement, and general RF experimentation.
 | **Variable gain amp** | AD8370 | 8-bit programmable-gain amplifier |
 | **VHF tuner** | R828D | Silicon tuner IC for VHF/UHF (detected at I2C address 0x74 during hardware identification; R82xx driver was removed from this fork due to GPL licensing) |
 | **HF LNA** | JFET front-end | Bias-controlled via `BIAS_HF` GPIO |
-| **Red LED** | GPIO 21 | Status indicator; used for error blink on fatal faults |
+| **Blue LED** | GPIO 21 | Status indicator; used for error blink on fatal faults |
 
 ### Signal path
 
@@ -179,10 +179,42 @@ the GPIF pins.
 ### Software control of GPIF
 
 The firmware controls the GPIF via a software input signal
-(`CyU3PGpifControlSWInput`).  When the host sends `STARTFX3`, the
-firmware asserts the software input to transition the state machine out
-of IDLE and begin reading from the ADC.  When `STOPFX3` arrives, the
-software input is de-asserted and the state machine returns to IDLE.
+(`CyU3PGpifControlSWInput`).  The full start/stop lifecycle is:
+
+**STARTFX3 (start streaming):**
+
+1. **Preflight check** (`GpifPreflightCheck()` in
+   `StartStopApplication.c`): verify Si5351 CLK0 is enabled and PLL A
+   is locked.  If either fails, the command is rejected with an EP0
+   STALL -- the SM would wedge permanently without the external clock
+   since it has no state-count timeout.
+2. `CyU3PGpifDisable(CyTrue)` -- force-stop any stuck SM from a prior
+   run.
+3. `CyU3PDmaMultiChannelReset()` + `SetXfer()` -- reset and re-arm the
+   DMA channel.
+4. `StartGPIF()` -- reload the GPIF waveform (`CyU3PGpifLoad`) and
+   start the SM in IDLE (`CyU3PGpifSMStart`).
+5. `CyU3PGpifControlSWInput(CyTrue)` -- assert FW_TRG to transition
+   the SM from IDLE into read states; data begins flowing.
+
+**STOPFX3 (stop streaming):**
+
+1. `CyU3PGpifControlSWInput(CyFalse)` -- de-assert FW_TRG.
+2. `CyU3PGpifDisable(CyTrue)` -- force-disable the GPIF block.  The
+   waveform is **not** reloaded here (calling `CyU3PGpifLoad` would
+   re-enable the block and cause the SM to auto-advance).
+3. `CyU3PDmaMultiChannelReset()` -- reset DMA.
+4. `CyU3PUsbFlushEp()` -- flush EP1 IN.
+
+**GPIF watchdog (background recovery):**
+
+The application thread monitors `glDMACount` every 100 ms while
+streaming is active.  If the count stalls for 3 consecutive polls
+(300 ms) with the SM in a BUSY/WAIT state (5, 7, 8, 9), the watchdog
+tears down and rebuilds the pipeline -- same sequence as STOP + START
+but initiated automatically.  If the PLL has lost lock, the watchdog
+leaves the pipeline stopped and waits for the host to reconfigure.
+Each recovery increments `glCounter[2]` (visible via `GETSTATS`).
 
 ---
 
@@ -298,6 +330,7 @@ loop.  It:
 2. Initializes USB
 3. Waits for enumeration
 4. Polls an event queue every 100 ms for debug commands and callbacks
+5. Runs the GPIF watchdog (monitors `glDMACount` for stalls during streaming)
 
 ### RTOS primitives used by this firmware
 
@@ -472,7 +505,8 @@ Host enumerates device
   │         └─ glIsApplnActive = true
   │
   └─ Application thread enters main loop
-       └─ Every 100 ms: poll glEventAvailable queue, process events
+       ├─ Every 100 ms: poll glEventAvailable queue, process events
+       └─ GPIF watchdog: detect DMA stalls, auto-recover if PLL locked
 ```
 
 ---
@@ -488,15 +522,15 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 
 | bRequest | Name | Dir | wValue | wIndex | Data | Description |
 |----------|------|-----|--------|--------|------|-------------|
-| 0xAA | STARTFX3 | OUT | -- | -- | 4 B | Start GPIF streaming; assert software input, reset and start DMA |
-| 0xAB | STOPFX3 | OUT | -- | -- | 4 B | Stop GPIF streaming; de-assert software input, reset DMA, flush EP |
+| 0xAA | STARTFX3 | OUT | -- | -- | 4 B | Start GPIF streaming; preflight-checks PLL lock, force-stops any stuck SM, resets DMA, reloads waveform, asserts FW_TRG; STALLs if PLL unlocked |
+| 0xAB | STOPFX3 | OUT | -- | -- | 4 B | Stop GPIF streaming; de-asserts FW_TRG, force-disables GPIF (no waveform reload), resets DMA, flushes EP1 |
 | 0xAC | TESTFX3 | IN | debug | -- | 4 B | Query device info; returns [glHWconfig, FW_major, FW_minor, glVendorRqtCnt]; wValue=1 enables debug mode |
 | 0xAD | GPIOFX3 | OUT | -- | -- | 4 B | Set GPIO state; payload is a 32-bit bitmask interpreted by `rx888r2_GpioSet()` |
 | 0xAE | I2CWFX3 | OUT | I2C addr | reg addr | N B | Write N bytes to I2C device at wValue, register wIndex |
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 4 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
-| 0xB3 | GETSTATS | IN | 0 | 0 | 20 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), EP underruns (4), Si5351 status (1) |
+| 0xB3 | GETSTATS | IN | 0 | 0 | 20 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), watchdog recoveries (4), Si5351 status (1) |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | 1 B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255) |
 | 0xBA | READINFODEBUG | IN | char | -- | 100 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 
@@ -512,12 +546,11 @@ For recognized commands, `isHandled` is set to `CyTrue` and the USB
 stack sends a successful status phase.  For unrecognized `bRequest`
 values, the firmware stalls EP0 and logs the code via `CyU3PDebugPrint`.
 
-The `SETARGFX3` handler has a protocol oddity: it calls
-`CyU3PUsbGetEP0Data()` unconditionally (ACKing the data phase) before
-checking whether `wIndex` identifies a valid argument.  For unknown
-argument IDs, the data phase is already complete but `isHandled` remains
-false, causing a STALL on the status phase -- a DATA-acked-but-STATUS-
-stalled protocol violation.
+The `SETARGFX3` handler calls `CyU3PUsbGetEP0Data()` unconditionally
+(ACKing the data phase) before checking whether `wIndex` identifies a
+valid argument.  For unknown argument IDs, the handler explicitly stalls
+EP0 via `CyU3PUsbStall()` and sets `isHandled = CyTrue`, producing a
+single clean STALL that the host sees as a rejected command.
 
 ---
 
@@ -535,7 +568,7 @@ Each pin is configured as a simple push-pull output during
 | 18 | BIAS_VHF | VHF LNA bias (silicon MMIC) |
 | 19 | BIAS_HF | HF LNA bias (JFET) |
 | 20 | RANDO | ADC randomizer dither enable |
-| 21 | LED_RED | Red status LED |
+| 21 | LED_BLUE | Blue status LED |
 | 24 | PGA | Programmable gain amplifier enable (**inverted**: GPIO high = PGA off) |
 | 26 | ATT_DATA | Serial data to PE4304 and AD8370 (shared) |
 | 27 | ATT_CLK | Serial clock to PE4304 and AD8370 (shared) |
@@ -557,9 +590,9 @@ specific function:
 | 7 | RANDO | High = randomizer on |
 | 8 | BIAS_HF | High = HF LNA biased |
 | 9 | BIAS_VHF | High = VHF LNA biased |
-| 10 | LED_YELLOW | High (but **not wired** -- no GPIO mapped) |
-| 11 | LED_RED | High = LED on |
-| 12 | LED_BLUE | High (but **not wired** -- no GPIO mapped) |
+| 10 | *(unused)* | -- |
+| 11 | LED_BLUE | High = blue LED on (GPIO 21) |
+| 12 | *(unused)* | -- |
 | 15 | VHF_EN | High = VHF path enabled |
 | 16 | PGA_EN | **Inverted**: bit set = PGA disabled |
 

@@ -1,0 +1,255 @@
+# SDDC_FX3 Test Tools
+
+Host-side test tools for validating the SDDC_FX3 firmware on RX888mk2
+hardware.
+
+## Prerequisites
+
+```
+sudo apt install libusb-1.0-0-dev
+git submodule update --init       # pulls rx888_tools for firmware upload
+```
+
+## Building
+
+```
+cd tests
+make            # builds fx3_cmd and rx888_stream
+make fx3_cmd    # builds just the vendor command exerciser
+make clean      # removes build artifacts
+```
+
+## fx3_cmd -- Vendor Command Exerciser
+
+Sends individual USB vendor requests to an RX888mk2 and reports
+PASS/FAIL.  The device must already have firmware loaded (PID 0x00F1).
+
+### Basic commands
+
+```
+./fx3_cmd test                          # probe device info
+./fx3_cmd gpio 0x800                    # set GPIO word (LED_BLUE on)
+./fx3_cmd adc 64000000                  # set ADC clock to 64 MHz
+./fx3_cmd att 15                        # set attenuator (0-63)
+./fx3_cmd vga 128                       # set VGA gain (0-255)
+./fx3_cmd wdg_max 5                     # set watchdog max recovery count (0=unlimited)
+./fx3_cmd start                         # start GPIF streaming
+./fx3_cmd stop                          # stop GPIF streaming
+./fx3_cmd i2cr 0xC0 0 1                 # I2C read (Si5351 status)
+./fx3_cmd i2cw 0xC0 3 0xFF              # I2C write
+./fx3_cmd raw 0xCC                      # send arbitrary vendor request
+./fx3_cmd stats                         # read GETSTATS counters
+./fx3_cmd reset                         # reboot FX3 to bootloader
+```
+
+### Automated test commands
+
+Each prints `PASS`/`FAIL` and exits 0/1:
+
+```
+./fx3_cmd ep0_overflow                  # wLength > 64 must STALL (#6)
+./fx3_cmd oob_brequest                  # bRequest=0xCC bounds check (#21)
+./fx3_cmd oob_setarg                    # SETARGFX3 wIndex=0xFFFF (#20)
+./fx3_cmd console_fill                  # 35 chars to 32-byte buffer (#13)
+./fx3_cmd debug_race                    # 50 rapid debug I/O cycles (#8)
+./fx3_cmd debug_poll                    # debug console "?" command (#26)
+./fx3_cmd pib_overflow                  # PIB error detection (#10)
+./fx3_cmd stack_check                   # stack watermark > 25% (#12)
+./fx3_cmd stats_i2c                     # I2C failure counter
+./fx3_cmd stats_pib                     # PIB error counter
+./fx3_cmd stats_pll                     # Si5351 PLL lock status
+./fx3_cmd stop_gpif_state               # GPIF SM stops correctly
+./fx3_cmd stop_start_cycle              # 5x STOP+START with data verify
+./fx3_cmd pll_preflight                 # STARTFX3 rejected without clock
+./fx3_cmd wedge_recovery                # DMA wedge + STOP+START recovery
+./fx3_cmd clock_pull                    # pull clock mid-stream, verify recovery
+./fx3_cmd freq_hop                      # rapid ADC frequency hopping
+./fx3_cmd ep0_stall_recovery            # EP0 stall then immediate use
+./fx3_cmd double_stop                   # back-to-back STOPFX3
+./fx3_cmd double_start                  # back-to-back STARTFX3
+./fx3_cmd i2c_under_load                # I2C read while streaming
+./fx3_cmd sustained_stream              # 30s continuous streaming check
+./fx3_cmd abandoned_stream              # simulate host crash (no STOPFX3)
+```
+
+### Consumer-failure tests
+
+The `abandoned_stream` test (and future variants) exercises the most
+common real-world failure mode: **the host application dies without
+sending STOPFX3**.
+
+When an SDR application crashes, is `kill -9`'d, or loses USB
+connectivity mid-stream, the FX3 is left streaming into the void.  DMA
+buffers fill, the GPIF stalls, and the watchdog fires.  But recovery is
+futile — there is no consumer, so the freshly-recovered DMA channel
+stalls again within milliseconds.  Without a recovery cap, the firmware
+loops forever: detect stall → recover → stall → recover → …
+
+This is not an edge case.  SDR applications are complex, host-side
+software, and unclean exits are routine:
+
+- User hits Ctrl-C on a streaming application
+- Application segfaults during DSP processing
+- USB hub glitch drops the device momentarily
+- System suspend/resume while streaming
+- OOM killer takes the application
+
+The `abandoned_stream` test simulates this directly:
+
+1. Starts ADC + GPIF streaming at 64 MHz
+2. **Does not read EP1.  Does not send STOPFX3.**
+3. Waits 10 seconds, taking GETSTATS snapshots at t=0, t=5s, t=10s
+4. Checks whether `streaming_faults` plateaued (recovery capped) or is
+   still climbing (unbounded loop)
+5. Sends STOPFX3 to clean up, verifies EP0 still responds
+
+**Before `WDG_MAX_RECOV` fix**: FAIL — faults grow at ~1/sec in both
+windows.
+**After fix**: PASS — faults plateau once the cap is reached.
+
+The soak harness assigns this scenario a high weight (15) — tied for
+second-highest — reflecting the likelihood of consumer-side failures in
+the field.
+
+Future consumer-failure variants to consider:
+
+- **Partial-read abandon**: read some EP1 data, then stop reading (simulates
+  application hang rather than crash)
+- **Rapid reconnect**: abandon stream, close/reopen USB handle, restart
+  (simulates application restart without device reset)
+- **Suspend/resume**: abandon stream, issue USB reset, verify clean restart
+
+All follow the same pattern: start streaming → simulate failure → observe
+via GETSTATS → clean up → verify EP0 alive.
+
+### Interactive debug console
+
+```
+./fx3_cmd debug
+```
+
+Opens a live debug console over USB:
+
+- Enables debug mode via `TESTFX3 wValue=1`
+- Puts stdin in raw mode (character-at-a-time, no echo)
+- Polls `READINFODEBUG` every 50 ms for firmware output
+- Typed characters are sent to the firmware; Enter sends CR
+- Ctrl-C to quit
+
+#### Local command escape (`!`)
+
+Type `!` to switch to local command mode.  This lets you run any
+`fx3_cmd` subcommand without leaving the debug session:
+
+```
+!adc 64000000        → runs fx3_cmd adc 64000000
+!start               → runs fx3_cmd start
+!stop_gpif_state     → runs the GPIF state test
+!help                → lists all available local commands
+```
+
+Debug output polling continues between commands.  Some test commands
+take several seconds; output is paused during execution.
+
+### Soak test (multi-hour stress)
+
+```
+./fx3_cmd soak [hours] [seed]
+```
+
+Randomly cycles through all test scenarios (weighted by severity) for
+the given duration, running a health check between each cycle.
+Deterministic given a seed for reproducibility.  Ctrl-C triggers early
+shutdown with a full summary.
+
+```
+# Quick 1-minute sanity check
+./fx3_cmd soak 0.016 42
+
+# Default: 1 hour, random seed
+./fx3_cmd soak
+
+# 8-hour overnight run
+./fx3_cmd soak 8
+```
+
+Output includes a status line every 10 cycles and a final table:
+
+```
+=== SOAK TEST SUMMARY ===
+Duration: 01:00:00  Seed: 12345  Cycles: 1847
+
+Scenario              Runs  Pass  Fail
+stop_start_cycle       370   370     0
+wedge_recovery         277   275     2
+...
+TOTAL                 1847  1843     4
+```
+
+## soak_test.sh -- Soak Test Wrapper
+
+Handles firmware upload and device probe before invoking `fx3_cmd soak`.
+
+```
+./soak_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img --hours 4 --seed 42
+```
+
+### Options
+
+```
+--firmware PATH        Firmware .img file (required)
+--hours N              Soak duration in hours (default: 1, fractional OK)
+--seed S               PRNG seed for reproducibility (default: time-based)
+--rx888-stream PATH    Path to rx888_stream binary
+--no-reset             Skip USB reset on exit (leave device as-is)
+--reload-interval N    Every N scenarios, reset device to DFU, re-upload
+                       firmware, and resume.  Default: 0 (disabled).
+                       Each reload adds ~10s.  Tests whether a freshly
+                       loaded firmware handles stress correctly.
+```
+
+## fw_test.sh -- Automated TAP Test Suite
+
+Runs the full test suite (30 tests, 33 with streaming) in TAP format.
+Handles firmware upload automatically via `rx888_stream`.
+
+```
+./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
+```
+
+### Options
+
+```
+--firmware PATH        Firmware .img file (required)
+--stream-seconds N     Streaming capture duration (default: 5)
+--rx888-stream PATH    Path to rx888_stream binary
+--skip-stream          Skip streaming tests (tests 31-33)
+--sample-rate HZ       ADC sample rate (default: 32000000)
+```
+
+### Requirements
+
+- RX888mk2 connected via USB
+- `fx3_cmd` and `rx888_stream` built (run `make` first)
+- User must have USB device permissions (udev rule or run as root)
+
+### Example output
+
+```
+1..30
+ok 1 - firmware upload (PID 0x00F1)
+ok 2 - device probe (hwconfig=0x04)
+ok 3 - GPIO set LED_BLUE
+...
+ok 30 - GETSTATS PIB counter > 0
+```
+
+## File map
+
+| File | Purpose |
+|------|---------|
+| `fx3_cmd.c` | Vendor command exerciser, test harness, and soak test |
+| `fw_test.sh` | TAP test suite wrapper (single-pass) |
+| `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
+| `Makefile` | Build system for test tools |
+| `rx888_tools/` | Git submodule: firmware uploader and USB streamer |

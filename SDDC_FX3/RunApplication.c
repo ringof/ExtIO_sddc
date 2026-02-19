@@ -28,6 +28,8 @@ extern void ParseCommand(void);
 // Declare external data
 extern const char* EventName[];
 extern uint32_t glDMACount;
+extern uint32_t glCounter[20];
+extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 
 // Global data owned by this module
 CyBool_t glIsApplnActive = CyFalse;     // Set true once device is enumerated
@@ -37,14 +39,11 @@ uint32_t glQevent __attribute__ ((aligned (32)));
 CyU3PThread glThreadHandle[APP_THREADS];		// Handles to my Application Threads
 void *glStackPtr[APP_THREADS];				// Stack allocated to each thread
 
+uint8_t glWdgMaxRecovery = WDG_MAX_RECOVERY_DEFAULT;
+uint8_t glWdgRecoveryCount = 0;
+
 uint8_t glHWconfig = NORADIO;       // Hardware config type BBRF103
 uint16_t glFWconfig = (FIRMWARE_VER_MAJOR << 8) | FIRMWARE_VER_MINOR;    // Firmware rc1 ver 1.02
-
-/* GPIO_OUTPUT: push-pull output, GPIO_INPUT: floating input,
- * GPIO_INPUT_PU: input with internal pull-up. */
-#define GPIO_OUTPUT    0
-#define GPIO_INPUT     1
-#define GPIO_INPUT_PU  2
 
 CyU3PReturnStatus_t
 ConfGPIOSimple(uint8_t gpioid, uint8_t mode)
@@ -201,16 +200,104 @@ void ApplicationThread ( uint32_t input)
 			DebugPrint(4, "\r\nMAIN now running forever: ");
 			while(1)
 			{
+				// Check for User Commands (and other CallBack Events) every 100msec
+				CyU3PThreadSleep(100);
+				nline =0;
+				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 				{
-					// Check for User Commands (and other CallBack Events) every 100msec
-					CyU3PThreadSleep(100);
-					nline =0;
-					while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
+					if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
+					MsgParsing(glQevent);
+				}
+				/* GPIF watchdog: detect and recover from DMA stalls.
+				 * If glDMACount hasn't advanced for 3 consecutive 100ms
+				 * polls while the GPIF SM is in a BUSY/WAIT state, the
+				 * streaming pipeline is wedged.  Tear it down and rebuild. */
+				if (glIsApplnActive)
+				{
+					static uint32_t prevDMACount = 0;
+					static uint8_t  stallCount = 0;
+
+					uint32_t curDMA = glDMACount;
+					if (curDMA == prevDMACount && curDMA > 0)
 					{
-						if (nline++ == 0) DebugPrint(4, "\r\n"); //first line
-						MsgParsing(glQevent);
+						uint8_t gpifState = 0xFF;
+						CyU3PGpifGetSMState(&gpifState);
+
+						if (gpifState == 5 || gpifState == 7 ||
+						    gpifState == 8 || gpifState == 9)
+						{
+							stallCount++;
+							DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
+								stallCount, gpifState, curDMA);
+							if (stallCount >= 3)  /* 300ms in BUSY/WAIT */
+							{
+								/* Check recovery cap before attempting */
+								if (glWdgMaxRecovery > 0 &&
+								    glWdgRecoveryCount >= glWdgMaxRecovery)
+								{
+									DebugPrint(4, "\r\nWDG: recovery limit (%d), waiting for STARTFX3",
+										glWdgMaxRecovery);
+									stallCount = 0;
+								}
+								else
+								{
+									CyU3PReturnStatus_t rc_reset, rc_flush;
+									CyU3PReturnStatus_t rc_xfer = 0, rc_sm = 0;
+									CyBool_t hw_ok;
+
+									glWdgRecoveryCount++;
+									DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u recov=%d/%d",
+										gpifState, curDMA, glWdgRecoveryCount, glWdgMaxRecovery);
+									CyU3PGpifControlSWInput(CyFalse);
+
+									/* Force-stop (CyTrue): soft-stop requires clock
+									 * edges from the ADC, which may not be present
+									 * during a watchdog recovery (e.g. Si5351 disabled
+									 * or PLL unlocked).  Force-stop is unconditional. */
+									CyU3PGpifDisable(CyTrue);
+
+									rc_reset = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+									rc_flush = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+
+									hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
+									if (hw_ok)
+									{
+										rc_xfer = CyU3PDmaMultiChannelSetXfer(
+											&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+										rc_sm = CyU3PGpifSMStart(0, 0);
+										CyU3PGpifControlSWInput(CyTrue);
+									}
+									glCounter[2]++;  /* streaming fault counter —
+									                  * GETSTATS [15..18]; also incremented
+									                  * by EP_UNDERRUN in USBHandler.c */
+									DebugPrint(4, "\r\nWDG: === RECOVERY %s === rst=%d flush=%d xfer=%d sm=%d",
+										hw_ok ? "DONE" : "WAIT",
+										rc_reset, rc_flush, rc_xfer, rc_sm);
+									stallCount = 0;
+									prevDMACount = 0;
+									glDMACount = 0;
+								}
+							}
+						}
+						else
+						{
+							if (stallCount > 0)
+								DebugPrint(4, "\r\nWDG: stall cleared SM=%d (was %d/3)",
+									gpifState, stallCount);
+							stallCount = 0;
+						}
+					}
+					else
+					{
+						if (stallCount > 0)
+							DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
+								prevDMACount, curDMA);
+						stallCount = 0;
+						glWdgRecoveryCount = 0;
+						prevDMACount = curDMA;
 					}
 				}
+
 #ifndef _DEBUG_USB_  // second count in serial debug
 				if (glDMACount > 7812)
 				{

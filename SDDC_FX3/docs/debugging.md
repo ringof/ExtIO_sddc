@@ -73,7 +73,7 @@ flushes and executes the command.
 
 | Condition | Data phase |
 |-----------|-----------|
-| `glDebTxtLen > 0` | Firmware copies `glBufDebug[]` (up to 100 bytes of ASCII) to the data phase, resets `glDebTxtLen` to 0 |
+| `glDebTxtLen > 0` | Firmware copies up to 63 bytes from `glBufDebug[]` to the data phase (limited by `CYFX_SDRAPP_MAX_EP0LEN - 1`).  Remaining data is shifted via `memmove` and returned on subsequent polls. |
 | `glDebTxtLen == 0` | Firmware STALLs EP0 to signal "no data available" |
 
 The last byte of the data phase is a NUL terminator placed by the
@@ -112,11 +112,22 @@ host is polling.
 
 | Item | Detail |
 |------|--------|
-| Buffer | `glBufDebug[100]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
+| Buffer | `glBufDebug[256]` in `DebugConsole.c` (size = `MAXLEN_D_USB` from `protocol.h`) |
 | Fill counter | `glDebTxtLen` (declared `volatile uint16_t`) |
 | Formatter | `MyDebugSNPrint()` -- simplified printf supporting `%d`, `%x`, `%s`, `%u`, `%c` |
-| Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, sleeps 100ms and retries once.  If still full, the message is dropped. |
+| Overflow | If `glDebTxtLen + len > MAXLEN_D_USB`, the message is silently dropped (see note below). |
 | Synchronization | Writer (`DebugPrint2USB`, application thread) and reader (`READINFODEBUG` handler, USB callback context) use `CyU3PVicDisableAllInterrupts()`/`CyU3PVicEnableInterrupts()` to protect buffer access |
+
+**DebugPrint2USB overflow fix (latent upstream bug):** The original upstream
+firmware called `CyU3PThreadSleep(100)` when the buffer was full, intending to
+let the host drain it.  This is unsafe when `DebugPrint` is called from the USB
+EP0 callback context (e.g. inside STARTFX3/STOPFX3 handlers), because the USB
+thread is blocked in the same callback — the host *cannot* drain the buffer
+during the sleep.  With multiple DebugPrint calls in the handler, cumulative
+sleep time could exceed the host's 1-second control transfer timeout, causing
+the device to become unresponsive.  The fix removes the sleep: if the buffer is
+full, the message is dropped.  This matches the existing behavior when
+`glFlagDebug == false`.
 
 ---
 
@@ -171,7 +182,7 @@ The main `ApplicationThread` polls the queue every 100ms and calls
 |-------|--------|
 | 0 | Print USB event name from `EventName[]` |
 | 1 | Print vendor request bytes (dead code -- nothing posts this label) |
-| 2 | Print PIB error code (dead code -- nothing posts this label) |
+| 2 | Print PIB error code (posted by `PibErrorCallback` on first overflow per streaming session) |
 | 0x0A (`USER_COMMAND_AVAILABLE`) | Call `ParseCommand()` |
 
 ---
@@ -234,7 +245,95 @@ UART/debug subsystem is initialized.
 
 ---
 
-## 5. Diagnostic Counters (GETSTATS)
+## 5. GPIF Watchdog Recovery
+
+The application thread (`RunApplication.c:216-295`) runs a watchdog
+that detects and recovers from DMA stalls caused by host-side
+backpressure.  All watchdog activity is logged to the debug console
+with a `WDG:` prefix.
+
+### Detection
+
+Every 100 ms the main loop compares `glDMACount` to its previous value.
+If the count has not advanced and the GPIF state machine is in one of
+the backpressure states (5 = TH0_BUSY, 7 = TH1_BUSY, 8 = TH1_WAIT,
+9 = TH0_WAIT), the stall counter increments:
+
+```
+WDG: stall 1/3 SM=5 DMA=48210
+WDG: stall 2/3 SM=5 DMA=48210
+WDG: stall 3/3 SM=5 DMA=48210
+```
+
+If DMA resumes or the SM exits the stuck states before the counter
+reaches 3, the stall is cleared:
+
+```
+WDG: DMA resumed (48210->48215), stall cleared
+WDG: stall cleared SM=2 (was 1/3)
+```
+
+### Recovery (after 3 consecutive stalls = 300 ms)
+
+When the stall counter reaches 3, the watchdog tears down and rebuilds
+the streaming pipeline:
+
+```
+WDG: === RECOVERY START ===
+WDG: GpifDisable done
+WDG: DmaReset rc=0
+WDG: FlushEp rc=0
+```
+
+It then checks if the Si5351 PLL A is still locked:
+
+- **PLL locked:** auto-restarts streaming (DMA SetXfer, GPIF SMStart,
+  assert FW_TRG).
+
+  ```
+  WDG: PLL_A locked, auto-restart
+  WDG: SetXfer rc=0
+  WDG: SMStart rc=0
+  WDG: === RECOVERY DONE (total=1) ===
+  ```
+
+- **PLL unlocked:** leaves the pipeline torn down and waits for the
+  host to reconfigure the clock and send `STARTFX3`.
+
+  ```
+  WDG: PLL_A UNLOCKED, waiting for host
+  WDG: === RECOVERY DONE (total=1) ===
+  ```
+
+### Counter
+
+Each recovery increments `glCounter[2]`, readable via `GETSTATS`
+at offset 15--18.  This counter shares the slot formerly used for EP
+underrun events -- both indicate streaming faults.  The counter resets
+to zero on USB re-enumeration (`StartApplication`), not on
+`STOPFX3`/`STARTFX3`.
+
+### Observing the watchdog
+
+From `fx3_cmd debug`, provoke a stall and watch the log:
+
+```
+!adc 64000000        # set ADC clock to 64 MHz
+!start               # start streaming (host is not reading EP1)
+                     # ... wait ~300ms, watchdog fires ...
+WDG: stall 1/3 SM=5 DMA=4
+WDG: stall 2/3 SM=5 DMA=4
+WDG: stall 3/3 SM=5 DMA=4
+WDG: === RECOVERY START ===
+...
+```
+
+The `wedge_recovery` test in `fx3_cmd` exercises this path
+programmatically and checks `glCounter[2]` via `GETSTATS`.
+
+---
+
+## 6. Diagnostic Counters (GETSTATS)
 
 The `GETSTATS` vendor request (`0xB3`) returns a read-only snapshot of
 firmware-internal counters and GPIF state.  It uses no new storage --
@@ -262,7 +361,7 @@ wLength  = 20
 | 5--8 | 4 | PIB error count | `glCounter[0]`, incremented in `PibErrorCallback` |
 | 9--10 | 2 | Last PIB error arg | `glLastPibArg`, saved in `PibErrorCallback` |
 | 11--14 | 4 | I2C failure count | `glCounter[1]`, incremented in `I2cTransfer` on error |
-| 15--18 | 4 | EP underrun count | `glCounter[2]`, incremented in `USBEventCallback` |
+| 15--18 | 4 | Watchdog recovery count | `glCounter[2]`, incremented by GPIF watchdog on each recovery (see section 5) |
 | 19 | 1 | Si5351 status (reg 0) | `I2cTransfer(0x00, 0xC0, …)` sampled at read time |
 
 ### Counter Behavior
@@ -281,14 +380,14 @@ wLength  = 20
 
 ```
 $ fx3_cmd stats
-PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 underrun=0 pll=0x00
+PASS stats: dma=52420 gpif=9 pib=12 last_pib=0x1005 i2c=4 faults=0 pll=0x00
 ```
 
 ---
 
-## 6. Host-Side Tools
+## 7. Host-Side Tools
 
-### 6.1 `fx3_cmd` -- Vendor Command Exerciser
+### 7.1 `fx3_cmd` -- Vendor Command Exerciser
 
 Built from `tests/fx3_cmd.c`.  Provides both interactive and automated
 access to all debug facilities.
@@ -308,7 +407,53 @@ cd tests && make
 - Puts stdin in raw mode (character-at-a-time, no echo)
 - Polls `READINFODEBUG` every 50ms
 - Typed characters are sent in `wValue`; Enter sends CR
-- Ctrl-C to quit
+- Ctrl-C to quit (SIGINT handler restores terminal from raw mode before exit)
+
+##### Local Command Escape (`!`)
+
+While in the debug console, typing `!` switches to **local command
+mode**.  This lets you issue host-side `fx3_cmd` subcommands without
+leaving the debug session or releasing the USB interface.
+
+```
+debug: type commands + Enter for FX3, '!' for local commands, Ctrl-C to quit
+TESTFX3
+?
+Enter commands:
+threads, stack, gpif, reset;
+DMAcnt = 0
+
+!stats
+fx3> stats
+PASS stats: dma=0 gpif=0 pib=0 last_pib=0x0000 i2c=0 faults=0 pll=0x00
+
+!stop_gpif_state
+fx3> stop_gpif_state
+PASS stop_gpif_state: GPIF state=0 after STOP (SM properly stopped)
+
+gpif
+GPIF State = 0
+```
+
+**Behavior:**
+
+| Key | In local mode | In normal mode |
+|-----|---------------|----------------|
+| `!` | -- | Enter local command mode, show `fx3> ` prompt |
+| Printable chars | Echoed locally, buffered | Sent to FX3 via `READINFODEBUG wValue` |
+| Enter | Dispatch buffered command to `do_*()` handler | Send CR to FX3 (triggers `ParseCommand`) |
+| Backspace | Erase last buffered char | Sent to FX3 |
+| Ctrl-C / Escape | Cancel local command, return to normal | Ctrl-C quits the debug session |
+
+All subcommands from the `fx3_cmd` command line are available via `!`,
+including test commands (`!stop_gpif_state`, `!wedge_recovery`, etc.)
+and commands with arguments (`!adc 64000000`, `!att 15`, `!i2cr 0xC0 0 1`).
+Type `!help` for the full list.
+
+**Note:** Debug output polling continues between keystrokes in local
+mode, but is paused during command execution (some test commands may
+take several seconds).  This is intentional — the user explicitly
+initiated the command and is waiting for its result.
 
 #### Automated Test Commands
 
@@ -337,16 +482,21 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd stats` | Read and display all GETSTATS diagnostic counters | -- |
 | `fx3_cmd stats_i2c` | Verify I2C failure counter increments after NACK on absent address | -- |
 | `fx3_cmd stats_pib` | Verify PIB error counter is non-zero (opportunistic after `pib_overflow`) | -- |
+| `fx3_cmd stats_pll` | Verify Si5351 PLL A locked and SYS_INIT clear via GETSTATS byte 19 | -- |
+| `fx3_cmd stop_gpif_state` | START+STOP, verify GPIF SM state is 0, 1, or 255 (not stuck in read) | -- |
+| `fx3_cmd stop_start_cycle` | Cycle STOP+START 5 times, verify bulk data flows each cycle | -- |
+| `fx3_cmd pll_preflight` | Verify STARTFX3 is rejected (STALL) when ADC clock is off | -- |
+| `fx3_cmd wedge_recovery` | Provoke DMA backpressure wedge, verify STOP+START recovers data flow | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
-### 6.2 `fw_test.sh` -- Automated TAP Test Suite
+### 7.2 `fw_test.sh` -- Automated TAP Test Suite
 
 ```
 cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 26 tests (29 with streaming) in TAP format:
+Runs 30 tests (33 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -370,9 +520,13 @@ Runs 26 tests (29 with streaming) in TAP format:
 | 22 | GETSTATS readout | GETSTATS (0xB3) returns 20 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
 | 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
-| 25 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 26 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
-| 27--29 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 25 | GPIF stop state | GPIF SM state is 0, 1, or 255 after STOPFX3 (not stuck in read) |
+| 26 | Stop/start cycle | 5 STOP+START cycles with bulk read each -- detects GPIF wedge |
+| 27 | PLL preflight | STARTFX3 rejected (STALL) when ADC clock is off |
+| 28 | Wedge recovery | DMA backpressure wedge, then STOP+START recovers data flow |
+| 29 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 30 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
+| 31--33 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
@@ -380,13 +534,13 @@ Options:
 --firmware PATH        Firmware .img file (required)
 --stream-seconds N     Streaming duration (default: 5)
 --rx888-stream PATH    Path to rx888_stream binary
---skip-stream          Skip streaming tests (tests 26--28)
+--skip-stream          Skip streaming tests (tests 31--33)
 --sample-rate HZ       ADC sample rate (default: 32000000)
 ```
 
 ---
 
-## 7. File Map
+## 8. File Map
 
 | File | Debug role |
 |------|-----------|
@@ -395,13 +549,13 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
-| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery |
 | `tests/fx3_cmd.c` | Host-side vendor command tool with interactive debug console |
 | `tests/fw_test.sh` | Automated TAP test suite |
 
 ---
 
-## 8. Known Limitations
+## 9. Known Limitations
 
 | Area | Description |
 |------|-------------|

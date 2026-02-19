@@ -65,15 +65,18 @@ enum RadioModel {
 enum ArgumentList {
     DAT31_ATT        = 10,   /* DAT-31 attenuator (0-63) */
     AD8370_VGA       = 11,   /* AD8370 VGA (0-255) */
+    WDG_MAX_RECOV    = 14,   /* Max consecutive watchdog recoveries (0=unlimited) */
 };
 
+#define WDG_MAX_RECOVERY_DEFAULT 5
+
 #define _DEBUG_USB_
-#define MAXLEN_D_USB (100)
+#define MAXLEN_D_USB (256)
 
 /* Debug trace: command-name lookup tables */
 #define FX3_CMD_BASE           0xAA
 #define FX3_CMD_COUNT          17
-#define SETARGFX3_LIST_COUNT   14
+#define SETARGFX3_LIST_COUNT   15
 
 #ifdef TRACESERIAL
 extern const char *FX3CommandName[FX3_CMD_COUNT];

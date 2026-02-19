@@ -175,8 +175,8 @@ void CheckStatusSilent(char* StringPtr, CyU3PReturnStatus_t Status)
 	{
 		if (Status != CY_U3P_SUCCESS)
 		{
-		DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
-		ErrorBlinkAndReset();
+			DebugPrint(4, "\r\n%s failed, %d = CY_U3P_ERROR_%s\r\n", StringPtr, Status, ErrorCodeText(Status));
+			ErrorBlinkAndReset();
 		}
 	}
 }
