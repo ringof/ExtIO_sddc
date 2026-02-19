@@ -146,31 +146,30 @@ CyFxSlFifoApplnUSBSetupCB (
             isHandled = CyTrue;
         }
 
-        /* CLEAR_FEATURE(ENDPOINT_HALT) — ACK only, no endpoint mutation.
+        /* CLEAR_FEATURE(ENDPOINT_HALT) — clear stall/toggle, then flush.
          *
          * This path fires when the host sends libusb_clear_halt() at
-         * device-open time to restart the XHCI endpoint ring.  The
-         * host-side XHCI Reset Endpoint command is issued by the kernel
-         * independently of our response — all we need to do is ACK.
+         * device-open time to restart the XHCI endpoint ring.
          *
-         * The endpoint is never intentionally stalled, so there is no
-         * halt condition to clear.  The previous CyU3PUsbStall(ep,
-         * CyFalse, CyTrue) call had side-effects on non-stalled
-         * endpoints that corrupted internal USB controller state,
-         * causing LIBUSB_ERROR_IO on the next bulk transfer even
-         * though DMA was actively producing data.  Proven by fw_test:
-         * hw_smoke and stop_start_cycle failed with IO errors after
-         * repeated open/close cycles (each triggering clear_halt),
-         * while the single-process soak test passed 19/19.
+         * CyU3PUsbStall(ep, CyFalse, CyTrue) is required — without it
+         * (ACK-only) the USB controller never re-arms the endpoint and
+         * all bulk transfers fail with IO errors.  However, on a
+         * non-stalled endpoint it has side-effects that corrupt
+         * internal USB controller state across repeated open/close
+         * cycles.  CyU3PUsbFlushEp immediately after clears any stale
+         * FIFO state left by the stall-clear, making the endpoint
+         * ready for the next STARTFX3.
          *
-         * If the endpoint ever IS genuinely stalled (shouldn't happen),
-         * STARTFX3's DMA reset + FlushEp + SetXfer will clear it. */
+         * Do NOT add CyU3PUsbResetEp or CyU3PDmaMultiChannelReset
+         * here — those desync the data toggle or corrupt the DMA
+         * pipeline (see STARTFX3 comment block). */
         if ((bTarget == CY_U3P_USB_TARGET_ENDPT) && (bRequest == CY_U3P_USB_SC_CLEAR_FEATURE)
                 && (wValue == CY_U3P_USBX_FS_EP_HALT))
         {
             if (glIsApplnActive)
             {
-                CyU3PUsbAckSetup ();
+                CyU3PUsbStall (wIndex, CyFalse, CyTrue);
+                CyU3PUsbFlushEp (CY_FX_EP_CONSUMER);
                 isHandled = CyTrue;
             }
         }
