@@ -124,10 +124,11 @@ tap_skip() {
 
 # Run fx3_cmd, capture output.  Returns 0 if output starts with "PASS".
 run_cmd() {
-    local output
+    local output last_line
     output=$("$FX3_CMD" "$@" 2>&1) || true
     echo "$output"
-    [[ "$output" == PASS* ]]
+    last_line="${output##*$'\n'}"
+    [[ "$last_line" == PASS* ]]
 }
 
 # Ensure device is in a known-clean state before streaming tests.
