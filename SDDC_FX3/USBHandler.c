@@ -146,27 +146,27 @@ CyFxSlFifoApplnUSBSetupCB (
             isHandled = CyTrue;
         }
 
-        /* CLEAR_FEATURE request for endpoint is always passed to the setup callback
-         * regardless of the enumeration model used. When a clear feature is received,
-         * the previous transfer has to be flushed and cleaned up. This is done at the
-         * protocol level. So flush the EP memory and reset the DMA channel associated
-         * with it. If there are more than one EP associated with the channel reset both
-         * the EPs. The endpoint stall and toggle / sequence number is also expected to be
-         * reset. Return CyFalse to make the library clear the stall and reset the endpoint
-         * toggle. Or invoke the CyU3PUsbStall (ep, CyFalse, CyTrue) and return CyTrue.
-         * Here we are clearing the stall. */
+        /* CLEAR_FEATURE(ENDPOINT_HALT) — just clear the stall + toggle.
+         *
+         * Do NOT tear down the DMA channel here.  The original Cypress
+         * SDK boilerplate called CyU3PDmaMultiChannelReset / FlushEp /
+         * ResetEp / SetXfer, but in this application:
+         *
+         *  - The endpoint is never intentionally stalled.
+         *  - This path only fires when the host sends libusb_clear_halt()
+         *    at device-open time to restart the XHCI endpoint ring.
+         *  - CyU3PUsbResetEp desyncs the host/device data toggle
+         *    (see STARTFX3 comment block) — proven to kill bulk transfers.
+         *  - Resetting the DMA channel while the GPIF SM is streaming
+         *    corrupts the pipeline and breaks the subsequent STOPFX3.
+         *
+         * CyU3PUsbStall(ep, CyFalse, CyTrue) clears the stall bit and
+         * resets the toggle, which is all the USB spec requires. */
         if ((bTarget == CY_U3P_USB_TARGET_ENDPT) && (bRequest == CY_U3P_USB_SC_CLEAR_FEATURE)
                 && (wValue == CY_U3P_USBX_FS_EP_HALT))
         {
             if (glIsApplnActive)
             {
-                if (wIndex == CY_FX_EP_CONSUMER)
-                {
-                    CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
-                    CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
-                    CyU3PUsbResetEp (CY_FX_EP_CONSUMER);
-                    CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU,FIFO_DMA_RX_SIZE,0);
-                }
                 CyU3PUsbStall (wIndex, CyFalse, CyTrue);
                 isHandled = CyTrue;
             }

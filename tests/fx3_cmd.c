@@ -198,16 +198,12 @@ static libusb_device_handle *open_rx888(libusb_context *ctx)
      * which leaves the XHCI endpoint in the "stopped" state.  New TDs
      * submitted by this process won't be processed until the endpoint
      * is restarted.  libusb_clear_halt sends CLEAR_FEATURE(ENDPOINT_HALT)
-     * to the device (harmless: the device CLEAR_FEATURE handler resets
-     * and re-arms the DMA channel) AND calls usb_hcd_reset_endpoint
-     * which issues a Reset Endpoint command to the XHCI — clearing
-     * the stopped state.  Issue #78.
+     * to the device AND calls usb_hcd_reset_endpoint which issues a
+     * Reset Endpoint command to the XHCI — clearing the stopped state.
      *
-     * DISABLED: suspected of triggering FX3 stop-command failures.
-     * Removed to isolate whether CLEAR_FEATURE(ENDPOINT_HALT) on
-     * EP 0x81 causes the firmware to enter a bad state.  See ongoing
-     * investigation.  */
-    /* libusb_clear_halt(h, 0x81); */  /* EP1-IN — disabled */
+     * The firmware CLEAR_FEATURE handler now only clears the stall +
+     * toggle (no DMA teardown), so this is safe.  Issue #78. */
+    libusb_clear_halt(h, 0x81);  /* EP1-IN — restart XHCI endpoint ring */
 
     return h;
 }
