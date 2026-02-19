@@ -63,6 +63,10 @@
 /* Timeouts */
 #define CTRL_TIMEOUT_MS  1000
 
+/* Global libusb context — needed by primed_start_and_read() for
+ * libusb_handle_events_timeout_completed().  Set once in main(). */
+static libusb_context *g_ctx;
+
 /* ------------------------------------------------------------------ */
 /* USB helpers (patterns from rx888_stream.c)                         */
 /* ------------------------------------------------------------------ */
@@ -1388,6 +1392,118 @@ static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
     return transferred;
 }
 
+/* ---- Primed (async) start-and-read --------------------------------
+ *
+ * Race-free alternative to cmd_u32(STARTFX3) + bulk_read_some().
+ *
+ * At 32 MS/s the four 16 KB DMA buffers fill in ~1 ms.  If the host
+ * hasn't submitted a bulk TD by then, PIB overflows force the xHCI
+ * endpoint into an error state and all subsequent reads return -EIO.
+ * rx888_stream avoids this by pre-submitting 32 async transfers BEFORE
+ * sending STARTFX3.  This helper does the same thing for the test
+ * harness:
+ *
+ *   1. libusb_clear_halt(EP1_IN)  — reset xHCI endpoint ring
+ *   2. libusb_submit_transfer()   — queue one async bulk read TD
+ *   3. cmd_u32(STARTFX3, 0)       — start GPIF; data lands in the TD
+ *   4. libusb_handle_events()     — wait for completion
+ *
+ * Returns bytes received (>= 0) or a negative libusb error code.
+ * On success the caller still owns the STOPFX3 responsibility. */
+
+struct primed_xfer_state {
+    int completed;       /* set to 1 by callback */
+    int actual_length;   /* bytes transferred     */
+    int status;          /* libusb_transfer_status */
+};
+
+static void LIBUSB_CALL primed_xfer_cb(struct libusb_transfer *xfer)
+{
+    struct primed_xfer_state *st = xfer->user_data;
+    st->actual_length = xfer->actual_length;
+    st->status        = xfer->status;
+    st->completed     = 1;
+}
+
+static int primed_start_and_read(libusb_device_handle *h,
+                                 int len, int timeout_ms)
+{
+    uint8_t *buf = malloc(len);
+    if (!buf) return LIBUSB_ERROR_NO_MEM;
+
+    struct libusb_transfer *xfer = libusb_alloc_transfer(0);
+    if (!xfer) { free(buf); return LIBUSB_ERROR_NO_MEM; }
+
+    struct primed_xfer_state st = { .completed = 0 };
+
+    /* 1. Clear halt — reset xHCI endpoint ring so stale error state
+     *    from a prior test doesn't block the new transfer. */
+    libusb_clear_halt(h, EP1_IN);
+
+    /* 2. Fill and submit async bulk transfer BEFORE starting GPIF */
+    libusb_fill_bulk_transfer(xfer, h, EP1_IN, buf, len,
+                              primed_xfer_cb, &st, timeout_ms);
+    int r = libusb_submit_transfer(xfer);
+    if (r < 0) {
+        libusb_free_transfer(xfer);
+        free(buf);
+        return r;
+    }
+
+    /* 3. Start GPIF — data flows into the already-queued TD */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        libusb_cancel_transfer(xfer);
+        /* Drain the cancelled transfer so libusb doesn't leak it */
+        while (!st.completed)
+            libusb_handle_events_completed(g_ctx, &st.completed);
+        libusb_free_transfer(xfer);
+        free(buf);
+        return r;
+    }
+
+    /* 4. Wait for the bulk transfer to complete */
+    while (!st.completed)
+        libusb_handle_events_completed(g_ctx, &st.completed);
+
+    libusb_free_transfer(xfer);
+    free(buf);
+
+    if (st.status == LIBUSB_TRANSFER_COMPLETED ||
+        st.status == LIBUSB_TRANSFER_TIMED_OUT)
+        return st.actual_length;
+
+    /* Map transfer status to a libusb error code */
+    switch (st.status) {
+    case LIBUSB_TRANSFER_ERROR:    return LIBUSB_ERROR_IO;
+    case LIBUSB_TRANSFER_STALL:    return LIBUSB_ERROR_PIPE;
+    case LIBUSB_TRANSFER_OVERFLOW: return LIBUSB_ERROR_OVERFLOW;
+    case LIBUSB_TRANSFER_NO_DEVICE:return LIBUSB_ERROR_NO_DEVICE;
+    case LIBUSB_TRANSFER_CANCELLED:return LIBUSB_ERROR_INTERRUPTED;
+    default:                       return LIBUSB_ERROR_OTHER;
+    }
+}
+
+/* Retry variant: retries primed_start_and_read on transient USB errors
+ * (timeout / IO), same escalation as cmd_u32_retry.  Use for the first
+ * STARTFX3 in a scenario after potential watchdog recovery. */
+static int primed_start_and_read_retry(libusb_device_handle *h,
+                                       int len, int timeout_ms)
+{
+    int r = primed_start_and_read(h, len, timeout_ms);
+    if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
+        return r;
+    /* First retry — the STARTFX3 inside failed; GPIF never started,
+     * so no STOPFX3 needed before retrying. */
+    usleep(500000);
+    r = primed_start_and_read(h, len, timeout_ms);
+    if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
+        return r;
+    /* Second retry */
+    usleep(1000000);
+    return primed_start_and_read(h, len, timeout_ms);
+}
+
 /* Stop GPIF then verify the SM state via GETSTATS.
  *
  * Sequences: STARTADC(32 MHz) -> STARTFX3 -> brief stream -> STOPFX3
@@ -1468,21 +1584,11 @@ static int do_test_stop_start_cycle(libusb_device_handle *h)
     }
 
     for (int i = 0; i < cycles; i++) {
-        /* Start streaming.  The first iteration uses cmd_u32_retry
-         * because the device may still be settling from the previous
-         * soak scenario's watchdog recovery.  Subsequent iterations
-         * use plain cmd_u32 — if cycle N-1's STOP→START transition
-         * times out, that's a real firmware issue, not a transient. */
-        r = (i == 0) ? cmd_u32_retry(h, STARTFX3, 0)
-                      : cmd_u32(h, STARTFX3, 0);
-        if (r < 0) {
-            printf("FAIL stop_start_cycle: STARTFX3 on cycle %d: %s\n",
-                   i + 1, libusb_strerror(r));
-            return 1;
-        }
-
-        /* Read bulk data — should get at least 1 KB within 2 seconds */
-        int got = bulk_read_some(h, 16384, 2000);
+        /* Primed read: queue async bulk TD before STARTFX3 to avoid
+         * the PIB overflow race at 32 MS/s.  First iteration uses
+         * the retry variant to absorb post-recovery transients. */
+        int got = (i == 0) ? primed_start_and_read_retry(h, 16384, 2000)
+                           : primed_start_and_read(h, 16384, 2000);
         if (got < 1024) {
             /* Diagnostic: read GETSTATS before cleanup to see GPIF/DMA state */
             struct fx3_stats s = {0};
@@ -2839,13 +2945,10 @@ static int do_test_hw_smoke(libusb_device_handle *h)
         printf("FAIL hw_smoke: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL hw_smoke: STARTFX3: %s\n", libusb_strerror(r));
-        return 1;
-    }
 
-    int got = bulk_read_some(h, 16384, 2000);
+    /* Primed read: queue async bulk TD before STARTFX3 to avoid the
+     * PIB overflow race at 32 MS/s (4×16 KB fills in ~1 ms). */
+    int got = primed_start_and_read_retry(h, 16384, 2000);
     cmd_u32(h, STOPFX3, 0);
 
     if (got < 1024) {
@@ -4108,6 +4211,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: libusb_init: %s\n", libusb_strerror(r));
         return 1;
     }
+    g_ctx = ctx;
 
     libusb_device_handle *h = open_rx888(ctx);
     if (!h) {
