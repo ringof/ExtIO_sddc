@@ -81,50 +81,97 @@ This means **one GPIF state machine design serves both software-testable and pro
 
 ### GPIF state machine diff
 
-Verified empirically in the GPIF II Designer:
+GPIF II Designer facts verified during investigation:
 
 - `COMMIT` action exists, parameterized by Thread Number. Per the Designer's help text: *"The COMMIT action commits the data packet / buffer on the selected Ingress DMA channel. ... For committing short buffers, this action should be used along with the IN_DATA action."*
-- `CMP_CTRL` action with `Change detection` mode arms the control comparator to fire on transitions of masked CTL bits.
-- Transition equations support `CTRL_CMP_MATCH` (comparator output) and the raw level signal of any defined input (`PPS`).
-- Multiple actions per state are supported.
-- Maximum states: at least 32 (current SM uses 10; design adds 2).
+- `CMP_CTRL` action with `Change detection` mode arms the control comparator; its output `CTRL_CMP_MATCH` is usable as a transition trigger. This is the GPIF II way to do edge detection — there is no direct `*_POS_EDGE` qualifier.
+- Both `CTRL_CMP_MATCH` (comparator output) and the raw level signal `PPS` are available as transition triggers.
+- Multiple actions per state are supported. Maximum states: 256.
+- **Hard constraint: maximum 2 outgoing transitions per state** (GPIF II Designer User Guide section 4.5).
 
-The diff to the existing state machine:
+#### Why the naive "add a third transition" approach fails
+
+`TH0_RD` and `TH1_RD` each already have exactly 2 outgoing transitions in the shipped machine, and so does every other state in the streaming hot loop (`*_RD_LD`, etc.). Adding a third (the PPS trigger) violates the 2-transition limit.
+
+The GPIF II Designer can sometimes auto-resolve >2 transitions via **mirror states** (User Guide section 4.5.1) — but only when the transitions factor cleanly by up to three "global trigger" signals. Our three conditions (`DATA_CNT_HIT`, `!FW_TRG`, PPS) are heterogeneous and do not factor, even when each equation is fully specified with no don't-cares and no OR clauses. The tool returns the generic error *"Unable to synthesize state machine."* Mirror states are not available to us.
+
+The correct mechanism is therefore a manually-inserted **dummy / intermediate state** (User Guide section 4.5.2; AN75779 section 3.6.4 step 21-22, Figures 33-34), which always works for arbitrary transitions at a cost of one cycle of latency on the routed branch.
+
+#### The dummy-EVENT design
+
+Key insight: only `DATA_CNT_HIT` (buffer-full) needs every-cycle evaluation to avoid DMA buffer overrun. The two rare events — PPS edge and soft-stop — share the read state's second exit slot, and a dummy state classifies which one fired.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> TH0_RD_LD: FW_TRG
+
+    state "Thread 0 path" as T0 {
+        TH0_RD_LD --> TH0_RD: DMA_RDY_TH0
+        TH0_RD_LD --> TH0_BUSY: !DMA_RDY_TH0
+        TH0_BUSY --> TH0_WAIT: LOGIC_ONE
+        TH0_WAIT --> TH0_RD_LD: DMA_RDY_TH0
+        TH0_RD --> TH0_EVENT: CTRL_CMP_MATCH or !FW_TRG
+        TH0_EVENT --> TH0_PPS_COMMIT: FW_TRG
+        TH0_PPS_COMMIT --> TH0_RD_LD: LOGIC_ONE
+    }
+
+    state "Thread 1 path" as T1 {
+        TH1_RD_LD --> TH1_RD: DMA_RDY_TH1
+        TH1_RD_LD --> TH1_BUSY: !DMA_RDY_TH1
+        TH1_BUSY --> TH1_WAIT: LOGIC_ONE
+        TH1_WAIT --> TH1_RD_LD: DMA_RDY_TH1
+        TH1_RD --> TH1_EVENT: CTRL_CMP_MATCH or !FW_TRG
+        TH1_EVENT --> TH1_PPS_COMMIT: FW_TRG
+        TH1_PPS_COMMIT --> TH1_RD_LD: LOGIC_ONE
+    }
+
+    TH0_RD --> TH1_RD_LD: DATA_CNT_HIT
+    TH1_RD --> TH0_RD_LD: DATA_CNT_HIT
+
+    TH0_EVENT --> IDLE: !FW_TRG
+    TH1_EVENT --> IDLE: !FW_TRG
+    TH0_WAIT --> IDLE: !FW_TRG
+    TH1_WAIT --> IDLE: !FW_TRG
+```
+
+**New states** (4 total, state count 10 -> 14): `TH0_EVENT`, `TH0_PPS_COMMIT`, `TH1_EVENT`, `TH1_PPS_COMMIT`.
 
 **Existing configuration changes:**
 - Add new input signal `PPS` mapped to the GPIF CTL index corresponding to GPIO 19 (`BIAS_HF`). Exact CTL index must be confirmed against the FX3 IO matrix table for the part variant on the board.
-- Configure the existing global `CMP_CTRL` comparator:
-  - Mask: bit position corresponding to the `PPS` CTL input
-  - Value: 0
-  - Mode: Change detection
-- Add `CMP_CTRL` action to `TH0_RD` and `TH1_RD` alpha actions, alongside existing `IN_DATA` and `COUNT_DATA`. (Repeat-actions-until-next-transition is already true; the comparator stays armed.)
+- Configure the existing global `CMP_CTRL` comparator: mask = PPS CTL bit, value = 0, mode = Change detection (rising-edge).
+- Add `CMP_CTRL` action to `TH0_RD` and `TH1_RD` alpha actions, alongside existing `IN_DATA` and `COUNT_DATA`.
 
-**Two new states:**
+**State actions:**
 
-```
-TH0_PPS_COMMIT
-  alpha actions: IN_DATA (Thread 0), COMMIT (Thread 0)
+| State | Actions |
+|---|---|
+| `TH0_RD` / `TH1_RD` | `IN_DATA`, `COUNT_DATA`, `CMP_CTRL` |
+| `TH0_EVENT` / `TH1_EVENT` | `IN_DATA`, `COUNT_DATA` (samples — no dropped data) |
+| `TH0_PPS_COMMIT` / `TH1_PPS_COMMIT` | `IN_DATA`, `COMMIT` (thread N) |
 
-TH1_PPS_COMMIT
-  alpha actions: IN_DATA (Thread 1), COMMIT (Thread 1)
-```
+**Transition equations (thread 0; thread 1 symmetric):**
 
-**Six new transitions:**
+| From | Equation | To | Notes |
+|---|---|---|---|
+| `TH0_RD` | `DATA_CNT_HIT` | `TH1_RD_LD` | buffer full — direct, every cycle, no latency |
+| `TH0_RD` | `CTRL_CMP_MATCH \| !FW_TRG` | `TH0_EVENT` | rare event — exit the fast loop |
+| `TH0_EVENT` | `!FW_TRG` | `IDLE` | it was a stop |
+| `TH0_EVENT` | `FW_TRG` | `TH0_PPS_COMMIT` | else it was PPS -> commit |
+| `TH0_PPS_COMMIT` | `LOGIC_ONE` | `TH0_RD_LD` | reuse buffer-prep (DMA-ready + counter reload) |
 
-```
-TH0_RD          → TH0_PPS_COMMIT   on  CTRL_CMP_MATCH & PPS & DMA_RDY_TH0
-TH0_PPS_COMMIT  → TH0_RD           on  LOGIC_ONE
-TH1_RD          → TH1_PPS_COMMIT   on  CTRL_CMP_MATCH & PPS & DMA_RDY_TH1
-TH1_PPS_COMMIT  → TH1_RD           on  LOGIC_ONE
-TH0_PPS_COMMIT  → IDLE             on  !FW_TRG    (soft-stop preservation)
-TH1_PPS_COMMIT  → IDLE             on  !FW_TRG    (soft-stop preservation)
-```
+#### Why this is the smart minimal structure
 
-The `CTRL_CMP_MATCH & PPS` combination is robust regardless of how the Designer interprets `Change detection` mode:
-- If it fires only on the transition *from* the configured `Value=0` (rising edge): `CTRL_CMP_MATCH` alone is sufficient, and the additional `PPS` AND is redundant but harmless.
-- If it fires on any change (both edges): `PPS` AND filters out the falling-edge match, leaving only the rising-edge transition.
+- **`DATA_CNT_HIT` stays direct on the read state** — evaluated every cycle, zero added latency, no overrun risk, no consumption of the 2-word counter margin (`0x1FFE` = 8190 limit vs. 8192-word buffer).
+- **The two rare events share one slot** via the OR. The OR is in a 2-exit state, so it is a plain boolean the hardware evaluates directly — the User Guide section 4.5.1.3 OR-clause warning applies only to states relying on auto-mirror reduction, which this design does not use.
+- **`*_EVENT` classifies on `FW_TRG` alone**: the only way to reach it with `FW_TRG` still high is via `CTRL_CMP_MATCH`, so `FW_TRG` high implies PPS implies commit. No need to re-check the comparator edge, which sidesteps the single-cycle edge-persistence problem.
+- **`*_EVENT` samples** (`IN_DATA`/`COUNT_DATA`), so the one extra cycle drops no data — this is what avoids the audible artifact. Entered only on PPS-or-stop (rare).
+- **Soft-stop preserved from the read state**: `!FW_TRG` still fires from the read state via the OR, routed to `IDLE` through `*_EVENT` one cycle later. A wedged SM stuck in a read state still soft-stops — no wedge-recovery regression.
+- **1-cycle latency on the PPS branch only**, within the GPIF synchronizer's inherent +/-1-2 PCLK uncertainty — no marker-accuracy regression.
 
-Both interpretations produce exactly one commit per PPS pulse.
+#### Comparator-mode robustness
+
+If `Change detection` fires only on the rising edge (transition from the configured value 0), `CTRL_CMP_MATCH` alone is the PPS rising-edge signal and the OR stays at 2 triggers. If it fires on both edges, change that arm to `(CTRL_CMP_MATCH & PPS) | !FW_TRG` (3 triggers, still legal) so the `PPS` level selects the rising edge. Either way, exactly one commit per PPS pulse.
 
 ### Firmware changes required
 
@@ -150,13 +197,17 @@ The bounded data loss documented for `CY_U3P_WRAPUP` (prefetch buffer discard) d
 
 All require hardware to confirm. The design is robust to either resolution of each item, but knowing the answer eliminates conditional code paths.
 
-1. **Transition priority** when both eligible at the same PCLK in `TH0_RD`:
-   - Existing: `DATA_CNT_HIT → TH1_RD_LD`
-   - New: `CTRL_CMP_MATCH & PPS & DMA_RDY_TH0 → TH0_PPS_COMMIT`
+1. **Transition priority / OR-clause synthesis** on `TH0_RD`:
+   - `DATA_CNT_HIT → TH1_RD_LD` (direct)
+   - `CTRL_CMP_MATCH | !FW_TRG → TH0_EVENT` (rare-event branch)
 
-   If priority is by list order in the saved `.cyfx`, ensure PPS-commit transitions are listed first. If implicit by some other rule, accept the occasional missed PPS that coincides exactly with a data-counter hit (at most one PPS missed per buffer cycle; not data-loss, just rare marker drop).
+   Build first to confirm the OR-in-a-2-exit-state synthesizes (it should — no auto-mirror reduction is needed when every state is already at or below 2 exits). If both exits are eligible the same PCLK, confirm `DATA_CNT_HIT` wins (buffer-full must not be deferred); a PPS coinciding exactly with a data-counter hit is dropped for that second, which is acceptable (rare marker drop, not data loss).
 
-2. **Change Detection mode semantics**: rising-only (`Value=0` means "was 0, is now non-0") or both-edges (fires on any change). Design uses `CTRL_CMP_MATCH & PPS` to be robust to either, but knowing which simplifies the equation.
+2. **Change Detection mode semantics**: rising-only (`Value=0` means "was 0, is now non-0") or both-edges (fires on any change). With rising-only the OR arm is `CTRL_CMP_MATCH` alone; with both-edges it becomes `(CTRL_CMP_MATCH & PPS)`. Confirm which, to fix the equation.
+
+8. **`DATA_CNT_HIT` during `*_EVENT`**: the counter advances one unchecked cycle while in the dummy `*_EVENT` state. This is within the 8190 -> 8192 margin, but confirm in simulation that no overrun occurs in the boundary case (PPS firing as the buffer nears full).
+
+9. **Post-commit routing**: `*_PPS_COMMIT → *_RD_LD` reuses the existing buffer-prep (DMA-ready check + `LD_DATA_COUNT` reload). Verify in simulation that the "same thread, next buffer" path is correct, since `*_RD_LD` is normally a thread-*switch* state.
 
 3. **PIB prefetch FIFO behavior with SM-coordinated commit**: confirm empirically (via audio listen-test) that zero data loss is achieved when the commit is triggered by the SM rather than by a CPU API call. Architectural reasoning predicts zero loss; bench verification needed.
 
@@ -166,7 +217,7 @@ All require hardware to confirm. The design is robust to either resolution of ea
 
 6. **Streaming throughput regression check**: confirm that an active PPS-marker run shows no measurable throughput delta vs. baseline (PPS marker idle). Marker rate of 1 Hz emits one short USB transfer per second out of ~7,800 normal transfers/sec at 128 MB/s — should be invisible.
 
-7. **STARTFX3/STOPFX3 interaction**: confirm the `!FW_TRG` exits from `TH0_PPS_COMMIT` and `TH1_PPS_COMMIT` allow soft-stop to land cleanly even if a PPS edge arrives during the stop sequence.
+7. **STARTFX3/STOPFX3 interaction**: confirm soft-stop lands cleanly. With the dummy-EVENT design, `!FW_TRG` routes from the read state through `*_EVENT → IDLE` (one cycle later than the old direct exit). Verify STOPFX3's soft-stop still reaches IDLE within its existing wait window, and that a PPS edge arriving during the stop sequence resolves correctly (the `*_EVENT` classifier sends `!FW_TRG` to IDLE, dropping that PPS — acceptable).
 
 ---
 
@@ -177,8 +228,9 @@ All require hardware to confirm. The design is robust to either resolution of ea
    - Add `PPS` input signal mapped to the confirmed CTL index for GPIO 19.
    - Configure `CMP_CTRL`: mask = PPS bit, value = 0, mode = Change detection.
    - Add `CMP_CTRL` action to `TH0_RD` and `TH1_RD`.
-   - Add two new states (`TH0_PPS_COMMIT`, `TH1_PPS_COMMIT`) with their actions.
-   - Add six new transitions per the diff above.
+   - Add four new states (`TH0_EVENT`, `TH0_PPS_COMMIT`, `TH1_EVENT`, `TH1_PPS_COMMIT`) with their actions per the state-action table above.
+   - Add the new transitions per the equation table above (read-state OR-branch, EVENT classifier, PPS-commit return).
+   - Build to confirm synthesis (no "unable to synthesize"); then Simulate to confirm no overrun and exactly one commit per PPS pulse.
    - Save → regenerate `SDDC_GPIF.h`. Commit `.cyfx` and `.h` together.
 3. **Firmware changes** per "Firmware changes required" section above. Single commit alongside the SM regeneration.
 4. **Solder jumper** from `BIAS_VHF` pin to `BIAS_HF` pin on the dev board (5 minutes of bench work; reversible).
