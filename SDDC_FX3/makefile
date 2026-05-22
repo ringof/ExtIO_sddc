@@ -30,6 +30,13 @@ all:$(MODULE).img
 
 USER_CFLAGS = -I./radio -I./driver
 
+# In-band PPS Config B (issue #125): build with PPS_CTL_ENABLE=1 to release
+# GPIO 19 as the GPIF CTL[2] PPS input.  Default (unset) keeps production
+# Config A.  Reproducible without editing Application.h.
+ifdef PPS_CTL_ENABLE
+USER_CFLAGS += -DPPS_CTL_ENABLE=$(PPS_CTL_ENABLE)
+endif
+
 vpath %.c driver
 vpath %.c radio
 

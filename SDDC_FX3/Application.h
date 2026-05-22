@@ -36,8 +36,13 @@
  *    PPS input the control comparator watches.  GPIO 18 (BIAS_VHF) remains
  *    a simple output and serves as the software-PPS test driver, looped
  *    back to GPIO 19 through the 100k resistor.  Enabling this requires the
- *    PPS-marker waveform (SDDC_GPIF_PPS.h) with the comparator on CTL[2]. */
+ *    PPS-marker waveform (SDDC_GPIF_PPS.h) with the comparator on CTL[2].
+ *
+ * Overridable from the build so Config B is reproducible without editing
+ * this file:  make -C SDDC_FX3 PPS_CTL_ENABLE=1 clean all  */
+#ifndef PPS_CTL_ENABLE
 #define PPS_CTL_ENABLE 0
+#endif
 
 #define FIFO_DMA_RX_SIZE        (0)	                  /* DMA transfer size is set to infinite */
 #define FIFO_THREAD_STACK       (0x800)               /* application thread stack size */

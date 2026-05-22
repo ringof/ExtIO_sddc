@@ -2488,19 +2488,28 @@ static int do_test_pps_inject(libusb_device_handle *h)
     cmd_u32(h, STOPFX3, 0);
     cmd_u32(h, GPIOFX3, GPIO_BASE);   /* restore: BIAS_VHF low */
 
-    if (fail) return 1;
-    if (got_after < 0) { printf("FAIL pps_inject: GETSTATS (after)\n"); return 1; }
-
     uint64_t expected = (uint64_t)2 * sample_rate * (uint64_t)duration_sec;
     int percent = (int)(total * 100 / expected);
-    uint32_t pib_delta   = after.pib_errors - before.pib_errors;
-    uint32_t fault_delta = after.streaming_faults - before.streaming_faults;
+    uint32_t pib_delta = 0, fault_delta = 0;
 
-    printf("# pps_inject: %lu bytes (%d%% of %lu), %u edges, %u short reads, "
-           "pib_delta=%u, fault_delta=%u, boot %u->%u\n",
-           (unsigned long)total, percent, (unsigned long)expected,
-           edges, short_reads, pib_delta, fault_delta,
-           before.boot_count, after.boot_count);
+    /* Diagnostics first — print even on failure so a stall shows its cause. */
+    if (got_after >= 0) {
+        pib_delta   = after.pib_errors - before.pib_errors;
+        fault_delta = after.streaming_faults - before.streaming_faults;
+        printf("# pps_inject: %lu bytes (%d%% of %lu), %u edges, %u short reads, "
+               "pib_delta=%u, fault_delta=%u, boot %u->%u\n",
+               (unsigned long)total, percent, (unsigned long)expected,
+               edges, short_reads, pib_delta, fault_delta,
+               before.boot_count, after.boot_count);
+    } else {
+        printf("# pps_inject: %lu bytes (%d%% of %lu), %u edges, %u short reads, "
+               "(GETSTATS after failed)\n",
+               (unsigned long)total, percent, (unsigned long)expected,
+               edges, short_reads);
+    }
+
+    if (fail) return 1;   /* bulk error already reported above */
+    if (got_after < 0) { printf("FAIL pps_inject: GETSTATS (after)\n"); return 1; }
 
     if (after.boot_count != before.boot_count) {
         printf("FAIL pps_inject: device reset during test (boot %u->%u)\n",
@@ -2519,6 +2528,11 @@ static int do_test_pps_inject(libusb_device_handle *h)
     }
     if (fault_delta != 0) {
         printf("FAIL pps_inject: %u new streaming fault(s) during injection\n", fault_delta);
+        return 1;
+    }
+    if (short_reads == 0) {
+        printf("INCONCLUSIVE pps_inject: no markers observed (short reads=0) — build "
+               "Config B (make -C SDDC_FX3 PPS_CTL_ENABLE=1) and check the 100k loopback\n");
         return 1;
     }
     printf("PASS pps_inject: stream survived edge injection "
