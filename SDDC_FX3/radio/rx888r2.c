@@ -19,7 +19,9 @@ void rx888r2_GpioSet(uint32_t mdata)
     CyU3PGpioSetValue (GPIO_SHDWN, (mdata & SHDWN) == SHDWN ); 		 // SHDN
     CyU3PGpioSetValue (GPIO_DITH, (mdata & DITH ) == DITH  ); 		 // DITH
     CyU3PGpioSetValue (GPIO_RANDO, (mdata & RANDO) == RANDO ); 		 // RAND
+#if !PPS_CTL_ENABLE
     CyU3PGpioSetValue (GPIO_BIAS_HF, (mdata & BIAS_HF) == BIAS_HF);
+#endif  /* PPS_CTL_ENABLE: GPIO 19 is the GPIF CTL[2] PPS input, not a GPIO */
     CyU3PGpioSetValue (GPIO_BIAS_VHF, (mdata & BIAS_VHF) == BIAS_VHF);
 	CyU3PGpioSetValue (GPIO_LED_BLUE, (mdata & LED_BLUE) == LED_BLUE);
 	CyU3PGpioSetValue (GPIO_PGA, (mdata & PGA_EN ) != PGA_EN  ); 		 // PGA_EN
@@ -31,7 +33,9 @@ void rx888r2_GpioInitialize()
     ConfGPIOsimpleout (GPIO_SHDWN);
     ConfGPIOsimpleout (GPIO_DITH);
     ConfGPIOsimpleout (GPIO_RANDO);
+#if !PPS_CTL_ENABLE
     ConfGPIOsimpleout (GPIO_BIAS_HF);
+#endif  /* PPS_CTL_ENABLE: leave GPIO 19 unclaimed so the GPIF owns it as CTL[2] */
     ConfGPIOsimpleout (GPIO_BIAS_VHF);
 	ConfGPIOsimpleout (GPIO_LED_BLUE);
     ConfGPIOsimpleout (GPIO_VHF_EN);

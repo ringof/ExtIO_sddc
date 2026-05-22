@@ -30,6 +30,15 @@
 #define TRACESERIAL		/* enable the trace to serial port*/
 #include "protocol.h"
 
+/* In-band PPS marker (issue #125), Phase 2 / Config B.
+ * 0 (default): production — GPIO 19 (BIAS_HF) stays a simple GPIO output.
+ * 1: release GPIO 19 from simple GPIO so the GPIF owns it as CTL[2], the
+ *    PPS input the control comparator watches.  GPIO 18 (BIAS_VHF) remains
+ *    a simple output and serves as the software-PPS test driver, looped
+ *    back to GPIO 19 through the 100k resistor.  Enabling this requires the
+ *    PPS-marker waveform (SDDC_GPIF_PPS.h) with the comparator on CTL[2]. */
+#define PPS_CTL_ENABLE 0
+
 #define FIFO_DMA_RX_SIZE        (0)	                  /* DMA transfer size is set to infinite */
 #define FIFO_THREAD_STACK       (0x800)               /* application thread stack size */
 #define FIFO_THREAD_PRIORITY    (8)                   /* application thread priority */
