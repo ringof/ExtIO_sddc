@@ -556,40 +556,6 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 
 
-				/* TEST-ONLY, TEMPORARY (issue #125 Phase 1): GPIO 18 -> 19
-				 * 100k hardware loopback check.  Drives GPIO 18 (BIAS_VHF)
-				 * and reads it back on GPIO 19 (BIAS_HF), reconfigured as a
-				 * pull-free input so the 100k dominates leakage.  Returns two
-				 * bytes: the GPIO 19 readback when 18 is driven 0, then 1.
-				 * Restores GPIO 19 to output-low afterward.  Remove once the
-				 * loopback is confirmed (Phase 1). */
-				case GPIOLOOPFX3:
-					{
-						const uint8_t PIN_DRV = 18;  /* BIAS_VHF — driver */
-						const uint8_t PIN_SNS = 19;  /* BIAS_HF  — sense  */
-						CyBool_t v0 = CyFalse, v1 = CyFalse;
-
-						ConfGPIOsimpleinput(PIN_SNS);  /* no pull: 100k dominates */
-						CyU3PGpioSetValue(PIN_DRV, CyFalse);
-						CyU3PThreadSleep(1);
-						CyU3PGpioGetValue(PIN_SNS, &v0);
-						CyU3PGpioSetValue(PIN_DRV, CyTrue);
-						CyU3PThreadSleep(1);
-						CyU3PGpioGetValue(PIN_SNS, &v1);
-
-						ConfGPIOsimpleout(PIN_SNS);    /* restore to output */
-						CyU3PGpioSetValue(PIN_SNS, CyFalse);
-						CyU3PGpioSetValue(PIN_DRV, CyFalse);
-
-						glEp0Buffer[0] = v0 ? 1 : 0;
-						glEp0Buffer[1] = v1 ? 1 : 0;
-						CyU3PUsbSendEP0Data(2, glEp0Buffer);
-						DebugPrint(4, "\r\nGPIOLOOP v0=%d v1=%d",
-						           glEp0Buffer[0], glEp0Buffer[1]);
-						isHandled = CyTrue;
-					}
-					break;
-
    case READINFODEBUG:
 					{
 					if (wValue >0)

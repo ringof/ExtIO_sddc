@@ -34,14 +34,6 @@ enum FX3Command {
                              * Issue #125 -- permanent diagnostic, safe in
                              * production.  Slot 0xB7 was previously unused
                              * (never assigned to any prior command). */
-    GPIOLOOPFX3   = 0xCD,   /* TEST-ONLY, TEMPORARY (issue #125 Phase 1):
-                             * GPIO 18 -> GPIO 19 100k hardware loopback check.
-                             * Reconfigures GPIO 19 to a pull-free input, drives
-                             * GPIO 18 low then high, reads GPIO 19 each time,
-                             * restores GPIO 19 to output low, and returns two
-                             * bytes {read@drive0, read@drive1}.  Host asserts
-                             * {0, 1}.  Removed once the loopback is confirmed.
-                             * Slot 0xCD was never assigned to a prior command. */
     HANGFX3       = 0xCE,   /* TEST-ONLY: sleep wValue ms in the EP0 handler
                              * to deterministically wedge the vendor callback.
                              * Used by tests/fx3_cmd.c test_health_recovery to

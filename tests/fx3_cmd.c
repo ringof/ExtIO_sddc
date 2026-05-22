@@ -60,9 +60,6 @@
                               * 2=oneshot.  Out-of-range STALLs. */
 #define TUNERSTDBY    0xB8
 #define READINFODEBUG 0xBA
-#define GPIOLOOPFX3   0xCD   /* TEST-ONLY, TEMPORARY (issue #125 Phase 1):
-                              * GPIO 18->19 100k loopback check.  Returns 2
-                              * bytes {read@drive0, read@drive1}; expect {0,1}. */
 #define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
                               * used by test_health_recovery to trip the
                               * firmware health watchdog (#104, #105). */
@@ -359,31 +356,6 @@ static int do_test(libusb_device_handle *h)
     return 0;
 }
 
-/* TEST-ONLY, TEMPORARY (issue #125 Phase 1): exercise the GPIO 18->19
- * 100k hardware loopback.  Firmware drives GPIO 18 low then high and
- * reports the GPIO 19 readback for each.  PASS iff the readback follows
- * the drive: {0, 1}.  Requires the 100k loopback resistor on the unit. */
-static int do_gpioloop(libusb_device_handle *h)
-{
-    uint8_t buf[2] = {0xFF, 0xFF};
-    int r = ctrl_read(h, GPIOLOOPFX3, 0, 0, buf, 2);
-    if (r < 0) {
-        printf("FAIL gpioloop: %s\n", libusb_strerror(r));
-        return 1;
-    }
-    if (r < 2) {
-        printf("FAIL gpioloop: short reply (%d bytes, expected 2)\n", r);
-        return 1;
-    }
-    if (buf[0] != 0 || buf[1] != 1) {
-        printf("FAIL gpioloop: readback {%d,%d}, expected {0,1} "
-               "(check 100k loopback GPIO18<->GPIO19)\n", buf[0], buf[1]);
-        return 1;
-    }
-    printf("PASS gpioloop: readback {%d,%d}\n", buf[0], buf[1]);
-    return 0;
-}
-
 static int do_gpio(libusb_device_handle *h, uint32_t bits)
 {
     int r = cmd_u32(h, GPIOFX3, bits);
@@ -585,7 +557,6 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"start",            do_start},
     {"stop",             do_stop},
     {"stats",            do_stats},
-    {"gpioloop",         do_gpioloop},
     {"ep0_overflow",     do_ep0_overflow},
     {"oob_brequest",     do_test_oob_brequest},
     {"oob_setarg",       do_test_oob_setarg},
@@ -5524,7 +5495,6 @@ static void usage(const char *prog)
         "  pib_overflow                 Provoke + detect PIB error (issue #10)\n"
         "  stack_check                  Query stack watermark, verify headroom (issue #12)\n"
         "  stats                        Read GETSTATS diagnostic counters\n"
-        "  gpioloop                     TEMP: GPIO 18->19 100k loopback check (#125 Phase 1)\n"
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
         "  stats_pll                    Verify Si5351 PLL lock status\n"
@@ -5736,9 +5706,6 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stats") == 0) {
         rc = do_stats(h);
-
-    } else if (strcmp(cmd, "gpioloop") == 0) {
-        rc = do_gpioloop(h);
 
     } else if (strcmp(cmd, "stats_i2c") == 0) {
         rc = do_test_stats_i2c(h);
