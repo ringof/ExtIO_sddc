@@ -20,6 +20,18 @@
 
 #include "radio.h"
 
+/* GPIF SM state indices for the BUSY/WAIT wedge states, used by the
+ * watchdog stall check below.  These MUST track the values generated in
+ * SDDC_GPIF_PPS.h — that header defines the GPIF arrays and is included
+ * exactly once (StartStopApplication.c), so it can't be included here
+ * without duplicate-definition link errors.  The 14-state in-band-PPS
+ * waveform renumbered these from the prior 10-state machine
+ * (was 5/7/8/9). */
+#define GPIF_ST_TH0_BUSY	6
+#define GPIF_ST_TH1_BUSY	8
+#define GPIF_ST_TH1_WAIT	10
+#define GPIF_ST_TH0_WAIT	11
+
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void CheckStatusSilent(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -261,8 +273,8 @@ void ApplicationThread ( uint32_t input)
 						uint8_t gpifState = 0xFF;
 						CyU3PGpifGetSMState(&gpifState);
 
-						if (gpifState == 5 || gpifState == 7 ||
-						    gpifState == 8 || gpifState == 9)
+						if (gpifState == GPIF_ST_TH0_BUSY || gpifState == GPIF_ST_TH1_BUSY ||
+						    gpifState == GPIF_ST_TH1_WAIT || gpifState == GPIF_ST_TH0_WAIT)
 						{
 							stallCount++;
 							DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
@@ -288,7 +300,7 @@ void ApplicationThread ( uint32_t input)
 										gpifState, curDMA, glWdgRecoveryCount, glWdgMaxRecovery);
 									/* Soft-stop: deassert FW_TRG so the SM exits
 									 * to IDLE via !FW_TRG transitions.
-									 * REQUIRES updated SDDC_GPIF.h waveform with
+									 * REQUIRES updated SDDC_GPIF_PPS.h waveform with
 									 * !FW_TRG exits on TH0_RD, TH0_WAIT, TH1_WAIT.
 									 *
 									 * Caveat: soft-stop needs the external clock

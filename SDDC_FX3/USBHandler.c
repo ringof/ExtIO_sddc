@@ -421,7 +421,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					/* Soft-stop: deassert FW_TRG so the GPIF SM exits to IDLE
-					 * via the !FW_TRG transitions added in SDDC_GPIF.h.
+					 * via the !FW_TRG transitions added in SDDC_GPIF_PPS.h.
 					 * REQUIRES the updated waveform with !FW_TRG exits on
 					 * TH0_RD, TH0_WAIT, and TH1_WAIT states.  Without
 					 * the new waveform, the SM will hang in WAIT states
