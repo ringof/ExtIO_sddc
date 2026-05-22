@@ -5524,6 +5524,7 @@ static void usage(const char *prog)
         "  pib_overflow                 Provoke + detect PIB error (issue #10)\n"
         "  stack_check                  Query stack watermark, verify headroom (issue #12)\n"
         "  stats                        Read GETSTATS diagnostic counters\n"
+        "  gpioloop                     TEMP: GPIO 18->19 100k loopback check (#125 Phase 1)\n"
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
         "  stats_pll                    Verify Si5351 PLL lock status\n"
@@ -5735,6 +5736,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stats") == 0) {
         rc = do_stats(h);
+
+    } else if (strcmp(cmd, "gpioloop") == 0) {
+        rc = do_gpioloop(h);
 
     } else if (strcmp(cmd, "stats_i2c") == 0) {
         rc = do_test_stats_i2c(h);
