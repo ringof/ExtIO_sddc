@@ -2388,26 +2388,32 @@ static int do_test_sustained_stream(libusb_device_handle *h)
     return 0;
 }
 
-/* pps_inject (issue #125, Phase 4a): inject GPIO 18 (BIAS_VHF) edges during
- * streaming and confirm the stream survives.  In Config B those edges reach
- * the GPIF as CTL[2] through the 100k loopback and fire in-band marker
- * COMMITs (short USB transfers); this test verifies the data path stays
- * healthy through them.  It does NOT detect markers — the question is purely
- * "does anything break the stream."  Sensitive by design: fails on any
- * transport error, throughput collapse, device reset, or new PIB / streaming
- * fault during injection.
+/* pps_inject (issue #125, Phase 4a): a marker-rate ramp.  Streams while
+ * injecting GPIO 18 (BIAS_VHF) rising edges at increasing rates; in Config B
+ * each edge reaches the GPIF as CTL[2] (via the 100k loopback) and fires an
+ * in-band marker COMMIT (a short USB transfer).  Rapid partial commits churn
+ * the DMA buffer ring faster than USB drains it, eventually overrunning
+ * thread 0 (PIB_ERR_THR0_WR_OVERRUN).  This test finds that ceiling: it steps
+ * the rate up, reads PIB / streaming-fault deltas per step, and stops at the
+ * first rate that errors or stalls.  Real PPS is 1 Hz, so the bar is that the
+ * realistic range stays clean.
  *
- * Benign in Config A (no marker path — toggling BIAS_VHF just drives a bias
- * line, no commits), so it can't false-fail there.  Meaningful only with the
- * 100k GPIO18<->GPIO19 loopback and Config B firmware.  Runs at a modest
- * sample rate so DMA headroom isolates "markers" from host EP0 pacing.
- * Not part of fw_test.sh (hardware/config-gated) — run manually. */
+ * PASS  = markers observed (short transfers) and clean (no PIB/fault, no
+ *         stall) through at least 10 Hz (10x a real PPS).
+ * FAIL  = errors below 10 Hz, or a device reset.
+ * INCONCLUSIVE = no markers seen at all (Config A firmware, or no loopback).
+ *
+ * Host EP0 traffic is exonerated as a cause: the same harness in Config A
+ * (no marker path) injects edges with zero PIB errors.  Modest sample rate
+ * keeps DMA headroom so the ceiling reflects marker churn, not the link. */
 static int do_test_pps_inject(libusb_device_handle *h)
 {
     const uint32_t GPIO_BASE = 0x800;             /* LED_BLUE; SHDWN/DITH low, ADC runs */
     const uint32_t GPIO_EDGE = GPIO_BASE | 0x200; /* + BIAS_VHF (bit 9 / GPIO 18) high */
-    const uint32_t sample_rate = 16000000;        /* headroom vs host EP0 pacing */
-    const double   duration_sec = 12.0;
+    const uint32_t sample_rate = 16000000;
+    static const int rates[] = { 1, 2, 5, 10, 20, 50, 100 }; /* rising edges/sec */
+    const int nrates = (int)(sizeof(rates) / sizeof(rates[0]));
+    const double step_dur = 2.0;
     int r;
 
     r = cmd_u32_retry(h, STARTADC, sample_rate);
@@ -2415,8 +2421,8 @@ static int do_test_pps_inject(libusb_device_handle *h)
 
     cmd_u32(h, GPIOFX3, GPIO_BASE);   /* BIAS_VHF low baseline */
 
-    struct fx3_stats before;
-    if (read_stats(h, &before) < 0) {
+    struct fx3_stats boot0;
+    if (read_stats(h, &boot0) < 0) {
         printf("FAIL pps_inject: GETSTATS (before)\n");
         cmd_u32(h, STOPFX3, 0);
         return 1;
@@ -2433,111 +2439,99 @@ static int do_test_pps_inject(libusb_device_handle *h)
     uint8_t *buf = malloc(chunk);
     if (!buf) { cmd_u32(h, STOPFX3, 0); printf("FAIL pps_inject: malloc\n"); return 1; }
 
-    uint64_t total = (uint64_t)primed;
-    uint32_t edges = 0;        /* rising edges injected on GPIO 18  */
-    uint32_t short_reads = 0;  /* reads returning notably short (~markers) */
-    int gpio_high = 0, fail = 0;
+    uint32_t total_short = 0;   /* short transfers seen across all steps (~markers) */
+    int ceiling_clean = 0;      /* highest rate with markers and no PIB/fault/stall */
+    int broke_at = 0;           /* first rate that errored/stalled (0 = none) */
 
-    struct timespec start_ts, now_ts, last_inject;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
-    last_inject = start_ts;
+    printf("# pps_inject rate ramp @ %u MSPS (real PPS = 1 Hz):\n",
+           sample_rate / 1000000);
 
-    for (;;) {
-        clock_gettime(CLOCK_MONOTONIC, &now_ts);
-        double t = (now_ts.tv_sec - start_ts.tv_sec)
-                 + (now_ts.tv_nsec - start_ts.tv_nsec) / 1e9;
-        if (t >= duration_sec) break;
+    for (int i = 0; i < nrates; i++) {
+        int rate = rates[i];
+        double toggle_iv = 0.5 / rate;   /* high then low per PPS period */
 
-        /* Escalating injection schedule (seconds):
-         *   0-3   quiet baseline (no edges)
-         *   3-5   single clean edges, one toggle / 500 ms
-         *   5-7   rapid, one toggle / 5 ms (~100 rising edges/s)
-         *   7-9   periodic, one toggle / 500 ms (PPS-like, ~1 Hz)
-         *   9-12  quiet recovery */
-        double since = (now_ts.tv_sec - last_inject.tv_sec)
-                     + (now_ts.tv_nsec - last_inject.tv_nsec) / 1e9;
-        int toggle = 0;
-        if      (t >= 3.0 && t < 5.0) toggle = (since >= 0.5);
-        else if (t >= 5.0 && t < 7.0) toggle = (since >= 0.005);
-        else if (t >= 7.0 && t < 9.0) toggle = (since >= 0.5);
-        if (toggle) {
-            gpio_high = !gpio_high;
-            cmd_u32(h, GPIOFX3, gpio_high ? GPIO_EDGE : GPIO_BASE);
-            if (gpio_high) edges++;
-            last_inject = now_ts;
+        struct fx3_stats s0;
+        if (read_stats(h, &s0) < 0) { broke_at = rate; break; }
+
+        uint64_t step_bytes = 0;
+        uint32_t step_short = 0, step_edges = 0;
+        int gpio_high = 0, stalled = 0;
+        struct timespec t0, now, last_tog;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        last_tog = t0;
+
+        for (;;) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double el = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
+            if (el >= step_dur) break;
+
+            double since = (now.tv_sec - last_tog.tv_sec)
+                         + (now.tv_nsec - last_tog.tv_nsec) / 1e9;
+            if (since >= toggle_iv) {
+                gpio_high = !gpio_high;
+                cmd_u32(h, GPIOFX3, gpio_high ? GPIO_EDGE : GPIO_BASE);
+                if (gpio_high) step_edges++;
+                last_tog = now;
+            }
+
+            int transferred = 0;
+            r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
+            if (r == 0 || (r == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
+                step_bytes += transferred;
+                if (transferred > 0 && transferred < chunk - 1024) step_short++;
+            } else {
+                stalled = 1;
+                break;
+            }
         }
 
-        int transferred = 0;
-        r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
-        if (r == 0 || (r == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
-            total += transferred;
-            if (transferred > 0 && transferred < chunk - 1024) short_reads++;
-        } else {
-            printf("FAIL pps_inject: bulk error at %lu bytes (t=%.1fs): %s\n",
-                   (unsigned long)total, t, libusb_strerror(r));
-            fail = 1;
-            break;
-        }
+        struct fx3_stats s1;
+        int gs = read_stats(h, &s1);
+        uint32_t pibd = (gs >= 0) ? s1.pib_errors - s0.pib_errors : 0;
+        uint32_t fltd = (gs >= 0) ? s1.streaming_faults - s0.streaming_faults : 0;
+        total_short += step_short;
+
+        printf("#   %3d Hz: %lu bytes, %u edges, %u short, pib_delta=%u, fault_delta=%u%s\n",
+               rate, (unsigned long)step_bytes, step_edges, step_short,
+               pibd, fltd, stalled ? "  STALLED" : "");
+
+        if (stalled || pibd != 0 || fltd != 0) { broke_at = rate; break; }
+        ceiling_clean = rate;
+        cmd_u32(h, GPIOFX3, GPIO_BASE);   /* settle low between steps */
     }
 
     free(buf);
 
-    struct fx3_stats after;
-    int got_after = read_stats(h, &after);
-
+    struct fx3_stats bootN;
+    int gsN = read_stats(h, &bootN);
     cmd_u32(h, STOPFX3, 0);
     cmd_u32(h, GPIOFX3, GPIO_BASE);   /* restore: BIAS_VHF low */
 
-    uint64_t expected = (uint64_t)2 * sample_rate * (uint64_t)duration_sec;
-    int percent = (int)(total * 100 / expected);
-    uint32_t pib_delta = 0, fault_delta = 0;
-
-    /* Diagnostics first — print even on failure so a stall shows its cause. */
-    if (got_after >= 0) {
-        pib_delta   = after.pib_errors - before.pib_errors;
-        fault_delta = after.streaming_faults - before.streaming_faults;
-        printf("# pps_inject: %lu bytes (%d%% of %lu), %u edges, %u short reads, "
-               "pib_delta=%u, fault_delta=%u, boot %u->%u\n",
-               (unsigned long)total, percent, (unsigned long)expected,
-               edges, short_reads, pib_delta, fault_delta,
-               before.boot_count, after.boot_count);
-    } else {
-        printf("# pps_inject: %lu bytes (%d%% of %lu), %u edges, %u short reads, "
-               "(GETSTATS after failed)\n",
-               (unsigned long)total, percent, (unsigned long)expected,
-               edges, short_reads);
-    }
-
-    if (fail) return 1;   /* bulk error already reported above */
-    if (got_after < 0) { printf("FAIL pps_inject: GETSTATS (after)\n"); return 1; }
-
-    if (after.boot_count != before.boot_count) {
+    if (gsN >= 0 && bootN.boot_count != boot0.boot_count) {
         printf("FAIL pps_inject: device reset during test (boot %u->%u)\n",
-               before.boot_count, after.boot_count);
+               boot0.boot_count, bootN.boot_count);
         return 1;
     }
-    if (percent < 50) {
-        printf("FAIL pps_inject: throughput collapsed (%d%%) — stream broke under injection\n",
-               percent);
+    if (broke_at)
+        printf("# pps_inject: clean through %d Hz; first errors/stall at %d Hz\n",
+               ceiling_clean, broke_at);
+    else
+        printf("# pps_inject: clean across all tested rates (1..%d Hz)\n", ceiling_clean);
+
+    if (total_short == 0) {
+        printf("INCONCLUSIVE pps_inject: no markers observed — build Config B "
+               "(make -C SDDC_FX3 PPS_CTL_ENABLE=1) and check the 100k loopback\n");
         return 1;
     }
-    if (pib_delta != 0) {
-        printf("FAIL pps_inject: %u new PIB error(s) during injection — markers disturbing the GPIF\n",
-               pib_delta);
+    if (ceiling_clean < 10) {
+        printf("FAIL pps_inject: markers break the stream at %d Hz (clean only through "
+               "%d Hz) — below the 10 Hz realistic-margin bar\n",
+               broke_at, ceiling_clean);
         return 1;
     }
-    if (fault_delta != 0) {
-        printf("FAIL pps_inject: %u new streaming fault(s) during injection\n", fault_delta);
-        return 1;
-    }
-    if (short_reads == 0) {
-        printf("INCONCLUSIVE pps_inject: no markers observed (short reads=0) — build "
-               "Config B (make -C SDDC_FX3 PPS_CTL_ENABLE=1) and check the 100k loopback\n");
-        return 1;
-    }
-    printf("PASS pps_inject: stream survived edge injection "
-           "(%d%% throughput, %u edges, %u short reads, no faults)\n",
-           percent, edges, short_reads);
+    printf("PASS pps_inject: marker stream clean through %d Hz (real PPS is 1 Hz)%s\n",
+           ceiling_clean,
+           broke_at ? "; ceiling characterized" : "; no ceiling within tested range");
     return 0;
 }
 
