@@ -276,13 +276,23 @@ cd tests && make            # build fx3_cmd (and rx888_stream) first
 ./ka9q_test.sh              # hour-long soak; see --help for options
 ```
 
-A cycle passes/fails on radiod process-liveness and a clean idle device
-after stop — not on log contents. The radiod log is scanned only
-advisorily: known-benign noise (the `TUNERSTDBY`/0xB8 STALL, the FFTW
-wisdom fallback, avahi mDNS name collisions across cycles) is filtered out
-and anything suspicious that remains is printed as a `# WARN`. Set
-`KA9Q_STRICT_LOG=1` to make a residual match fail the cycle; override the
-match/exclude lists with `KA9Q_FATAL_PATTERN` / `KA9Q_BENIGN_PATTERN`.
+A cycle passes/fails on radiod process-liveness, a clean idle device
+after stop, and (Phase 2) a live-RF power spectrum — not on log contents.
+The radiod log is scanned only advisorily: known-benign noise (the
+`TUNERSTDBY`/0xB8 STALL, the FFTW wisdom fallback, avahi mDNS name
+collisions across cycles) is filtered out and anything suspicious that
+remains is printed as a `# WARN`. Set `KA9Q_STRICT_LOG=1` to make a
+residual match fail the cycle; override the match/exclude lists with
+`KA9Q_FATAL_PATTERN` / `KA9Q_BENIGN_PATTERN`.
+
+**Data plane (Phase 2):** each cycle the harness runs ka9q's `powers`
+against the status group (`hf.local`) to pull a power spectrum (it creates
+a temporary spectrum channel dynamically — no conf change). It asserts the
+spectrum is *live RF*: most bins within `SPEC_DYN_RANGE_DB` (default 60) of
+the peak, vs. a frozen/shut-down ADC which collapses to a lone DC spike.
+This requires the image to include `powers` (now built); rebuild the image
+to enable it, or set `DATA_PLANE=0` to skip. Tunables: `SPEC_FREQ`,
+`SPEC_BINS`, `SPEC_BINWIDTH`, `SPEC_DYN_RANGE_DB`, `SPEC_MIN_FRAC`.
 
 Requires the same hardware/privileged-Docker setup as above.
 

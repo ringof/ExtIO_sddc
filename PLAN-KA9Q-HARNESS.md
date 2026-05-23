@@ -174,9 +174,18 @@ effort:
    directly validates the #131 stop→standby path through the real host and
    exercises both reset mechanisms. **Get this done and green before
    anything else.**
-2. **Data plane — SECOND CUT (deferred).** Subscribe to the `wwv-pcm.local`
-   output multicast (ka9q `pcmrecord`/`monitor` or a small UDP sniffer) and
-   assert samples flow while up and cease after stop.
+2. **Data plane — SECOND CUT. DONE (pending bench).** Uses ka9q's `powers`
+   tool (added to the image) to pull a power spectrum from radiod each cycle
+   — `powers` dynamically creates a spectrum channel via the status group
+   (`hf.local`), so no conf change is needed — and asserts the spectrum
+   looks like **live RF**, not a dead/frozen ADC. The metric is
+   scale-independent: broadband noise keeps most bins within a dynamic range
+   (`SPEC_DYN_RANGE_DB`, default 60 dB) of the spectrum's own peak, whereas a
+   shut-down/frozen ADC FFTs to a lone DC spike with the rest near −∞ — so we
+   require ≥ `SPEC_MIN_FRAC` (default 0.5) of bins to qualify. This is a
+   stronger signal than a PCM byte-count (which noise alone would satisfy)
+   and ties directly to the frozen-ADC failure mode discussed for #131.
+   Auto-skipped if `powers` isn't in the image.
 3. **Fault injection (stretch).** Assert `SHDN` or pull the Si5351 clock
    mid-stream and confirm `radiod` logs the degradation and recovers. NOTE:
    this collides with constraint #2 — `fx3_cmd` cannot touch the device

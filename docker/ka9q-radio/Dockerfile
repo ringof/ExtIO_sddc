@@ -70,7 +70,7 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so sig_gen.so control tune monitor
+    radiod rx888.so sig_gen.so control tune monitor powers
 
 # ---- Runtime image ----
 FROM debian:bookworm-slim
@@ -102,6 +102,7 @@ COPY --from=builder /build/ka9q-radio/src/radiod /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/control /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/tune /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/monitor /usr/local/bin/
+COPY --from=builder /build/ka9q-radio/src/powers /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 

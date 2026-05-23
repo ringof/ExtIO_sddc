@@ -64,6 +64,28 @@ PID_BOOT=00f3
 RADIOD_CONF=/etc/radio/radiod@rx888-test.conf
 LOG_IN=/tmp/ka9q_radiod.log         # logfile path inside the container
 
+# Phase 2 data-plane check: use ka9q's `powers` tool to pull a power
+# spectrum from radiod (it dynamically creates a spectrum channel via the
+# status group — no conf change needed) and assert the spectrum looks like
+# LIVE RF, not a dead/frozen ADC.  Runs inside the container (mDNS resolves
+# the status group); consumes radiod's status/data multicast only (no USB),
+# so it's safe while radiod holds the device.  Auto-skipped if `powers`
+# isn't in the image (rebuild to enable).
+#
+# Live-RF metric (scale-independent): broadband noise keeps MOST bins within
+# a dynamic range of the spectrum's own peak; a shut-down/frozen ADC FFTs to
+# a lone DC spike with the rest near -inf, so very few bins qualify.  We
+# require >= SPEC_MIN_FRAC of bins within SPEC_DYN_RANGE_DB of the max.
+DATA_PLANE="${DATA_PLANE:-1}"
+SPEC_GROUP="${SPEC_GROUP:-hf.local}"      # status group (rx888-test.conf: status =)
+SPEC_FREQ="${SPEC_FREQ:-10000000}"        # center freq Hz (WWV 10 MHz, in-band)
+SPEC_BINS="${SPEC_BINS:-256}"
+SPEC_BINWIDTH="${SPEC_BINWIDTH:-10000}"   # Hz/bin => 2.56 MHz span at 256 bins
+SPEC_INTERVAL="${SPEC_INTERVAL:-2}"       # powers integration time (s)
+SPEC_SSRC="${SPEC_SSRC:-30303}"           # arbitrary SSRC for the temp channel
+SPEC_DYN_RANGE_DB="${SPEC_DYN_RANGE_DB:-60}"
+SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
+
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
 # process-liveness and a clean idle device after stop.  radiod emits several
 # known-benign lines every run (see docker/ka9q-radio/README.md) — the
@@ -112,6 +134,34 @@ dev_present_boot() { lsusb -d "$VID:$PID_BOOT" >/dev/null 2>&1; }
 dev_free()         { "$FX3_CMD" test >/dev/null 2>&1; }
 radiod_running()   { docker exec "$CONTAINER" pgrep -x radiod >/dev/null 2>&1; }
 radiod_log()       { docker exec "$CONTAINER" cat "$LOG_IN" 2>/dev/null; }
+
+# Pull one power spectrum via `powers` and evaluate the live-RF metric.
+# Echoes "BINS LIVE MAX MIN" (LIVE = bins within SPEC_DYN_RANGE_DB of MAX;
+# MAX/MIN in dB, *100 as integers to stay shell-friendly), or nothing on
+# failure.  powers prints one CSV line: ts,fstart,fstop,binw,bincount,p0,p1...
+capture_spectrum() {
+    local csv
+    csv="$(docker exec "$CONTAINER" sh -c \
+        "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
+         -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP \
+         2>/dev/null" 2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
+    [[ -z "$csv" ]] && return 1
+    echo "$csv" | awk -F, -v dyn="$SPEC_DYN_RANGE_DB" '
+        NF >= 6 {
+            n = 0; max = -1e18; min = 1e18;
+            for (i = 6; i <= NF; i++) {
+                v = $i;
+                if (v !~ /^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) continue;  # skip inf/nan
+                val[n++] = v + 0;
+                if (v + 0 > max) max = v + 0;
+                if (v + 0 < min) min = v + 0;
+            }
+            if (n == 0) exit 1;
+            live = 0;
+            for (j = 0; j < n; j++) if (val[j] >= max - dyn) live++;
+            printf "%d %d %d %d\n", n, live, int(max*100), int(min*100);
+        }'
+}
 
 # Parse a decimal field (dma|gpif|pib|...) from `fx3_cmd stats`.
 stats_field() {
@@ -222,6 +272,16 @@ else
     sleep 3
 fi
 
+# ---- Data-plane availability: need `powers` in the image ----
+if [[ "$DATA_PLANE" == "1" ]]; then
+    if docker exec "$CONTAINER" sh -c 'command -v powers' >/dev/null 2>&1; then
+        note "data-plane: powers spectrum @ ${SPEC_FREQ}Hz, ${SPEC_BINS} bins; live-RF needs >= ${SPEC_MIN_FRAC} of bins within ${SPEC_DYN_RANGE_DB}dB of peak"
+    else
+        note "data-plane: 'powers' not in image — skipping (rebuild to enable)"
+        DATA_PLANE=0
+    fi
+fi
+
 # ---- Establish a known-good loaded state up front (also tests reload once) ----
 note "initial force_reload to establish a clean baseline"
 if "$FX3_CMD" -F "$FIRMWARE" reload | tail -1 | grep -q '^PASS'; then
@@ -249,13 +309,38 @@ while :; do
         stop_radiod; wait_dev_free || true
         continue
     fi
-    # --- Stream ---
-    remain=$((STREAM_SECS - SETTLE)); (( remain < 0 )) && remain=0
-    sleep "$remain"
+    # --- Stream window (with spectrum capture if enabled) ---
+    spec=""
+    if [[ "$DATA_PLANE" == "1" ]]; then
+        spec="$(capture_spectrum)"            # blocks ~SPEC_INTERVAL
+    fi
+    remain=$((STREAM_SECS - SETTLE))
+    (( DATA_PLANE == 1 )) && remain=$((remain - SPEC_INTERVAL))
+    (( remain > 0 )) && sleep "$remain"
     if ! radiod_running; then
         tap_fail "cycle $cycle: radiod died mid-stream" "$(radiod_log | tail -25)"
         stop_radiod; wait_dev_free || true
         continue
+    fi
+    # --- Data-plane assertion: spectrum must look like live RF. ---
+    spec_msg=""
+    if [[ "$DATA_PLANE" == "1" ]]; then
+        if [[ -z "$spec" ]]; then
+            tap_fail "cycle $cycle: powers returned no spectrum (radiod streaming?)" \
+                     "$(radiod_log | tail -15)"
+            stop_radiod; wait_dev_free || true
+            continue
+        fi
+        read -r s_n s_live s_max s_min <<<"$spec"
+        # live fraction = s_live / s_n, compared to SPEC_MIN_FRAC (awk float)
+        if ! awk -v live="$s_live" -v n="$s_n" -v f="$SPEC_MIN_FRAC" \
+                 'BEGIN { exit !(n > 0 && live >= f * n) }'; then
+            tap_fail "cycle $cycle: spectrum not live-RF ($s_live/$s_n bins within ${SPEC_DYN_RANGE_DB}dB of peak; max=$((s_max/100))dB min=$((s_min/100))dB)" \
+                     "likely frozen/shut-down ADC (DC spike) or no RF; $(radiod_log | tail -8)"
+            stop_radiod; wait_dev_free || true
+            continue
+        fi
+        spec_msg="; spec=${s_live}/${s_n}bins max=$((s_max/100))dB"
     fi
     # --- Advisory log scan: flag suspicious lines, minus known-benign ones.
     # radiod survived warmup (checked above) so it is not a hard failure;
@@ -299,7 +384,7 @@ while :; do
         tap_fail "cycle $cycle: DMA still advancing after stop ($dma1 -> $dma2)" ""
         continue
     fi
-    tap_ok "cycle $cycle: radiod start/stream/stop OK; device idle (gpif=$gpif dma=$dma1)"
+    tap_ok "cycle $cycle: radiod start/stream/stop OK${spec_msg}; device idle (gpif=$gpif dma=$dma1)"
 
     # --- Periodic forced firmware reload ---
     now=$(date +%s)
