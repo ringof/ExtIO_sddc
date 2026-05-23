@@ -95,6 +95,17 @@ FAIL_COUNT=0
 TMPDIR=""
 
 cleanup() {
+    # Park the ADC in low-power standby (SHDN) so the run doesn't leave
+    # the LTC2208 cooking.  device_quiesce clears SHDWN before streaming
+    # tests, so without this the device would exit with the ADC awake.
+    # STOPFX3 already asserts SHDN in firmware (issue #131); the explicit
+    # gpio (LED_BLUE | SHDWN = 0x0820) makes the parked state independent
+    # of that path.  Guarded on a usable fx3_cmd (early bail-outs run this
+    # trap before FX3_CMD is validated).
+    if [[ -n "${FX3_CMD:-}" && -x "$FX3_CMD" ]]; then
+        "$FX3_CMD" stop >/dev/null 2>&1 || true
+        "$FX3_CMD" gpio 0x0820 >/dev/null 2>&1 || true   # LED_BLUE | SHDWN — ADC standby
+    fi
     if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
         rm -rf "$TMPDIR"
     fi
