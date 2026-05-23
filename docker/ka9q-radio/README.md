@@ -276,6 +276,14 @@ cd tests && make            # build fx3_cmd (and rx888_stream) first
 ./ka9q_test.sh              # hour-long soak; see --help for options
 ```
 
+A cycle passes/fails on radiod process-liveness and a clean idle device
+after stop — not on log contents. The radiod log is scanned only
+advisorily: known-benign noise (the `TUNERSTDBY`/0xB8 STALL, the FFTW
+wisdom fallback, avahi mDNS name collisions across cycles) is filtered out
+and anything suspicious that remains is printed as a `# WARN`. Set
+`KA9Q_STRICT_LOG=1` to make a residual match fail the cycle; override the
+match/exclude lists with `KA9Q_FATAL_PATTERN` / `KA9Q_BENIGN_PATTERN`.
+
 Requires the same hardware/privileged-Docker setup as above.
 
 ## Requirements
