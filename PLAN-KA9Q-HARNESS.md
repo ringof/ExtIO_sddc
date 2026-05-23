@@ -84,10 +84,15 @@ device is actually driven in the field:
   real workflow recovers the device with a host USB reset; the harness must
   reproduce that path. It forces the kernel to re-enumerate the port and
   drop stale handle/endpoint state even when the device is half-claimed or
-  wedged and `RESETFX3` can't be delivered. There is no `usbreset`
-  subcommand in `fx3_cmd` today; add a small one (`libusb_reset_device()` /
-  the `USBDEVFS_RESET` ioctl) so the harness has no dependency on an external
-  `usbreset` binary.
+  wedged and `RESETFX3` can't be delivered. Bundled into `fx3_cmd` as the
+  `usbreset` subcommand (DONE) so the harness has no dependency on an
+  external `usbreset` binary. **Implemented via the raw `USBDEVFS_RESET`
+  ioctl on the `/dev/bus/usb/BBB/DDD` node, NOT `libusb_reset_device()`** —
+  the latter must open/claim the device, which fails on exactly the wedged
+  state we're recovering. `fx3_cmd usbreset` only enumerates (reads
+  descriptors, no claim) to locate the bus/address, then issues the ioctl,
+  so it works even when libusb can't claim. Linux-only, which matches the
+  Docker-on-Linux harness.
 
 Using both, in sequence, is intentional: `RESETFX3` is the in-band path we
 want to start validating (nothing else does), and the host `usbreset` is the
@@ -169,9 +174,10 @@ effort:
   reusing `ka9q.sh`'s container invocation. Cleanup trap stops radiod and
   the container, then parks the ADC via `fx3_cmd` (consistent with the new
   `fw_test.sh` / soak teardowns).
-- `tests/fx3_cmd.c` — small new `usbreset` subcommand
-  (`libusb_reset_device()` / `USBDEVFS_RESET`) for the forced-reload /
+- `tests/fx3_cmd.c` — new `usbreset` subcommand via the raw `USBDEVFS_RESET`
+  ioctl (enumerate-only, no claim; wedge-robust) for the forced-reload /
   wedge-recovery step, so the harness needs no external `usbreset` binary.
+  **DONE.**
 - Short `docker/ka9q-radio/README.md` addition documenting the idle-container
   run mode used by the harness.
 - No image rebuild required for Phase 1 (CMD override + `docker exec`).

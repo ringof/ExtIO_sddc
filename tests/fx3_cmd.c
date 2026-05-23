@@ -27,6 +27,9 @@
 #include <termios.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
 #include <libusb-1.0/libusb.h>
 
 /* ------------------------------------------------------------------ */
@@ -470,6 +473,73 @@ static int do_reset(libusb_device_handle *h)
         return 1;
     }
     printf("PASS reset (device rebooting to bootloader)\n");
+    return 0;
+}
+
+/* Host-side USB port reset via the raw USBDEVFS_RESET ioctl.
+ *
+ * Deliberately does NOT use libusb_reset_device(): that requires opening
+ * and claiming the device, which can fail on exactly the wedged state this
+ * is meant to recover.  We only enumerate (read descriptors — no claim) to
+ * locate the bus/address, then issue the ioctl on the /dev/bus/usb node,
+ * so it works even when the firmware is too wedged for libusb to claim.
+ *
+ * Linux-only (USBDEVFS_RESET), which matches the Docker-on-Linux harness
+ * and the external `usbreset` utility it replaces.  Unlike RESETFX3 this
+ * does not power-cycle the FX3, so a running device may re-enumerate still
+ * loaded — pair it with `reset` (RESETFX3) when a fresh image is required. */
+static int do_usbreset(libusb_context *ctx)
+{
+    libusb_device **list;
+    ssize_t n = libusb_get_device_list(ctx, &list);
+    if (n < 0) {
+        fprintf(stderr, "FAIL usbreset: libusb_get_device_list: %s\n",
+                libusb_strerror((int)n));
+        return 1;
+    }
+
+    uint8_t bus = 0, addr = 0;
+    uint16_t pid = 0;
+    int found = 0;
+    for (ssize_t i = 0; i < n; i++) {
+        struct libusb_device_descriptor d;
+        if (libusb_get_device_descriptor(list[i], &d) != 0)
+            continue;
+        if (d.idVendor == RX888_VID &&
+            (d.idProduct == RX888_PID_APP || d.idProduct == RX888_PID_BOOT)) {
+            bus = libusb_get_bus_number(list[i]);
+            addr = libusb_get_device_address(list[i]);
+            pid = d.idProduct;
+            found = 1;
+            break;
+        }
+    }
+    libusb_free_device_list(list, 1);
+
+    if (!found) {
+        fprintf(stderr, "FAIL usbreset: no RX888 found "
+                "(VID 0x%04X, PID 0x%04X/0x%04X)\n",
+                RX888_VID, RX888_PID_APP, RX888_PID_BOOT);
+        return 1;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/dev/bus/usb/%03u/%03u", bus, addr);
+
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        fprintf(stderr, "FAIL usbreset: open %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    int ret = ioctl(fd, USBDEVFS_RESET, 0);
+    int saved = errno;
+    close(fd);
+    if (ret < 0) {
+        fprintf(stderr, "FAIL usbreset: USBDEVFS_RESET %s: %s\n",
+                path, strerror(saved));
+        return 1;
+    }
+    printf("PASS usbreset %s (PID 0x%04X)\n", path, pid);
     return 0;
 }
 
@@ -5268,7 +5338,8 @@ static void usage(const char *prog)
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
         "  i2cw <addr> <reg> <byte>...  I2C write (hex addresses, hex data)\n"
-        "  reset                        Reboot FX3 to bootloader\n"
+        "  reset                        Reboot FX3 to bootloader (RESETFX3)\n"
+        "  usbreset                     Host-side USB port reset (USBDEVFS_RESET)\n"
         "  debug                        Interactive debug console over USB\n"
         "  raw <code>                   Send raw vendor request (hex)\n"
         "  ep0_overflow                 Test EP0 wLength bounds check\n"
@@ -5394,6 +5465,15 @@ int main(int argc, char **argv)
         int rc = upload_firmware(ctx, fw);
         libusb_exit(ctx);
         return (rc == 0) ? 0 : 1;
+    }
+
+    /* ---- Handle "usbreset" command (raw USBDEVFS_RESET, no claim) ----
+     * Handled before open_rx888()/auto-upload so it can recover a wedged
+     * device that can't be claimed and never triggers a firmware upload. */
+    if (strcmp(cmd, "usbreset") == 0) {
+        int rc = do_usbreset(ctx);
+        libusb_exit(ctx);
+        return rc;
     }
 
     /* ---- Auto-upload if -F given and device is in bootloader mode ---- */
