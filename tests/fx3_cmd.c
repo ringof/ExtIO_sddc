@@ -4876,6 +4876,20 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         }
     }
 
+    /* Final teardown: park the ADC in low-power standby (SHDN) so the
+     * soak does not leave the LTC2208 cooking after the run.  The
+     * inter-scenario cleanup above intentionally CLEARS SHDWN (0x0800)
+     * every cycle so each scenario starts with the ADC awake; without
+     * this final pass the device would be left in that awake state.
+     * STOPFX3 already asserts SHDN in firmware (issue #131); the explicit
+     * GPIOFX3 (LED_BLUE | SHDWN) makes the parked state independent of
+     * that path in case the last scenario aborted mid-stream.  Guarded on
+     * a live handle — after a NO_DEVICE abort there is nothing to talk to. */
+    if (h) {
+        cmd_u32(h, STOPFX3, 0);
+        cmd_u32(h, GPIOFX3, 0x0800 | 0x20); /* LED_BLUE on, SHDWN set — ADC standby */
+    }
+
     /* Final report */
     struct timespec end_ts;
     clock_gettime(CLOCK_MONOTONIC, &end_ts);
