@@ -534,12 +534,23 @@ static int do_usbreset(libusb_context *ctx)
     int ret = ioctl(fd, USBDEVFS_RESET, 0);
     int saved = errno;
     close(fd);
-    if (ret < 0) {
+    if (ret < 0 && saved != ENODEV) {
         fprintf(stderr, "FAIL usbreset: USBDEVFS_RESET %s: %s\n",
                 path, strerror(saved));
         return 1;
     }
-    printf("PASS usbreset %s (PID 0x%04X)\n", path, pid);
+    if (ret < 0) {
+        /* ENODEV is expected, not an error: the port reset reboots the
+         * FX3, which re-enumerates as a *new* device (on this hardware it
+         * drops to the bootloader, PID 0x00F1 -> 0x00F3), so the original
+         * /dev/bus/usb node disappears before the ioctl returns.  Same
+         * "device disconnected on success" semantics as RESETFX3.  The
+         * device now needs a firmware re-upload before it is usable. */
+        printf("PASS usbreset %s (PID 0x%04X reset; device re-enumerated — "
+               "re-upload firmware)\n", path, pid);
+    } else {
+        printf("PASS usbreset %s (PID 0x%04X reset)\n", path, pid);
+    }
     return 0;
 }
 

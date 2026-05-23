@@ -100,16 +100,30 @@ out-of-band recovery everyone already depends on — together they cover both
 "firmware is healthy enough to take a command" and "firmware is wedged and
 only a bus reset gets us back."
 
-Caveat to keep in mind (not a reason to drop either): a `USBDEVFS_RESET`
-does not remove power, so a *running* FX3 (PID `0x00F1`) can re-enumerate
-still loaded — the bus reset alone does not guarantee a fresh image. The
-guaranteed reload is `RESETFX3` → bootloader → re-upload. A literal power
-cycle (which clears the RAM image) needs hardware (switched hub / replug)
-and is out of scope for a software harness.
+**Bench finding (corrects an earlier assumption).** On the RX888mk2,
+`USBDEVFS_RESET` does *not* leave a running FX3 loaded — the port reset
+reboots the chip straight into the **bootloader** (observed
+`04b4:00f1` → `04b4:00f3`, new bus/address). So on this hardware `usbreset`
+is itself a force-reload, not merely a re-enumeration. Two consequences:
+
+1. The ioctl returns `ENODEV` because the original `/dev/bus/usb` node
+   disappears mid-reset (the device re-enumerates as a new one). This is
+   success, not failure — `fx3_cmd usbreset` now treats `ENODEV` as PASS,
+   same "device disconnected on success" semantics as `RESETFX3`.
+2. **Anything that issues `usbreset` (or `RESETFX3`) must re-upload firmware
+   afterward** — the device comes back in DFU. Any `fw_test`/soak that uses
+   it needs a re-upload step (`-F <img>` / `fx3_cmd load`, or radiod's
+   auto-upload) before the device is usable again. The teardown paths added
+   in `fw_test.sh` / the soak runner deliberately do **not** use `usbreset`
+   for exactly this reason — they `STOPFX3` + assert SHDN to leave a usable,
+   ADC-parked device; `usbreset` belongs only in the reload cycle.
 
 Harness `force_reload()` therefore = (stop radiod) → `fx3_cmd reset`
-(RESETFX3) → wait for bootloader PID `0x00F3` → host `usbreset` to guarantee
-clean re-enumeration → next radiod start re-uploads and re-validates.
+(RESETFX3) → host `usbreset` → wait for bootloader PID `0x00F3` →
+re-upload firmware (radiod auto-upload or `fx3_cmd load`) → next radiod
+start re-validates. (A literal power cycle that clears RAM still needs
+hardware — switched hub / replug — and is out of scope for a software
+harness.)
 
 **Soak cadence:** this is a next-level soak — an hour-long run of radiod
 start/stop cycles with `force_reload()` fired on a **time interval of
