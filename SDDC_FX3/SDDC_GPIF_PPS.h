@@ -1,6 +1,6 @@
 /*
  * Project Name: SDDC_GPIF_PPS.cyfx
- * Time : 05/22/2026 12:54:58
+ * Time : 05/22/2026 18:56:25
  * Device Type: FX3
  * Project Type: GPIF2
  *
@@ -81,7 +81,7 @@ CyU3PGpifWaveData CyFxGpifWavedata[]  = {
    Table that maps state indices to the descriptor table indices.
  */
 uint8_t CyFxGpifWavedataPosition[]  = {
-    0,1,2,3,4,5,6,7,8,9,10,11,1,12
+    0,1,2,3,4,5,6,7,8,9,10,11,12,1
 };
 
 /* Summary
@@ -101,7 +101,6 @@ uint32_t CyFxGpifRegValue[]  = {
     0x0000FFFB,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_DEFAULT */
     0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_POLARITY */
     0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_TOGGLE */
-    0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_SELECT */
     0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_SELECT */
     0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_SELECT */
     0x00000000,  /*  CY_U3P_PIB_GPIF_CTRL_BUS_SELECT */
