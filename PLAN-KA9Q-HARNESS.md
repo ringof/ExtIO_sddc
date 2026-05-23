@@ -118,12 +118,14 @@ is itself a force-reload, not merely a re-enumeration. Two consequences:
    for exactly this reason — they `STOPFX3` + assert SHDN to leave a usable,
    ADC-parked device; `usbreset` belongs only in the reload cycle.
 
-Harness `force_reload()` therefore = (stop radiod) → `fx3_cmd reset`
-(RESETFX3) → host `usbreset` → wait for bootloader PID `0x00F3` →
-re-upload firmware (radiod auto-upload or `fx3_cmd load`) → next radiod
-start re-validates. (A literal power cycle that clears RAM still needs
-hardware — switched hub / replug — and is out of scope for a software
-harness.)
+The reload primitive is now a single `fx3_cmd` subcommand (DONE):
+`fx3_cmd [-F <img>] reload` does RESETFX3 (in-band, if the device is in app
+mode and claimable) **and** a host-side `usbreset`, waits for the bootloader
+PID `0x00F3`, re-uploads the image, and verifies the device answers TESTFX3
+at the app PID. Harness `force_reload()` therefore = stop radiod →
+`fx3_cmd -F <img> reload` → next radiod start re-validates. (A literal power
+cycle that clears RAM still needs hardware — switched hub / replug — and is
+out of scope for a software harness.)
 
 **Soak cadence:** this is a next-level soak — an hour-long run of radiod
 start/stop cycles with `force_reload()` fired on a **time interval of
@@ -192,6 +194,9 @@ effort:
   ioctl (enumerate-only, no claim; wedge-robust) for the forced-reload /
   wedge-recovery step, so the harness needs no external `usbreset` binary.
   **DONE.**
+- `tests/fx3_cmd.c` — new `reload` subcommand (RESETFX3 + usbreset → wait
+  bootloader → re-upload via `-F` → verify TESTFX3); the `force_reload()`
+  primitive the soak calls. **DONE.**
 - Short `docker/ka9q-radio/README.md` addition documenting the idle-container
   run mode used by the harness.
 - No image rebuild required for Phase 1 (CMD override + `docker exec`).

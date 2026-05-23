@@ -554,6 +554,83 @@ static int do_usbreset(libusb_context *ctx)
     return 0;
 }
 
+/* Force a full firmware reload: reset the FX3 to the bootloader using BOTH
+ * the in-band RESETFX3 vendor command and a host-side usbreset (so a wedged
+ * device that can't accept RESETFX3 is still recovered), re-upload the
+ * image, and verify the device returns healthy at the app PID.
+ *
+ * This is the force_reload() primitive the ka9q-radio soak fires every few
+ * minutes; it also stands alone as `fx3_cmd [-F img] reload`.  Both the
+ * vendor reset and the bus reset leave the device in DFU, so a re-upload is
+ * mandatory afterward — that's the whole point. */
+static int do_reload(libusb_context *ctx, const char *fw)
+{
+    if (access(fw, R_OK) != 0) {
+        fprintf(stderr, "FAIL reload: firmware not readable: %s\n", fw);
+        return 1;
+    }
+
+    /* In-band reset first: if the device is in app mode and claimable, send
+     * RESETFX3 (the path nothing else exercises).  Best-effort — a wedged
+     * device may refuse it, which is what the usbreset below covers. */
+    libusb_device_handle *app =
+        libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
+    if (app) {
+        if (libusb_kernel_driver_active(app, 0) == 1)
+            libusb_detach_kernel_driver(app, 0);
+        if (libusb_claim_interface(app, 0) == 0) {
+            cmd_u32(app, RESETFX3, 0);   /* device disconnects; result ignored */
+            printf("# reload: RESETFX3 sent\n");
+        }
+        libusb_close(app);
+        sleep(2);                        /* let it re-enumerate to bootloader */
+    }
+
+    /* Host-side kick: always issue a usbreset too.  If RESETFX3 already
+     * dropped the device to the bootloader this just resets it again
+     * (harmless); if RESETFX3 couldn't be delivered, this recovers it.
+     * Non-fatal — the bootloader-wait below is the real gate. */
+    do_usbreset(ctx);
+    sleep(2);
+
+    /* Gate: confirm the device is in the bootloader before re-uploading. */
+    int in_boot = 0;
+    for (int waited_ms = 0; waited_ms < 6000; waited_ms += 250) {
+        libusb_device_handle *bl =
+            libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_BOOT);
+        if (bl) { libusb_close(bl); in_boot = 1; break; }
+        usleep(250000);
+    }
+    if (!in_boot) {
+        fprintf(stderr, "FAIL reload: device did not enter bootloader "
+                "(PID 0x%04X) within timeout\n", RX888_PID_BOOT);
+        return 1;
+    }
+    printf("# reload: device in bootloader (PID 0x%04X)\n", RX888_PID_BOOT);
+
+    /* Re-upload (verifies the device returns at the app PID). */
+    if (upload_firmware(ctx, fw) != 0) {
+        printf("FAIL reload: firmware re-upload failed\n");
+        return 1;
+    }
+
+    /* Verify the freshly-loaded firmware answers TESTFX3. */
+    libusb_device_handle *h = open_rx888(ctx);
+    if (!h) {
+        printf("FAIL reload: device not usable after re-upload\n");
+        return 1;
+    }
+    int rc = do_test(h);
+    close_rx888(h);
+    if (rc != 0) {
+        printf("FAIL reload: device unhealthy after re-upload\n");
+        return 1;
+    }
+    printf("PASS reload (device re-flashed and healthy at PID 0x%04X)\n",
+           RX888_PID_APP);
+    return 0;
+}
+
 /* Send a raw vendor command code — for testing stale/removed commands */
 static int do_raw(libusb_device_handle *h, uint8_t code)
 {
@@ -5339,6 +5416,8 @@ static void usage(const char *prog)
         "\n"
         "Commands:\n"
         "  load <firmware.img>          Upload firmware and exit\n"
+        "  reload [firmware.img]        Reset to bootloader (RESETFX3 + usbreset),\n"
+        "                               re-upload firmware, verify healthy\n"
         "  test                         Read device info (TESTFX3)\n"
         "  gpio <bits>                  Set GPIO word (hex or decimal)\n"
         "  adc <freq_hz>               Set ADC clock frequency (STARTADC)\n"
@@ -5483,6 +5562,22 @@ int main(int argc, char **argv)
      * device that can't be claimed and never triggers a firmware upload. */
     if (strcmp(cmd, "usbreset") == 0) {
         int rc = do_usbreset(ctx);
+        libusb_exit(ctx);
+        return rc;
+    }
+
+    /* ---- Handle "reload" command (reset -> re-upload -> verify) ----
+     * Like load, handled before open_rx888() since the device passes
+     * through the bootloader. Firmware comes from -F or a path argument. */
+    if (strcmp(cmd, "reload") == 0) {
+        const char *fw = (argc >= 3) ? argv[2] : firmware_path;
+        if (!fw) {
+            fprintf(stderr, "error: reload requires a firmware path\n"
+                            "usage: %s [-F img] reload [firmware.img]\n", argv[0]);
+            libusb_exit(ctx);
+            return 2;
+        }
+        int rc = do_reload(ctx, fw);
         libusb_exit(ctx);
         return rc;
     }
