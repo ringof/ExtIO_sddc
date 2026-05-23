@@ -589,7 +589,7 @@ Each pin is configured as a simple push-pull output during
 | 24 | PGA | Programmable gain amplifier enable (**inverted**: GPIO high = PGA off) |
 | 26 | ATT_DATA | Serial data to PE4304 and AD8370 (shared) |
 | 27 | ATT_CLK | Serial clock to PE4304 and AD8370 (shared) |
-| 28 | SHDWN | Shutdown control |
+| 28 | SHDWN | ADC shutdown control (driven from streaming state: standby when idle, awake while streaming — issue #131) |
 | 29 | DITH | Dither enable |
 | 35 | VHF_EN | VHF receive path enable |
 | 36 | SENSE | Hardware ID sense (input, active low = RX888r2) |

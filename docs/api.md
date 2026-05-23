@@ -443,7 +443,7 @@ listed here are ignored (no FX3 GPIO is wired up for them).
 
 | Bit | Mask         | Constant   | Function                              | Notes |
 |-----|--------------|------------|---------------------------------------|-------|
-| 5   | `0x00000020` | `SHDWN`    | Front-end shutdown line               | Active-high in the control word; drives the SHDN pin. |
+| 5   | `0x00000020` | `SHDWN`    | Front-end shutdown line               | Active-high in the control word; drives the SHDN pin. The firmware also drives this line automatically from the streaming state — standby at boot and on `STOPFX3`, woken on `STARTFX3` (issue #131) — so a manual write here may be overridden at the next start/stop. |
 | 6   | `0x00000040` | `DITH`     | LTC2208 dither enable                 | Enables ADC dither for SFDR improvement. |
 | 7   | `0x00000080` | `RANDO`    | LTC2208 output randomization          | When set, ADC output is randomized — host must un-randomize before processing. |
 | 8   | `0x00000100` | `BIAS_HF`  | HF antenna-port bias-tee power        | |

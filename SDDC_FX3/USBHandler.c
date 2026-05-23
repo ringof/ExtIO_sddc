@@ -18,6 +18,11 @@
 
 #include "health.h"
 
+/* Settle time after waking the ADC from SHDN standby before the GPIF
+ * state machine starts clocking samples (issue #131). A few ms is well
+ * within the host's start-command tolerance. */
+#define ADC_WAKEUP_SETTLE_MS 5
+
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
@@ -359,6 +364,10 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
+				/* Wake the ADC from SHDN standby (issue #131) and let it
+				 * settle before the GPIF SM begins clocking samples. */
+				rx888r2_AdcStandby(CyFalse);
+				CyU3PThreadSleep(ADC_WAKEUP_SETTLE_MS);
 				/* Stop any running SM before restart.  Always use
 				 * CyTrue (force-reload) here because StartGPIF()
 				 * calls CyU3PGpifLoad() which reloads the config
@@ -430,6 +439,9 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
 					glWdgRecoveryCount = 0;  /* reset recovery cap */
+					/* No longer streaming — park the ADC in low-power
+					 * standby via SHDN (issue #131). */
+					rx888r2_AdcStandby(CyTrue);
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;

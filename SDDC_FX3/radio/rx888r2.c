@@ -26,6 +26,13 @@ void rx888r2_GpioSet(uint32_t mdata)
     CyU3PGpioSetValue (GPIO_VHF_EN, (mdata & VHF_EN) == VHF_EN ); // VHF_EN
 }
 
+/* Drive the ADC SHDN line: standby=CyTrue parks the ADC in low-power
+ * standby (SHDN high, ~330 mA + thermal saving); CyFalse wakes it. */
+void rx888r2_AdcStandby(CyBool_t standby)
+{
+    CyU3PGpioSetValue (GPIO_SHDWN, standby);
+}
+
 void rx888r2_GpioInitialize()
 {
     ConfGPIOsimpleout (GPIO_SHDWN);
@@ -50,6 +57,8 @@ void rx888r2_GpioInitialize()
     CyU3PGpioSetValue (GPIO_VGA_LE, 1);
 
 	CyU3PGpioSetValue (GPIO_PGA, 1); // PGA =1 , 1.5v range
+
+	rx888r2_AdcStandby(CyTrue);  // not streaming at boot — park ADC in standby
 }
 
 /*
