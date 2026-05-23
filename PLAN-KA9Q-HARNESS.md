@@ -189,7 +189,8 @@ effort:
 - `tests/ka9q_test.sh` — host harness, TAP output mirroring `fw_test.sh`,
   reusing `ka9q.sh`'s container invocation. Cleanup trap stops radiod and
   the container, then parks the ADC via `fx3_cmd` (consistent with the new
-  `fw_test.sh` / soak teardowns).
+  `fw_test.sh` / soak teardowns). **DONE (Phase 1) — pending bench
+  validation.**
 - `tests/fx3_cmd.c` — new `usbreset` subcommand via the raw `USBDEVFS_RESET`
   ioctl (enumerate-only, no claim; wedge-robust) for the forced-reload /
   wedge-recovery step, so the harness needs no external `usbreset` binary.

@@ -255,6 +255,29 @@ full analysis.  Summary:
 - GPIO LED bit-mapping differences (cosmetic).
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 
+## Integration soak (`tests/ka9q_test.sh`)
+
+`tests/ka9q_test.sh` drives this image as a long-running firmware soak:
+it cycles the `radiod` session (start → stream → stop) and periodically
+forces a full firmware reload, asserting the device returns to a usable,
+ADC-parked idle state between sessions (issue #131).
+
+It runs the container in an **idle mode** — the CMD is overridden to
+`sleep infinity`, so `entrypoint.sh` still brings up dbus/avahi and
+generates FFTW wisdom, but `radiod` is not started by the container.
+The harness then launches/stops `radiod` per cycle via `docker exec`
+(logging to a file inside the container) and talks to the device from
+the host with `fx3_cmd` only while `radiod` is stopped — probing the
+device while `radiod` holds the interface would steal the claim and
+crash it. Run it from the repo's `tests/` directory:
+
+```
+cd tests && make            # build fx3_cmd (and rx888_stream) first
+./ka9q_test.sh              # hour-long soak; see --help for options
+```
+
+Requires the same hardware/privileged-Docker setup as above.
+
 ## Requirements
 
 - Docker with `--privileged` support
