@@ -54,6 +54,10 @@
 #define TUNERINIT     0xB4
 #define TUNERTUNE     0xB5
 #define SETARGFX3     0xB6
+#define SYNTH_PPS     0xB7   /* DIAGNOSTIC: software-driven in-band PPS marker
+                              * (issue #125).  wValue: 0=stop, 1=start at
+                              * wIndex ms (0->1000 default; 10..60000 valid),
+                              * 2=oneshot.  Out-of-range STALLs. */
 #define TUNERSTDBY    0xB8
 #define READINFODEBUG 0xBA
 #define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
@@ -518,9 +522,12 @@ static int do_test_double_stop(libusb_device_handle *h);
 static int do_test_double_start(libusb_device_handle *h);
 static int do_test_i2c_under_load(libusb_device_handle *h);
 static int do_test_sustained_stream(libusb_device_handle *h);
+static int do_test_pps_inject(libusb_device_handle *h);
 static int do_test_abandoned_stream(libusb_device_handle *h);
 static int do_test_vendor_rqt_wrap(libusb_device_handle *h);
 static int do_test_stale_vendor_codes(libusb_device_handle *h);
+static int do_test_synth_pps_protocol(libusb_device_handle *h);
+static int do_test_synth_pps_streaming(libusb_device_handle *h);
 static int do_test_setarg_gap_index(libusb_device_handle *h);
 static int do_test_gpio_extremes(libusb_device_handle *h);
 static int do_test_hw_smoke(libusb_device_handle *h);
@@ -577,6 +584,8 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"abandoned_stream", do_test_abandoned_stream},
     {"vendor_rqt_wrap",  do_test_vendor_rqt_wrap},
     {"stale_vendor_codes", do_test_stale_vendor_codes},
+    {"synth_pps_protocol", do_test_synth_pps_protocol},
+    {"synth_pps_streaming", do_test_synth_pps_streaming},
     {"setarg_gap_index", do_test_setarg_gap_index},
     {"gpio_extremes",    do_test_gpio_extremes},
     {"hw_smoke",         do_test_hw_smoke},
@@ -627,6 +636,8 @@ static void print_local_help(void)
            "  abandoned_stream              Simulate host crash (no STOPFX3)\n"
            "  vendor_rqt_wrap               Counter wraparound at 256\n"
            "  stale_vendor_codes            Dead-zone bRequest values\n"
+           "  synth_pps_protocol            SYNTH_PPS argument-validation stub (issue #125)\n"
+           "  synth_pps_streaming           SYNTH_PPS produces partial commits while streaming (issue #125)\n"
            "  setarg_gap_index              Near-miss SETARGFX3 wIndex\n"
            "  gpio_extremes                 Extreme GPIO patterns\n"
            "  hw_smoke                      ADC alive check (stream after GPIO)\n"
@@ -1328,11 +1339,12 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  26    /* bumped from 24 in si5351-chip-query PR — adds
-                             * clk0_reg16 [24] and clk0_result [25] diagnostic
-                             * bytes.  Strict-length check below means flashing
-                             * the new firmware is required after this host
-                             * update. */
+#define GETSTATS_LEN  36    /* INSTRUMENTATION (issue #125): temporarily
+                             * bumped 34 -> 36 to expose
+                             * glPpsLastWrapS0 [34] and glPpsLastWrapS1 [35]
+                             * so the host can read which SetWrapUp error
+                             * code commit_once is hitting.  Revert to 34
+                             * before A3 mechanism fix lands. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1351,6 +1363,15 @@ struct fx3_stats {
     uint8_t  clk0_result;      /* Boolean returned by si5351_clk0_enabled():
                                 * 1 if firmware sees CLK0 as enabled (i.e.
                                 * reg16 bit 7 == 0), 0 otherwise. */
+    uint32_t pps_count;        /* Successful partial commits emitted by the
+                                * synthetic-PPS module since boot (issue #125). */
+    uint32_t pps_commit_fail_count; /* Wrap-up attempts where both producer
+                                     * sockets refused (= streaming idle or
+                                     * channel between buffers). */
+    uint8_t  pps_last_wrap_s0; /* INSTRUMENTATION (#125): last CyU3PReturnStatus_t
+                                * from SetWrapUp on producer socket 0. */
+    uint8_t  pps_last_wrap_s1; /* INSTRUMENTATION (#125): last CyU3PReturnStatus_t
+                                * from SetWrapUp on producer socket 1. */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1369,6 +1390,10 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->boot_count, &buf[20], 4);
     s->clk0_reg16  = buf[24];
     s->clk0_result = buf[25];
+    memcpy(&s->pps_count,             &buf[26], 4);
+    memcpy(&s->pps_commit_fail_count, &buf[30], 4);
+    s->pps_last_wrap_s0 = buf[34];
+    s->pps_last_wrap_s1 = buf[35];
     return 0;
 }
 
@@ -1381,10 +1406,12 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u pps=%u pps_fail=%u s0=0x%02X s1=0x%02X\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result);
+           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result,
+           s.pps_count, s.pps_commit_fail_count,
+           s.pps_last_wrap_s0, s.pps_last_wrap_s1);
     return 0;
 }
 
@@ -2361,6 +2388,153 @@ static int do_test_sustained_stream(libusb_device_handle *h)
     return 0;
 }
 
+/* pps_inject (issue #125, Phase 4a): a marker-rate ramp.  Streams while
+ * injecting GPIO 18 (BIAS_VHF) rising edges at increasing rates; in Config B
+ * each edge reaches the GPIF as CTL[2] (via the 100k loopback) and fires an
+ * in-band marker COMMIT (a short USB transfer).  Rapid partial commits churn
+ * the DMA buffer ring faster than USB drains it, eventually overrunning
+ * thread 0 (PIB_ERR_THR0_WR_OVERRUN).  This test finds that ceiling: it steps
+ * the rate up, reads PIB / streaming-fault deltas per step, and stops at the
+ * first rate that errors or stalls.  Real PPS is 1 Hz, so the bar is that the
+ * realistic range stays clean.
+ *
+ * PASS  = markers observed (short transfers) and clean (no PIB/fault, no
+ *         stall) through at least 10 Hz (10x a real PPS).
+ * FAIL  = errors below 10 Hz, or a device reset.
+ * INCONCLUSIVE = no markers seen at all (Config A firmware, or no loopback).
+ *
+ * Host EP0 traffic is exonerated as a cause: the same harness in Config A
+ * (no marker path) injects edges with zero PIB errors.  Modest sample rate
+ * keeps DMA headroom so the ceiling reflects marker churn, not the link. */
+static int do_test_pps_inject(libusb_device_handle *h)
+{
+    const uint32_t GPIO_BASE = 0x800;             /* LED_BLUE; SHDWN/DITH low, ADC runs */
+    const uint32_t GPIO_EDGE = GPIO_BASE | 0x200; /* + BIAS_VHF (bit 9 / GPIO 18) high */
+    const uint32_t sample_rate = 16000000;
+    static const int rates[] = { 1, 2, 5, 10, 20, 50, 100 }; /* rising edges/sec */
+    const int nrates = (int)(sizeof(rates) / sizeof(rates[0]));
+    const double step_dur = 2.0;
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, sample_rate);
+    if (r < 0) { printf("FAIL pps_inject: STARTADC: %s\n", libusb_strerror(r)); return 1; }
+
+    cmd_u32(h, GPIOFX3, GPIO_BASE);   /* BIAS_VHF low baseline */
+
+    struct fx3_stats boot0;
+    if (read_stats(h, &boot0) < 0) {
+        printf("FAIL pps_inject: GETSTATS (before)\n");
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    int primed = primed_start_and_read_retry(h, 65536, 2000);
+    if (primed < 0) {
+        printf("FAIL pps_inject: primed start: %s\n", libusb_strerror(primed));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    int chunk = 65536;
+    uint8_t *buf = malloc(chunk);
+    if (!buf) { cmd_u32(h, STOPFX3, 0); printf("FAIL pps_inject: malloc\n"); return 1; }
+
+    uint32_t total_short = 0;   /* short transfers seen across all steps (~markers) */
+    int ceiling_clean = 0;      /* highest rate with markers and no PIB/fault/stall */
+    int broke_at = 0;           /* first rate that errored/stalled (0 = none) */
+
+    printf("# pps_inject rate ramp @ %u MSPS (real PPS = 1 Hz):\n",
+           sample_rate / 1000000);
+
+    for (int i = 0; i < nrates; i++) {
+        int rate = rates[i];
+        double toggle_iv = 0.5 / rate;   /* high then low per PPS period */
+
+        struct fx3_stats s0;
+        if (read_stats(h, &s0) < 0) { broke_at = rate; break; }
+
+        uint64_t step_bytes = 0;
+        uint32_t step_short = 0, step_edges = 0;
+        int gpio_high = 0, stalled = 0;
+        struct timespec t0, now, last_tog;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        last_tog = t0;
+
+        for (;;) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            double el = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
+            if (el >= step_dur) break;
+
+            double since = (now.tv_sec - last_tog.tv_sec)
+                         + (now.tv_nsec - last_tog.tv_nsec) / 1e9;
+            if (since >= toggle_iv) {
+                gpio_high = !gpio_high;
+                cmd_u32(h, GPIOFX3, gpio_high ? GPIO_EDGE : GPIO_BASE);
+                if (gpio_high) step_edges++;
+                last_tog = now;
+            }
+
+            int transferred = 0;
+            r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
+            if (r == 0 || (r == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
+                step_bytes += transferred;
+                if (transferred > 0 && transferred < chunk - 1024) step_short++;
+            } else {
+                stalled = 1;
+                break;
+            }
+        }
+
+        struct fx3_stats s1;
+        int gs = read_stats(h, &s1);
+        uint32_t pibd = (gs >= 0) ? s1.pib_errors - s0.pib_errors : 0;
+        uint32_t fltd = (gs >= 0) ? s1.streaming_faults - s0.streaming_faults : 0;
+        total_short += step_short;
+
+        printf("#   %3d Hz: %lu bytes, %u edges, %u short, pib_delta=%u, fault_delta=%u%s\n",
+               rate, (unsigned long)step_bytes, step_edges, step_short,
+               pibd, fltd, stalled ? "  STALLED" : "");
+
+        if (stalled || pibd != 0 || fltd != 0) { broke_at = rate; break; }
+        ceiling_clean = rate;
+        cmd_u32(h, GPIOFX3, GPIO_BASE);   /* settle low between steps */
+    }
+
+    free(buf);
+
+    struct fx3_stats bootN;
+    int gsN = read_stats(h, &bootN);
+    cmd_u32(h, STOPFX3, 0);
+    cmd_u32(h, GPIOFX3, GPIO_BASE);   /* restore: BIAS_VHF low */
+
+    if (gsN >= 0 && bootN.boot_count != boot0.boot_count) {
+        printf("FAIL pps_inject: device reset during test (boot %u->%u)\n",
+               boot0.boot_count, bootN.boot_count);
+        return 1;
+    }
+    if (broke_at)
+        printf("# pps_inject: clean through %d Hz; first errors/stall at %d Hz\n",
+               ceiling_clean, broke_at);
+    else
+        printf("# pps_inject: clean across all tested rates (1..%d Hz)\n", ceiling_clean);
+
+    if (total_short == 0) {
+        printf("INCONCLUSIVE pps_inject: no markers observed — build Config B "
+               "(make -C SDDC_FX3 PPS_CTL_ENABLE=1) and check the 100k loopback\n");
+        return 1;
+    }
+    if (ceiling_clean < 10) {
+        printf("FAIL pps_inject: markers break the stream at %d Hz (clean only through "
+               "%d Hz) — below the 10 Hz realistic-margin bar\n",
+               broke_at, ceiling_clean);
+        return 1;
+    }
+    printf("PASS pps_inject: marker stream clean through %d Hz (real PPS is 1 Hz)%s\n",
+           ceiling_clean,
+           broke_at ? "; ceiling characterized" : "; no ceiling within tested range");
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Coverage-gap tests                                                 */
 /* ------------------------------------------------------------------ */
@@ -3096,11 +3270,13 @@ static int do_test_vendor_rqt_wrap(libusb_device_handle *h)
 }
 
 /* T2: stale_vendor_codes — send dead-zone bRequest values that have no
- * handler.  0xB0, 0xB7, 0xB9 are between valid codes.  All should STALL.
- * (0xB3 = GETSTATS is valid, so excluded.) */
+ * handler.  0xB0 and 0xB9 are between valid codes.  Both should STALL.
+ * (0xB3 = GETSTATS is valid, so excluded.  0xB7 was previously in this
+ * list but is now claimed by SYNTH_PPS — issue #125 — and has its own
+ * dedicated test in do_test_synth_pps_protocol.) */
 static int do_test_stale_vendor_codes(libusb_device_handle *h)
 {
-    static const uint8_t dead[] = {0xB0, 0xB7, 0xB9};
+    static const uint8_t dead[] = {0xB0, 0xB9};
     int ndead = (int)(sizeof(dead) / sizeof(dead[0]));
 
     for (int i = 0; i < ndead; i++) {
@@ -3126,6 +3302,205 @@ static int do_test_stale_vendor_codes(libusb_device_handle *h)
         return 1;
     }
     printf("PASS stale_vendor_codes: %d dead-zone codes all STALL\n", ndead);
+    return 0;
+}
+
+/* synth_pps_protocol — exercise the A2 stub for SYNTH_PPS (issue #125).
+ * Each row is (wValue, wIndex, expect_ack).  The firmware stub:
+ *   wValue=0           -> stop                          ACK
+ *   wValue=1 wIndex=0  -> start, default 1000 ms        ACK
+ *   wValue=1 wIndex N  -> start, period N ms;
+ *                         ACK if 10 <= N <= 60000,
+ *                         STALL otherwise
+ *   wValue=2           -> oneshot                       ACK
+ *   wValue >= 3        -> invalid action                STALL
+ * After all sub-cases the device must still respond to TESTFX3 — STALLs
+ * on EP0 must not wedge the endpoint. */
+static int do_test_synth_pps_protocol(libusb_device_handle *h)
+{
+    struct {
+        uint16_t wValue;
+        uint16_t wIndex;
+        int      expect_ack;   /* 1 = ACK expected, 0 = STALL expected */
+        const char *label;
+    } cases[] = {
+        { 0,     0,    1, "stop"                          },
+        { 1,     0,    1, "start default (wIndex=0 -> 1000ms)" },
+        { 1,  1000,    1, "start 1000 ms (nominal)"       },
+        { 1,    10,    1, "start 10 ms (min boundary)"    },
+        { 1, 60000,    1, "start 60000 ms (max boundary)" },
+        { 1,     5,    0, "start 5 ms (below min)"        },
+        { 1, 60001,    0, "start 60001 ms (above max)"    },
+        { 2,     0,    1, "oneshot"                       },
+        { 3,     0,    0, "invalid action 3"              },
+        { 255,   0,    0, "invalid action 255"            },
+        { 0,     0,    1, "final stop (cleanup)"          },
+    };
+    int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+    for (int i = 0; i < ncases; i++) {
+        int r = libusb_control_transfer(h,
+                    LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
+                        LIBUSB_ENDPOINT_OUT,
+                    SYNTH_PPS,
+                    cases[i].wValue, cases[i].wIndex,
+                    NULL, 0,
+                    CTRL_TIMEOUT_MS);
+        int acked = (r == 0);
+        int stalled = (r == LIBUSB_ERROR_PIPE);
+
+        if (cases[i].expect_ack && !acked) {
+            printf("FAIL synth_pps_protocol: '%s' expected ACK, got %s\n",
+                   cases[i].label, libusb_strerror(r));
+            return 1;
+        }
+        if (!cases[i].expect_ack && !stalled) {
+            printf("FAIL synth_pps_protocol: '%s' expected STALL, got %s\n",
+                   cases[i].label, acked ? "ACK" : libusb_strerror(r));
+            return 1;
+        }
+    }
+
+    /* Verify EP0 still alive after the STALL cases */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL synth_pps_protocol: device unresponsive after STALLs: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS synth_pps_protocol: %d cases (ACK and STALL paths, EP0 alive)\n",
+           ncases);
+    return 0;
+}
+
+/* synth_pps_streaming — end-to-end check that SYNTH_PPS actually fires
+ * partial commits and bumps glPpsCount (issue #125, A3).  Captures
+ * GETSTATS before and after a 2-second window of 100 ms periodic
+ * synth-PPS while streaming, expects pps_count delta in [15..25]
+ * (target ~20 = 2 s / 100 ms) with generous tolerance for scheduler
+ * jitter.  pps_commit_fail_count should be zero or near-zero during
+ * active streaming.  Stops the timer + stops streaming on exit so
+ * subsequent scenarios see a clean state. */
+static int do_test_synth_pps_streaming(libusb_device_handle *h)
+{
+    int r;
+    uint32_t sample_rate = 64000000;
+    uint32_t duration_ms = 2000;
+    uint16_t period_ms = 100;
+
+    struct fx3_stats before = {0}, after = {0};
+    if (read_stats(h, &before) < 0) {
+        printf("FAIL synth_pps_streaming: baseline GETSTATS\n");
+        return 1;
+    }
+
+    r = cmd_u32_retry(h, STARTADC, sample_rate);
+    if (r < 0) {
+        printf("FAIL synth_pps_streaming: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Primed start, same pattern as every other streaming scenario. */
+    int primed = primed_start_and_read_retry(h, 65536, 2000);
+    if (primed < 0) {
+        printf("FAIL synth_pps_streaming: primed start: %s\n",
+               libusb_strerror(primed));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* Start the synthetic-PPS timer at 100 ms period (10 Hz). */
+    r = libusb_control_transfer(h,
+            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
+                LIBUSB_ENDPOINT_OUT,
+            SYNTH_PPS, 1, period_ms, NULL, 0, CTRL_TIMEOUT_MS);
+    if (r != 0) {
+        printf("FAIL synth_pps_streaming: SYNTH_PPS start: %s\n",
+               libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    /* Drain bulk for duration_ms.  Without draining, DMA buffers back
+     * up and SetWrapUp would have nothing to wrap.  We don't verify
+     * byte count here — sustained_stream does that elsewhere. */
+    int chunk = 65536;
+    uint8_t *buf = malloc(chunk);
+    if (!buf) {
+        cmd_u32(h, SYNTH_PPS, 0);
+        cmd_u32(h, STOPFX3, 0);
+        printf("FAIL synth_pps_streaming: malloc\n");
+        return 1;
+    }
+    uint64_t total_bytes = (uint64_t)primed;
+    struct timespec start_ts, now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+    int drain_fail = 0;
+    for (;;) {
+        int transferred = 0;
+        int rr = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
+        if (rr == 0 || (rr == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
+            total_bytes += transferred;
+        } else {
+            printf("FAIL synth_pps_streaming: bulk drain: %s\n", libusb_strerror(rr));
+            drain_fail = 1;
+            break;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        double elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000.0
+                          + (now_ts.tv_nsec - start_ts.tv_nsec) / 1e6;
+        if (elapsed_ms >= duration_ms) break;
+    }
+    free(buf);
+
+    /* Stop synth-PPS and streaming regardless of drain result. */
+    (void)libusb_control_transfer(h,
+            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
+                LIBUSB_ENDPOINT_OUT,
+            SYNTH_PPS, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
+    cmd_u32(h, STOPFX3, 0);
+
+    if (drain_fail) return 1;
+
+    if (read_stats(h, &after) < 0) {
+        printf("FAIL synth_pps_streaming: post-run GETSTATS\n");
+        return 1;
+    }
+
+    uint32_t pps_delta = after.pps_count - before.pps_count;
+    uint32_t fail_delta = after.pps_commit_fail_count - before.pps_commit_fail_count;
+
+    /* Target ~20 commits (2000 ms / 100 ms).  Tolerance accounts for
+     * ThreadX scheduling jitter (~4% per cyu3os.h docs) plus startup
+     * timing latency.  Wider than strictly needed -- the negative test
+     * is "did anything fire at all," not "exact rate." */
+    if (pps_delta < 15 || pps_delta > 25) {
+        printf("FAIL synth_pps_streaming: pps_count delta=%u (expected 15..25)\n",
+               pps_delta);
+        return 1;
+    }
+
+    /* fail_delta should be 0 during active streaming.  Allow up to 2
+     * for the boundary ticks (start/stop windows) where the channel
+     * may briefly be between buffers. */
+    if (fail_delta > 2) {
+        printf("FAIL synth_pps_streaming: pps_commit_fail_count delta=%u (expected <=2)\n",
+               fail_delta);
+        return 1;
+    }
+
+    /* Verify device alive */
+    uint8_t info[4] = {0};
+    int rprobe = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (rprobe < 0) {
+        printf("FAIL synth_pps_streaming: post-run TESTFX3: %s\n",
+               libusb_strerror(rprobe));
+        return 1;
+    }
+
+    printf("PASS synth_pps_streaming: pps=%u fail=%u bytes=%lu\n",
+           pps_delta, fail_delta, (unsigned long)total_bytes);
     return 0;
 }
 
@@ -4597,6 +4972,8 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"debug_while_stream",  do_test_debug_while_streaming,3, 0, 0, 0},
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
         {"stale_vendor_codes",  do_test_stale_vendor_codes,   3, 0, 0, 0},
+        {"synth_pps_protocol",  do_test_synth_pps_protocol,   3, 0, 0, 0},
+        {"synth_pps_streaming", do_test_synth_pps_streaming,  3, 0, 0, 0},
         {"setarg_gap_index",    do_test_setarg_gap_index,     3, 0, 0, 0},
         {"dma_count_reset",     do_test_dma_count_reset,      5, 0, 0, 0},
         {"dma_count_monotonic", do_test_dma_count_monotonic,  5, 0, 0, 0},
@@ -5281,6 +5658,7 @@ static void usage(const char *prog)
         "  double_start                 Back-to-back STARTFX3\n"
         "  i2c_under_load               I2C read while streaming\n"
         "  sustained_stream             30s continuous streaming check\n"
+        "  pps_inject                   inject GPIO18 edges mid-stream, verify survival (#125 4a)\n"
         "  rapid_start_stop             50× START/STOP with no bulk reads\n"
         "  startadc_mid_stream          Reprogram ADC clock while streaming\n"
         "  setarg_boundary              SETARGFX3 boundary/OOB values\n"
@@ -5523,6 +5901,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "sustained_stream") == 0) {
         rc = do_test_sustained_stream(h);
 
+    } else if (strcmp(cmd, "pps_inject") == 0) {
+        rc = do_test_pps_inject(h);
+
     } else if (strcmp(cmd, "rapid_start_stop") == 0) {
         rc = do_test_rapid_start_stop(h);
 
@@ -5573,6 +5954,12 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stale_vendor_codes") == 0) {
         rc = do_test_stale_vendor_codes(h);
+
+    } else if (strcmp(cmd, "synth_pps_protocol") == 0) {
+        rc = do_test_synth_pps_protocol(h);
+
+    } else if (strcmp(cmd, "synth_pps_streaming") == 0) {
+        rc = do_test_synth_pps_streaming(h);
 
     } else if (strcmp(cmd, "setarg_gap_index") == 0) {
         rc = do_test_setarg_gap_index(h);

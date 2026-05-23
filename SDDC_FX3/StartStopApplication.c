@@ -11,7 +11,7 @@
  *
  */
 
-#include "SDDC_GPIF.h" // GPIFII include once
+#include "SDDC_GPIF_PPS.h" // GPIFII include once (in-band PPS marker waveform, issue #125)
 #include "Application.h"
 #include "Si5351.h"
 uint32_t glDMACount;
