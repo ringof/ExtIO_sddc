@@ -36,8 +36,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Updated f78cff9 -> d555f185 (2026-05-20 main).
-ARG KA9Q_RADIO_SHA=d555f1853422ecc551ac7e4064b9d9cfdb743764
+# Pinned to 42273761 to match the ka9q-web commit below: this is the
+# known-good ka9q-radio + ka9q-web pair from a live deployment (W1EUJ /
+# palomar-sdr.com). Newer ka9q-radio (e.g. d555f185) switched
+# Metadata_dest_socket from struct sockaddr to sockaddr_storage, which
+# ka9q-web's pinned commit does not yet handle — so the two must move
+# together.
+ARG KA9Q_RADIO_SHA=42273761ba5b96b243317592a6b8964ab99a9794
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
@@ -95,8 +100,11 @@ RUN git clone --depth 1 https://github.com/davidmoreno/onion.git /build/onion \
 # KA9Q_RADIO_DIR=../ka9q-radio/src and links that tree's already-built
 # multicast.o/status.o/misc.o/decode_status.o/rtp.o. LIBRARY_PATH/
 # C_INCLUDE_PATH let gcc find the freshly-installed libonion in /usr/local.
+# Pinned to b63c991d to match the ka9q-radio SHA above (proven pair from
+# the W1EUJ / palomar-sdr.com deployment).
 ENV LIBRARY_PATH=/usr/local/lib C_INCLUDE_PATH=/usr/local/include
-RUN git clone --depth 1 https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
+RUN git clone https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
+    && git -C /build/ka9q-web checkout b63c991d6b4639d2e30429e70200dfe2f1c1f394 \
     && make -C /build/ka9q-web -j"$(nproc)"
 
 # ---- Runtime image ----
