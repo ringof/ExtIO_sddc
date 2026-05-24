@@ -40,3 +40,37 @@ cl(x) = (x < 1e-6 ? 1e-6 : x)
 plot \
   "si5351_mc_cdf.csv" using (cl($3)):1 with lines lw 2 lc rgb "#cc3311" title "current (integer)", \
   "" using (cl($2)):1 with lines lw 2 lc rgb "#0077bb" title "new (continued fraction)"
+
+# ---------- Plot 3: feedback epsilon probe (float CF vs exact vs optimum) ----------
+set output "si5351_mc_epsilon.png"
+set title "PLL feedback approximation error vs fractional part of the feedback ratio\nfloat continued-fraction vs exact integer/rational vs hardware optimum"
+set xlabel "feedback fractional part (delta)"
+set ylabel "approximation error (ppm)"
+set logscale x
+set logscale y
+set format x "%g"
+set xrange [1e-8:1e-2]
+set yrange [1e-9:1]
+set grid xtics ytics
+set key top right
+clp(y) = (y < 1e-9 ? 1e-9 : y)
+plot \
+  "si5351_mc_epsilon.csv" using 1:(clp($2)) with linespoints pt 7 ps 0.4 lw 1.5 lc rgb "#cc3311" title "float CF (epsilon=1e-5)", \
+  "" using 1:(clp($4)) with lines lw 2 lc rgb "#999999" title "hardware optimum", \
+  "" using 1:(clp($3)) with linespoints pt 7 ps 0.4 lw 1.5 lc rgb "#0077bb" title "exact integer/rational"
+
+# ---------- Plot 4: chosen feedback denominator distribution ----------
+set output "si5351_mc_cdist.png"
+set title "Chosen PLL feedback denominator c (60,000 random frequencies)\nsingle divider vs spur-aware divider search"
+set xlabel "feedback denominator c"
+set ylabel "cumulative fraction of frequencies"
+set logscale x
+unset logscale y
+set yrange [0:1]
+set xrange [1:1.1e6]
+set format x "%g"
+set grid xtics ytics
+set key top left
+plot \
+  "si5351_mc_cdist.csv" using 2:1 with lines lw 2 lc rgb "#cc3311" title "single divider", \
+  "" using 3:1 with lines lw 2 lc rgb "#0077bb" title "spur-aware search"
