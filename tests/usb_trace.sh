@@ -60,7 +60,15 @@ if [ "$(id -u)" = 0 ]; then DMESG="dmesg"
 elif sudo -n true 2>/dev/null; then DMESG="sudo dmesg"
 else DMESG=""; echo "# (dmesg skipped — run as root or enable passwordless sudo for kernel USB lines)"; fi
 if [ -n "$DMESG" ]; then
-    $DMESG --follow 2>/dev/null \
+    # --follow-new prints ONLY messages logged after we start (no backlog
+    # dump). Falls back to --follow if the util-linux build lacks it.
+    if $DMESG --follow-new --help >/dev/null 2>&1 || $DMESG --help 2>&1 | grep -q -- --follow-new; then
+        DMESG_FOLLOW="--follow-new"
+    else
+        DMESG_FOLLOW="--follow"
+        echo "# (dmesg lacks --follow-new; using --follow — expect a one-time backlog dump)"
+    fi
+    $DMESG $DMESG_FOLLOW 2>/dev/null \
         | grep --line-buffered -iE 'usb|xhci' \
         | while IFS= read -r l; do echo "$(stamp) DMESG $l"; done &
     pids+=($!)
