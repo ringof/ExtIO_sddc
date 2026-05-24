@@ -24,6 +24,15 @@ all: fx3_cmd rx888_stream
 fx3_cmd: fx3_cmd.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
+# Standalone host-side unit test for the Si5351 synthesis math (issue #133).
+# No libusb/hardware dependency; only needs libm.
+si5351_math_test: si5351_math_test.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: check-math
+check-math: si5351_math_test
+	./si5351_math_test
+
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
 	ln -sf $(RX888_STREAM_BIN) $@
@@ -32,7 +41,7 @@ $(RX888_STREAM_BIN): $(RX888_TOOLS)/src/rx888_stream.c $(RX888_TOOLS)/src/ezusb.
 	$(MAKE) -C $(RX888_TOOLS) rx888_stream
 
 clean:
-	rm -f fx3_cmd rx888_stream
+	rm -f fx3_cmd rx888_stream si5351_math_test
 	$(MAKE) -C $(RX888_TOOLS) clean 2>/dev/null || true
 
 .PHONY: all clean rx888_stream
