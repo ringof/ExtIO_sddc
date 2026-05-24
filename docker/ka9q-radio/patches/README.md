@@ -5,9 +5,14 @@ against the pinned `KA9Q_RADIO_SHA`.  Each patch is a deliberate ask
 of the upstream maintainer; the set is kept minimal so that asks are
 focused on real, irreducible incompatibilities — not noise.
 
-Currently no `*.patch` files are active.  The Dockerfile's
-`COPY patches/*.patch` step is guarded against an empty match so the
-build succeeds with zero patches applied.
+The Dockerfile's `COPY patches/*.patch` step is guarded against an empty
+match, so the build also succeeds with zero patches applied.
+
+## Active
+
+| File | What it does | Why |
+|------|-------------|-----|
+| `01-powers-freq-double.patch` | `powers.c`: send `RADIO_FREQUENCY` via `encode_double` instead of `encode_float`. | `powers` was the only ka9q sender encoding the tune frequency as a 4-byte float; radiod (and `control.c`) treat `RADIO_FREQUENCY` as an 8-byte double, so the value was misread (~0), the spectrum channel came up untuned, and `powers` returned a baseband/DC spectrum (the half-flat `-73 dB` / noise-floor output) regardless of `-f`. One-line fix; keeps `SPECT_DEMOD` (float dB bins — `powers`' format; `SPECT2_DEMOD` is the 8-bit-log waterfall format ka9q-web uses). Candidate upstream PR. |
 
 ## Disabled / historical
 
