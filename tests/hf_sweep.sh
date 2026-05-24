@@ -1,70 +1,80 @@
 #!/usr/bin/env bash
 #
-# hf_sweep.sh — full-HF power spectrum via ka9q `powers`, emitted as
+# hf_sweep.sh — power spectrum across a band via ka9q `powers`, emitted as
 # `freq_hz,power_dB` CSV (one line per bin) for plotting / post-processing.
 #
-# Uses a single wide `powers` spectrum channel (DC..~32.4 MHz by default),
-# which covers all of HF in one call — no ghost-driving the ka9q-web UI.
+# Auto-tiles: a single `powers` spectrum channel tops out near 16000 bins
+# (the 64 KB status datagram limit), so to cover a wide band at fine
+# resolution this steps `powers` across the band in tiles of <= MAXBINS
+# bins and concatenates them. One tile when the whole band fits.
+#
 # Requires the patched `powers` in the running ka9q-radio container
 # (RADIO_FREQUENCY sent as double, RESOLUTION_BW decoded as float — see
-# docker/ka9q-radio/patches/). Without those patches the spectrum is
-# untuned (half-flat) and the frequency axis is wrong.
+# docker/ka9q-radio/patches/). Without those the spectrum is untuned and
+# the frequency axis is wrong.
 #
 # Usage: hf_sweep.sh [options]
-#   -c CONTAINER  docker container name        (default ka9q-radio)
-#   -g GROUP      radiod status group          (default hf.local)
-#   -f CENTER_HZ  spectrum center frequency    (default 16200000)
-#   -w BIN_HZ     bin width, Hz                 (default 100000)
-#   -b BINS       bin count (span = BINS*BIN_HZ)(default 324 -> 32.4 MHz)
-#   -s SSRC       temp spectrum SSRC           (default 30303)
-#   -i SECS       integration time             (default 5)
-#   -o FILE       write CSV to FILE            (default stdout)
+#   -a START_HZ   band start            (default 0)
+#   -z STOP_HZ    band stop             (default 32400000 = RX888 1st Nyquist)
+#   -w BIN_HZ     bin width, Hz         (default 100)
+#   -m MAXBINS    max bins per tile     (default 16000)
+#   -c CONTAINER  docker container      (default ka9q-radio)
+#   -g GROUP      radiod status group   (default hf.local)
+#   -s SSRC       temp spectrum SSRC    (default 30303)
+#   -i SECS       integration per tile  (default 5)
+#   -o FILE       write CSV to FILE     (default stdout)
 #
-# Examples:
-#   tests/hf_sweep.sh                          # whole band, 100 kHz bins
-#   tests/hf_sweep.sh -w 10000 -b 3240         # whole band, 10 kHz bins
-#   tests/hf_sweep.sh -o sweep.csv && gnuplot -p -e \
-#     "set datafile separator ','; plot 'sweep.csv' using (\$1/1e6):2 with lines"
+# 0..32.4 MHz at 100 Hz = 324000 bins -> ~21 tiles -> ~2 min at -i 5.
+#   tests/hf_sweep.sh -o hf100.csv
+#   gnuplot -p -e "set datafile separator ','; plot 'hf100.csv' u (\$1/1e6):2 w l"
 
 set -u
-CONTAINER=ka9q-radio; GROUP=hf.local; CENTER=16200000
-BIN_HZ=100000; BINS=324; SSRC=30303; INT=5; OUT=
+START=0; STOP=32400000; BIN_HZ=100; MAXBINS=16000
+CONTAINER=ka9q-radio; GROUP=hf.local; SSRC=30303; INT=5; OUT=
 
-while getopts "c:g:f:w:b:s:i:o:h" opt; do
+while getopts "a:z:w:m:c:g:s:i:o:h" opt; do
     case "$opt" in
-        c) CONTAINER=$OPTARG ;; g) GROUP=$OPTARG ;; f) CENTER=$OPTARG ;;
-        w) BIN_HZ=$OPTARG ;;   b) BINS=$OPTARG ;;  s) SSRC=$OPTARG ;;
-        i) INT=$OPTARG ;;      o) OUT=$OPTARG ;;
-        h) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        a) START=$OPTARG ;; z) STOP=$OPTARG ;; w) BIN_HZ=$OPTARG ;;
+        m) MAXBINS=$OPTARG ;; c) CONTAINER=$OPTARG ;; g) GROUP=$OPTARG ;;
+        s) SSRC=$OPTARG ;; i) INT=$OPTARG ;; o) OUT=$OPTARG ;;
+        h) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) exit 2 ;;
     esac
 done
 
-# Run powers; keep the CSV data line (leading timestamp digit + many commas),
-# ignoring the cosmetic "Invalid response, length 0" first poll.
-line="$(docker exec "$CONTAINER" powers -c 1 -i "$INT" -s "$SSRC" \
-            -f "$CENTER" -b "$BINS" -w "$BIN_HZ" "$GROUP" 2>/dev/null \
-        | grep -E '^[0-9].*,.*,' | tail -1)"
-
-if [ -z "$line" ]; then
-    echo "hf_sweep: no spectrum returned by powers (is radiod running, powers patched?)" >&2
-    exit 1
-fi
-
-# powers CSV: ts, start_hz, stop_hz, bin_hz, bin_count, p0, p1, ... p(n-1)
-# Bin i frequency = start_hz + i*bin_hz.
-emit() {
-    printf '%s\n' "$line" | awk -F', *' '
-        NF >= 6 {
-            start = $2; bw = $4; n = $5;
-            for (i = 0; i < n; i++) printf "%.0f,%s\n", start + i*bw, $(6+i);
-        }'
+# One tile: center it so powers' bin 0 lands exactly on tile_start, then
+# label bins start+i*bw (powers' base = center - (bins/2)*bw == tile_start).
+run_tile() {                                  # $1=tile_start $2=tile_bins
+    local ts=$1 nb=$2 center out
+    center=$(( ts + (nb/2)*BIN_HZ ))
+    out="$(docker exec "$CONTAINER" powers -c 1 -i "$INT" -s "$SSRC" \
+              -f "$center" -w "$BIN_HZ" -b "$nb" "$GROUP" 2>/dev/null \
+           | grep -E '^[0-9].*,.*,' | tail -1)"
+    if [ -z "$out" ]; then
+        echo "hf_sweep: WARNING no data for tile at $ts Hz ($nb bins)" >&2
+        return 1
+    fi
+    printf '%s\n' "$out" | awk -F', *' -v ts="$ts" -v bw="$BIN_HZ" '
+        NF>=6 { n=$5; for(i=0;i<n;i++) printf "%.0f,%s\n", ts + i*bw, $(6+i) }'
 }
 
-if [ -n "$OUT" ]; then
-    { echo "# freq_hz,power_dB"; emit; } > "$OUT"
-    echo "wrote $OUT ($BINS bins, $(awk "BEGIN{printf \"%.1f\", $BINS*$BIN_HZ/1e6}") MHz span)" >&2
-else
+total_bins=$(( (STOP - START) / BIN_HZ ))
+ntiles=$(( (total_bins + MAXBINS - 1) / MAXBINS ))
+echo "# hf_sweep ${START}-${STOP} Hz @ ${BIN_HZ} Hz/bin = ${total_bins} bins in ${ntiles} tile(s), -i ${INT}s each" >&2
+
+sweep() {
     echo "# freq_hz,power_dB"
-    emit
-fi
+    local ts=$START tile=0 remaining nb
+    while [ "$ts" -lt "$STOP" ]; do
+        tile=$((tile+1))
+        remaining=$(( (STOP - ts) / BIN_HZ ))
+        nb=$(( remaining < MAXBINS ? remaining : MAXBINS ))
+        [ "$nb" -le 0 ] && break
+        printf '# tile %d/%d: %s MHz (%d bins)\n' "$tile" "$ntiles" \
+            "$(awk "BEGIN{printf \"%.3f-%.3f\", $ts/1e6, ($ts+$nb*$BIN_HZ)/1e6}")" "$nb" >&2
+        run_tile "$ts" "$nb"
+        ts=$(( ts + nb*BIN_HZ ))
+    done
+}
+
+if [ -n "$OUT" ]; then sweep > "$OUT" && echo "# wrote $OUT" >&2; else sweep; fi
