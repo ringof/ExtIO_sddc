@@ -3,6 +3,7 @@ fx3_cmd
 rx888_stream
 si5351_math_test
 si5351_mc
+si5351_bench
 
 # Generated analysis artifacts (reproducible via `make mc-plot`)
 si5351_mc_scatter.csv

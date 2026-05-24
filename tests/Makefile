@@ -43,6 +43,14 @@ mc-plot: si5351_mc
 	gnuplot si5351_mc.gp
 	@echo "wrote si5351_mc_scatter.png si5351_mc_cdf.png"
 
+# Divider-search cost benchmark (issue #133).
+si5351_bench: si5351_bench.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: bench
+bench: si5351_bench
+	./si5351_bench
+
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
 	ln -sf $(RX888_STREAM_BIN) $@
