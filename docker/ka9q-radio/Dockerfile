@@ -36,12 +36,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Pinned to 42273761 to pair with ka9q-web b63c991 below (the known-good
-# pair from the W1EUJ / palomar-sdr.com deployment). NOTE: this driver
-# does an init-time USB reset that this firmware answers by going to DFU;
-# in-container that reset/re-acquire is under investigation (see
-# tests/usb_trace.sh). f78cff9 is the no-init-reset fallback.
-ARG KA9Q_RADIO_SHA=42273761ba5b96b243317592a6b8964ab99a9794
+# Pinned to 6a5094ac (2026-05-02): the rx888 driver's init-time USB reset
+# now defaults OFF (config key `reset`, default false), so it no longer
+# reboots this firmware to DFU — no `hack_no_usb_reset` workaround needed.
+# This is the last revision before the sockaddr->sockaddr_storage change
+# (12f0256a, 2026-05-10), so ka9q-web b63c991 below still compiles against
+# it. (Earlier pin 42273761 reset by default and required hack_no_usb_reset.)
+ARG KA9Q_RADIO_SHA=6a5094acafdce462a84e1364be173174e09b21a2
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"

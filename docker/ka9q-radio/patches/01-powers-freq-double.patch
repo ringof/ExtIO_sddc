@@ -3,22 +3,20 @@
 # Fix `powers` sending RADIO_FREQUENCY as a 4-byte float when radiod (and
 # every other ka9q sender, e.g. control.c) encodes it as an 8-byte double.
 # radiod decodes the command's RADIO_FREQUENCY TLV as a double, so the
-# float-encoded value is misread (effectively ~0), the spectrum channel is
-# left untuned (freq=0), and `powers` returns a baseband/DC spectrum (the
-# "half-flat -73 dB / noise-floor" output) instead of the band around -f.
+# float-encoded value is misread (~0), the spectrum channel is left untuned
+# (freq=0), and `powers` returns a baseband/DC spectrum regardless of -f.
 #
 # One-line fix: encode_float -> encode_double, matching control.c. Keeps
-# SPECT_DEMOD (float dB bins, which is `powers`' useful output format;
-# SPECT2_DEMOD is the 8-bit-log waterfall format used by ka9q-web and is
-# NOT what `powers`' float parser expects).
+# SPECT_DEMOD (float dB bins, powers' output format; SPECT2_DEMOD is the
+# 8-bit-log waterfall format ka9q-web uses, not powers' float parser).
 #
-# Candidate upstream PR to ka9q-radio. Applies against KA9Q_RADIO_SHA
-# 42273761.
+# Candidate upstream PR. Applies against KA9Q_RADIO_SHA 6a5094ac; still
+# present on main (line numbers differ).
 diff --git a/src/powers.c b/src/powers.c
-index c966bdbc..ff7278ed 100644
+index 67c3bc3c..7707583d 100644
 --- a/src/powers.c
 +++ b/src/powers.c
-@@ -156,7 +156,7 @@ int main(int argc,char *argv[]){
+@@ -157,7 +157,7 @@ int main(int argc,char *argv[]){
      encode_int(&bp,COMMAND_TAG,tag);
      encode_int(&bp,DEMOD_TYPE,SPECT_DEMOD);
      if(frequency >= 0)
