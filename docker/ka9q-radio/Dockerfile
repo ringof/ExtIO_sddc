@@ -14,7 +14,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    cmake \
     git \
     ca-certificates \
     libavahi-client-dev \
@@ -29,20 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libogg-dev \
     libsamplerate-dev \
     portaudio19-dev \
-    libgnutls28-dev \
-    libgcrypt20-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Pinned to f78cff9 to satisfy BOTH constraints for the ka9q-web pairing:
-#  (1) it predates ka9q-radio's Metadata_dest_socket struct sockaddr ->
-#      sockaddr_storage change, so ka9q-web b63c991 compiles against it;
-#  (2) its rx888 driver does NOT issue an init-time libusb_reset_device.
-#      Newer 42273761 does, and this firmware (correctly) reboots to the
-#      bootloader on a USB reset, so 42273761's init drops the device to
-#      DFU and fails. f78cff9 ran clean in this container all along.
 ARG KA9Q_RADIO_SHA=f78cff9cc8c7fa33ea49aac9176d9263c535a332
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
@@ -80,33 +70,7 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so sig_gen.so control tune monitor powers
-
-# Build libonion (the web framework ka9q-web links against) from source —
-# it isn't packaged in Debian. SSL/gnutls is left at its default (on) to
-# match the reference deployment's binary (ldd shows libgnutls/libgcrypt);
-# the other optional backends are disabled to avoid extra deps.
-RUN git clone --depth 1 https://github.com/davidmoreno/onion.git /build/onion \
-    && cmake -S /build/onion -B /build/onion/build \
-         -DCMAKE_INSTALL_PREFIX=/usr/local \
-         -DONION_USE_PAM=false -DONION_USE_PNG=false -DONION_USE_JPEG=false \
-         -DONION_USE_XML2=false -DONION_USE_SYSTEMD=false -DONION_USE_SQLITE3=false \
-         -DONION_USE_REDIS=false -DONION_USE_GC=false -DONION_USE_TESTS=false \
-         -DONION_EXAMPLES=false -DONION_USE_BINDINGS_CPP=false \
-    && cmake --build /build/onion/build -j"$(nproc)" \
-    && cmake --install /build/onion/build \
-    && ldconfig
-
-# Build ka9q-web as a sibling of the ka9q-radio tree: its Makefile uses
-# KA9Q_RADIO_DIR=../ka9q-radio/src and links that tree's already-built
-# multicast.o/status.o/misc.o/decode_status.o/rtp.o. LIBRARY_PATH/
-# C_INCLUDE_PATH let gcc find the freshly-installed libonion in /usr/local.
-# Pinned to b63c991d to match the ka9q-radio SHA above (proven pair from
-# the W1EUJ / palomar-sdr.com deployment).
-ENV LIBRARY_PATH=/usr/local/lib C_INCLUDE_PATH=/usr/local/include
-RUN git clone https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
-    && git -C /build/ka9q-web checkout b63c991d6b4639d2e30429e70200dfe2f1c1f394 \
-    && make -C /build/ka9q-web -j"$(nproc)"
+    radiod rx888.so sig_gen.so control tune monitor
 
 # ---- Runtime image ----
 FROM debian:bookworm-slim
@@ -131,8 +95,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dbus \
     procps \
     usbutils \
-    libgnutls30 \
-    libgcrypt20 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
@@ -140,18 +102,8 @@ COPY --from=builder /build/ka9q-radio/src/radiod /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/control /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/tune /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/monitor /usr/local/bin/
-COPY --from=builder /build/ka9q-radio/src/powers /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
-
-# ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
-# Run inside the container, e.g.:
-#   docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
-# then browse http://localhost:8081 (container uses --network host).
-COPY --from=builder /usr/local/lib/libonion*.so* /usr/local/lib/
-COPY --from=builder /build/ka9q-web/ka9q-web /usr/local/sbin/ka9q-web
-COPY --from=builder /build/ka9q-web/html /usr/local/share/ka9q-web/html
-RUN ldconfig
 
 # Create plugin directory and config directory
 RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio /usr/local/share/ka9q-radio
