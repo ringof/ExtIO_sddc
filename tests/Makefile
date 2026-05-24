@@ -33,6 +33,16 @@ si5351_math_test: si5351_math_test.c
 check-math: si5351_math_test
 	./si5351_math_test
 
+# Monte-Carlo error characterization + gnuplot error plots (issue #133).
+si5351_mc: si5351_mc.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: mc-plot
+mc-plot: si5351_mc
+	./si5351_mc
+	gnuplot si5351_mc.gp
+	@echo "wrote si5351_mc_scatter.png si5351_mc_cdf.png"
+
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
 	ln -sf $(RX888_STREAM_BIN) $@
