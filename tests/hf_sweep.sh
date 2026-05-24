@@ -29,21 +29,23 @@
 #   -s SSRC       temp spectrum SSRC    (default 30303)
 #   -i SECS       integration per tile  (default 5)
 #   -o FILE       write CSV to FILE     (default stdout)
+#   -p            also render a PNG plot (gnuplot) next to the CSV
 #
-#   tests/hf_sweep.sh -o hf100.csv
-#   gnuplot -p -e "set datafile separator ','; plot 'hf100.csv' u (\$1/1e6):2 w l"
+#   tests/hf_sweep.sh -o hf100.csv -p          # CSV + hf100.png
+#   tests/hf_sweep.sh -a 100000 -z 30000000 -p # usable band, plotted
 
 set -u
 START=0; STOP=32400000; BIN_HZ=100; MAXBINS=16000; GUARD=1000
 NYQ=32400000
-CONTAINER=ka9q-radio; GROUP=hf.local; SSRC=30303; INT=5; OUT=
+CONTAINER=ka9q-radio; GROUP=hf.local; SSRC=30303; INT=5; OUT=; PLOT=0
 
-while getopts "a:z:w:m:G:c:g:s:i:o:h" opt; do
+while getopts "a:z:w:m:G:c:g:s:i:o:ph" opt; do
     case "$opt" in
         a) START=$OPTARG ;; z) STOP=$OPTARG ;; w) BIN_HZ=$OPTARG ;;
         m) MAXBINS=$OPTARG ;; G) GUARD=$OPTARG ;; c) CONTAINER=$OPTARG ;;
         g) GROUP=$OPTARG ;; s) SSRC=$OPTARG ;; i) INT=$OPTARG ;; o) OUT=$OPTARG ;;
-        h) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        p) PLOT=1 ;;
+        h) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) exit 2 ;;
     esac
 done
@@ -87,4 +89,20 @@ sweep() {
     done
 }
 
+# Plotting needs the CSV in a file; use a temp if no -o was given.
+if [ "$PLOT" = 1 ] && [ -z "$OUT" ]; then OUT="$(mktemp /tmp/hf_sweep.XXXXXX.csv)"; fi
+
 if [ -n "$OUT" ]; then sweep > "$OUT" && echo "# wrote $OUT" >&2; else sweep; fi
+
+if [ "$PLOT" = 1 ]; then
+    if ! command -v gnuplot >/dev/null 2>&1; then
+        echo "hf_sweep: gnuplot not found — CSV is at $OUT" >&2; exit 0
+    fi
+    case "$OUT" in *.csv) PNG="${OUT%.csv}.png" ;; *) PNG="$OUT.png" ;; esac
+    gnuplot -e "set datafile separator ','; \
+        set terminal pngcairo size 1600,520; set output '$PNG'; \
+        set xlabel 'Frequency (MHz)'; set ylabel 'Power (dB)'; set grid; \
+        set title 'RX888 sweep: $OUT'; \
+        plot '$OUT' using (\$1/1e6):2 with lines lc rgb 'navy' notitle" \
+      && echo "# plotted -> $PNG" >&2
+fi
