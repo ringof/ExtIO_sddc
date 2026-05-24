@@ -55,8 +55,19 @@ to bootloader first if needed).  Both use `rx888_stream` from the
 ./fx3_cmd i2cw 0xC0 3 0xFF              # I2C write
 ./fx3_cmd raw 0xCC                      # send arbitrary vendor request
 ./fx3_cmd stats                         # read GETSTATS counters
-./fx3_cmd reset                         # reboot FX3 to bootloader
+./fx3_cmd reset                         # reboot FX3 to bootloader (RESETFX3)
+./fx3_cmd usbreset                      # host-side USB port reset (USBDEVFS_RESET)
+./fx3_cmd -F ../SDDC_FX3/SDDC_FX3.img reload   # reset -> bootloader -> re-upload -> verify
 ```
+
+`usbreset` issues a raw `USBDEVFS_RESET` on the `/dev/bus/usb` node
+(libusb-enumerate only, no claim), so it recovers a wedged device that
+can't be opened.  On this firmware a USB reset reboots the FX3 to the
+bootloader, so `usbreset` returns the device to DFU; `ENODEV` from the
+ioctl is the expected "device re-enumerated" result, not an error.
+`reload` chains `RESETFX3` + `usbreset` -> wait for bootloader ->
+re-upload firmware (`-F`) -> verify the device answers `TESTFX3` at the
+app PID — the force-reload primitive.
 
 ### Automated test commands
 
@@ -327,12 +338,65 @@ varies as scenarios are added.  Each block in the script prints
 `ok` or `not ok` for one numbered TAP entry; the streaming test at
 the end contributes a few additional sub-assertions.
 
+## usb_trace.sh -- Host-side USB lifecycle tracer
+
+Watches the RX888's USB lifecycle (enumerate / reset / PID flips
+`00f3`<->`00f1` / kernel-driver bind) in real time, timestamped, **without
+claiming the device** — so it runs safely alongside radiod or any other
+consumer.  Use it to watch what the firmware/device does through a
+driver-initiated USB reset and line it up against radiod's own log.
+
+```
+sudo tests/usb_trace.sh          # UDEV + PID + (root) kernel-log streams
+```
+
+Streams: `UDEV` (add/remove/bind events), `PID` (printed only on
+`04b4` PID change), `DMESG` (kernel USB log, root only, `--follow-new`).
+Env: `VID` (default `04b4`), `POLL` (PID poll interval).
+
+## ka9q-radio integration (`ka9q_test.sh`, `hf_sweep.sh`)
+
+These drive the `ka9q-radio` Docker image (see `docker/ka9q-radio/`) and
+need a real RX888 with privileged USB passthrough — never CI.
+
+### ka9q_test.sh -- radiod start/stop soak (Phase 1)
+
+Cycles the `radiod` session (start -> stream -> stop) in an idle
+container via `docker exec`, judging health by radiod liveness + an
+advisory log scan, and by `fx3_cmd stats` (GPIF idle, frozen DMA) once
+radiod releases the device.  Periodically forces a full firmware reload.
+Confirms the device returns to a usable, ADC-parked idle state between
+sessions (issue #131).  TAP output; `--help` for options (duration,
+reload interval, etc.).
+
+### hf_sweep.sh -- full-HF power spectrum via `powers`
+
+Sweeps a band and emits `freq_hz,power_dB` CSV.  Auto-tiles (a single
+`powers` channel tops out ~16000 bins at the 64 KB datagram limit) with
+overlap+trim so per-tile channel-edge artifacts don't land in the output.
+Requires the patched `powers` in the image (see
+`docker/ka9q-radio/patches/`).
+
+```
+tests/hf_sweep.sh -o hf100.csv -p             # 0-32.4 MHz @ 100 Hz, CSV + PNG
+tests/hf_sweep.sh -a 100000 -z 30000000 -p    # usable sub-band (drops DC/Nyquist edges)
+```
+
+Options: `-a/-z` band, `-w` bin width (default 100 Hz), `-G` guard bins
+trimmed per tile edge, `-i` integration/tile, `-o` CSV, `-p` render a PNG
+(gnuplot, headless).  Note: the DC offset at the low edge and the Nyquist
+roll-up near 32.4 MHz are real ADC features at the band ends — sweep a
+sub-band to exclude them.
+
 ## File map
 
 | File | Purpose |
 |------|---------|
-| `fx3_cmd.c` | Vendor command exerciser, test harness, and soak test |
-| `fw_test.sh` | TAP test suite wrapper (single-pass) |
+| `fx3_cmd.c` | Vendor command exerciser, test harness, soak test, `usbreset`/`reload` |
+| `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
+| `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
+| `ka9q_test.sh` | ka9q-radio radiod start/stop integration soak (Phase 1) |
+| `hf_sweep.sh` | Full-HF power-spectrum sweep via ka9q `powers` (CSV/PNG) |
 | `Makefile` | Build system for test tools |
 | `rx888_tools/` | Git submodule: firmware uploader and USB streamer |
