@@ -36,13 +36,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Pinned to 42273761 to match the ka9q-web commit below: this is the
-# known-good ka9q-radio + ka9q-web pair from a live deployment (W1EUJ /
-# palomar-sdr.com). Newer ka9q-radio (e.g. d555f185) switched
-# Metadata_dest_socket from struct sockaddr to sockaddr_storage, which
-# ka9q-web's pinned commit does not yet handle — so the two must move
-# together.
-ARG KA9Q_RADIO_SHA=42273761ba5b96b243317592a6b8964ab99a9794
+# Pinned to f78cff9 to satisfy BOTH constraints for the ka9q-web pairing:
+#  (1) it predates ka9q-radio's Metadata_dest_socket struct sockaddr ->
+#      sockaddr_storage change, so ka9q-web b63c991 compiles against it;
+#  (2) its rx888 driver does NOT issue an init-time libusb_reset_device.
+#      Newer 42273761 does, and this firmware (correctly) reboots to the
+#      bootloader on a USB reset, so 42273761's init drops the device to
+#      DFU and fails. f78cff9 ran clean in this container all along.
+ARG KA9Q_RADIO_SHA=f78cff9cc8c7fa33ea49aac9176d9263c535a332
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
