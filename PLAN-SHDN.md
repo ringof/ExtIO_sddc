@@ -54,6 +54,21 @@ recovery only runs mid-stream when the ADC is already awake.
 - **Regression**: existing `device_quiesce` already clears SHDWN before
   streaming tests; STARTFX3 waking the ADC is additive and cannot leave it
   asleep during a stream. Watchdog recovery untouched.
+- **Integration — proves *real samples*, not just "it streams"**: with the
+  `docker/ka9q-radio` stack up (`./docker/ka9q-radio/ka9q.sh start`), run
+  `tests/ka9q_smoke.sh`. It sweeps `0 .. fs/2` through radiod's `rx888.so`
+  driver and PASS/FAILs on whether the spectrum is a live, textured thermal
+  floor versus the featureless flat line a shut-down / non-sampling ADC FFTs
+  to. radiod issues `STARTFX3` — which wakes the ADC from SHDN standby —
+  before streaming, so a PASS is end-to-end proof that the **wake path
+  delivers genuine samples**, exercised through a real third-party receiver
+  rather than the firmware test harness. Measured healthy reference (50 Ω
+  dummy load): mean ~-132 dB, the `fs/2` (32.4 MHz) Nyquist alias spike,
+  ~58 dB spread (see `tests/README.md`). Pair with `ka9q_test.sh`, which
+  cycles radiod start/stop (i.e. standby↔wake) and confirms the device
+  returns to a usable ADC-parked idle between sessions. **This is the
+  baseline gate: it should always pass before any more complex investigation
+  (powers float/double, udev, etc.).**
 
 ## Risk / settle time
 
