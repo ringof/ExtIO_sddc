@@ -354,10 +354,36 @@ Streams: `UDEV` (add/remove/bind events), `PID` (printed only on
 `04b4` PID change), `DMESG` (kernel USB log, root only, `--follow-new`).
 Env: `VID` (default `04b4`), `POLL` (PID poll interval).
 
-## ka9q-radio integration (`ka9q_test.sh`, `hf_sweep.sh`)
+## ka9q-radio integration (`ka9q_smoke.sh`, `ka9q_test.sh`, `hf_sweep.sh`)
 
 These drive the `ka9q-radio` Docker image (see `docker/ka9q-radio/`) and
 need a real RX888 with privileged USB passthrough — never CI.
+
+**The point of this stack:** prove the firmware is *really running the
+radio* without a receiver UI. `radiod` (with the `rx888.so` driver) uploads
+the firmware, programs the Si5351, and streams the ADC at 64.8 MSPS — then
+you look at the power spectrum and *see* a live, calibrated noise floor. A
+frozen / shut-down ADC FFTs to a featureless flat line, so a textured
+~-130 dB thermal floor across 0 .. fs/2 is itself the proof that the whole
+chain (`radiod` → `rx888.so` → FX3 → ADC) is genuinely sampling.
+
+### ka9q_smoke.sh -- whole-band streaming go/no-go (start here)
+
+One command: sweep `0 .. fs/2` and PASS/FAIL on whether `radiod` is
+streaming a live spectrum. Renders a PNG so you can also just look. Run it
+after the container is up (`./docker/ka9q-radio/ka9q.sh start`):
+
+```
+tests/ka9q_smoke.sh
+```
+
+Healthy reference on a 50 Ω dummy load (measured, calibrated): floor flat at
+~-131 to -133 dB edge-to-edge, the ADC DC spike at `f=0`, the `fs/2`
+(32.4 MHz) Nyquist alias spike (~-84 dB), and internal birdies — notably
+**6.48 MHz = fs/10**. PASS requires a non-empty spectrum, a sane mean floor,
+and several dB of natural bin-to-bin variance (the flat-line discriminator).
+FAIL means no spectrum (radiod not streaming), an out-of-range floor, or a
+flat line (ADC frozen / not sampling).
 
 ### ka9q_test.sh -- radiod start/stop soak (Phase 1)
 
@@ -371,6 +397,7 @@ reload interval, etc.).
 
 ### hf_sweep.sh -- full-HF power spectrum via `powers`
 
+The analyzer the smoke test drives, usable on its own for a detailed look.
 Sweeps a band and emits `freq_hz,power_dB` CSV.  Auto-tiles (a single
 `powers` channel tops out ~16000 bins at the 64 KB datagram limit) with
 overlap+trim so per-tile channel-edge artifacts don't land in the output.
@@ -379,14 +406,20 @@ Requires the patched `powers` in the image (see
 
 ```
 tests/hf_sweep.sh -o hf100.csv -p             # 0-32.4 MHz @ 100 Hz, CSV + PNG
-tests/hf_sweep.sh -a 100000 -z 30000000 -p    # usable sub-band (drops DC/Nyquist edges)
+tests/hf_sweep.sh -a 5000000 -z 25000000 -p   # clean sub-band (away from DC/Nyquist)
 ```
 
 Options: `-a/-z` band, `-w` bin width (default 100 Hz), `-G` guard bins
 trimmed per tile edge, `-i` integration/tile, `-o` CSV, `-p` render a PNG
-(gnuplot, headless).  Note: the DC offset at the low edge and the Nyquist
-roll-up near 32.4 MHz are real ADC features at the band ends — sweep a
-sub-band to exclude them.
+(gnuplot, headless).
+
+The floor is calibrated edge-to-edge: every tile requests the same bin count
+and a one-shot warm-up read settles the spectrum channel, so the first/last
+tile read the same level as the interior (a short tile reads ~+4.6 dB high
+and a cold channel reads low — both corrected; see the script header).  The
+only real band-edge features that remain are the ADC **DC spike** at `f=0`
+and the **fs/2 (32.4 MHz) Nyquist alias spike** — sweep a sub-band to
+exclude them.
 
 ## File map
 
@@ -396,6 +429,7 @@ sub-band to exclude them.
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
+| `ka9q_smoke.sh` | Whole-band (0..fs/2) streaming go/no-go via the noise floor (PASS/FAIL + PNG) |
 | `ka9q_test.sh` | ka9q-radio radiod start/stop integration soak (Phase 1) |
 | `hf_sweep.sh` | Full-HF power-spectrum sweep via ka9q `powers` (CSV/PNG) |
 | `Makefile` | Build system for test tools |

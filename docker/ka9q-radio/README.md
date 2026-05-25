@@ -220,15 +220,31 @@ tune -r hf.local -s <ssrc> -f 14.074m
 monitor wwv-pcm.local
 ```
 
+## Verify it's streaming (no receiver UI)
+
+The proof that the firmware is really running the radio is the power
+spectrum itself — you don't need to listen to anything.  With the container
+up (`./ka9q.sh start`), run the whole-band smoke test from the repo root:
+
+```
+tests/ka9q_smoke.sh
+```
+
+It sweeps `0 .. fs/2` via the patched `powers`, renders a PNG, and PASS/FAILs
+on whether the floor is a live, textured thermal spectrum (~-130 dB with
+natural variance, the ADC DC spike, and the fs/2 alias) versus the
+featureless flat line a frozen / shut-down ADC would produce.  See
+`tests/README.md` for the calibrated 50 Ω dummy-load reference.
+
 ## What this tests
 
 1. **Firmware upload** — ka9q-radio uses its own `ezusb.c` loader
    (same protocol as `rx888_stream -f`)
 2. **Si5351 clock programming** — ka9q programs the Si5351 directly
-   via `I2CWFX3`, then sends `STARTADC` (via container patch 03) so
-   the SDDC firmware's `glAdcClockEnabled` flag is set and
-   `STARTFX3`'s preflight check passes.  Without patch 03, STARTFX3
-   stalls and the GPIF state machine never starts.
+   via `I2CWFX3`.  The firmware reads the Si5351 CLK0 enable state back
+   from the chip, so `STARTFX3`'s GPIF preflight check passes with no
+   host-side workaround.  (An earlier container patch — 03,
+   `STARTADC` before `STARTFX3` — is retired; see `patches/README.md`.)
 3. **GPIF streaming** — `STARTFX3` + async bulk transfers at 64.8 MSPS
 4. **GPIO control** — `GPIOFX3` for dither, randomizer, HF/VHF select
 5. **Attenuator/VGA** — `SETARGFX3` with DAT31_ATT and AD8340_VGA
@@ -239,10 +255,12 @@ monitor wwv-pcm.local
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **Missing `STARTADC` before `STARTFX3`** — SDDC requires it for
-  the GPIF preflight check; ka9q omits it.  Fixed by container
-  patch 03 (`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`).
-  The single ka9q-side change required for streaming to work.
+- **`STARTADC` before `STARTFX3`** — earlier SDDC builds needed it for
+  the GPIF preflight check (handled by container patch 03); the firmware
+  now reports Si5351 CLK0 state truthfully, so the preflight passes with no
+  host workaround and patch 03 is retired (see `patches/README.md`).  The
+  only active container patches are the two `powers` float/double fixes
+  (`01`, `02`).
 - **`/run/udev` bind-mount required** at `docker run` time — libusb
   inside the container needs host udev events to see the FX3
   re-enumerate after firmware upload.  Container-side workaround,
