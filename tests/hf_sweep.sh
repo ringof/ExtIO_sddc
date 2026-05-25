@@ -5,15 +5,26 @@
 #
 # Auto-tiles with OVERLAP + TRIM: a single `powers` spectrum channel tops
 # out near 16000 bins (the 64 KB status datagram limit), so a wide band at
-# fine resolution is covered by stepping `powers` across it. Each tile is
-# requested GUARD bins wider on each side (clamped at 0 / Nyquist) and only
-# its clean interior [clean_lo, clean_hi) is emitted — so each tile's edge
-# bins, which can carry channel-edge / DC-leakage artifacts, are discarded
-# and every output sample comes from a tile interior. Adjacent clean
-# intervals butt together (half-open), giving contiguous, artifact-free
-# coverage. Band-EDGE features are real and remain: the ADC DC offset at
-# the low end and the Nyquist roll-up near 32.4 MHz. Sweep a sub-band
-# (e.g. -a 100000 -z 30000000) to drop them.
+# fine resolution is covered by stepping `powers` across it. Each tile
+# requests a fixed MAXBINS-wide window and only its clean interior
+# [clean_lo, clean_hi) is emitted; the GUARD edge bins are discarded.
+# Adjacent clean intervals butt together (half-open), giving contiguous
+# coverage from tile interiors only.
+#
+# Two `powers` MEASUREMENT effects are corrected here. Both were isolated on
+# a 50R dummy load, where the floor is flat (~-131 dB) and stepped only at
+# tile boundaries — i.e. they are measurement artifacts, not receiver features:
+#  - Bin-count normalization: a tile that requests fewer bins reads a uniform
+#    offset (measured ~+4.6 dB at 4000 bins vs 16000, same center/RBW). FIX:
+#    every tile requests the same MAXBINS — the requested window SLIDES to
+#    stay within [0, NYQ] instead of shrinking at the band ends.
+#  - Cold-channel settling: the first integration on a freshly created
+#    spectrum channel reads low (~1-3 dB), then settles. FIX: one throwaway
+#    warm-up read before the sweep; the channel then stays warm across tiles.
+#
+# Real band-EDGE features remain (NOT artifacts): the ADC DC spike at f=0 and
+# the fs/2 (32.4 MHz) Nyquist alias spike. Sweep a sub-band (e.g. -a 2000000
+# -z 30000000) to exclude them.
 #
 # Requires the patched `powers` in the ka9q-radio container (RADIO_FREQUENCY
 # double / RESOLUTION_BW float — docker/ka9q-radio/patches/).
@@ -71,16 +82,32 @@ clean=$(( MAXBINS - 2*GUARD ))
 if [ "$clean" -le 0 ]; then
     echo "hf_sweep: GUARD ($GUARD) too large for MAXBINS ($MAXBINS)" >&2; exit 2
 fi
+WIN=$(( MAXBINS * BIN_HZ ))               # fixed requested span (constant bin count)
+if [ "$WIN" -gt "$NYQ" ]; then
+    echo "hf_sweep: MAXBINS*BIN_HZ ($WIN) exceeds Nyquist ($NYQ); lower -m or -w" >&2; exit 2
+fi
 
 sweep() {
     echo "# freq_hz,power_dB"
+    # Cold-channel warm-up: the first integration on a freshly created
+    # spectrum channel reads low (settling, ~1-3 dB). One throwaway read
+    # settles it; the channel then stays warm across the per-tile powers
+    # invocations, so tile 1 is as accurate as the interior tiles.
+    echo "# warming spectrum channel (one ${INT}s read, discarded)" >&2
+    docker exec "$CONTAINER" powers -c 1 -i "$INT" -s "$SSRC" \
+        -f "$(( START + WIN/2 ))" -w "$BIN_HZ" -b "$MAXBINS" "$GROUP" \
+        >/dev/null 2>&1 || true
     local clo=$START tile=0 chi rlo rhi rb
     while [ "$clo" -lt "$STOP" ]; do
         tile=$((tile+1))
         chi=$(( clo + clean*BIN_HZ )); [ "$chi" -gt "$STOP" ] && chi=$STOP
-        rlo=$(( clo - GUARD*BIN_HZ )); [ "$rlo" -lt 0 ] && rlo=0
-        rhi=$(( chi + GUARD*BIN_HZ )); [ "$rhi" -gt "$NYQ" ] && rhi=$NYQ
-        rb=$(( (rhi - rlo) / BIN_HZ )); [ "$rb" -gt "$MAXBINS" ] && rb=$MAXBINS
+        # Always request a fixed MAXBINS-wide window so every tile shares the
+        # same bin-count normalization. Default to a GUARD below clo; if that
+        # window runs past 0 or Nyquist, SLIDE it back in (don't shrink it).
+        rlo=$(( clo - GUARD*BIN_HZ )); rhi=$(( rlo + WIN ))
+        if [ "$rlo" -lt 0 ]; then rlo=0; rhi=$WIN; fi
+        if [ "$rhi" -gt "$NYQ" ]; then rhi=$NYQ; rlo=$(( NYQ - WIN )); fi
+        rb=$(( (rhi - rlo) / BIN_HZ ))
         printf '# tile %d: clean %s MHz (%d-bin req @ %s MHz)\n' "$tile" \
             "$(awk "BEGIN{printf \"%.3f-%.3f\", $clo/1e6, $chi/1e6}")" "$rb" \
             "$(awk "BEGIN{printf \"%.3f\", ($rlo+($rb/2)*$BIN_HZ)/1e6}")" >&2
