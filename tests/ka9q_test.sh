@@ -54,6 +54,7 @@ KEEP_CONTAINER=0
 
 # Timing knobs (seconds)
 SETTLE=3            # let radiod claim + init before the first liveness check
+READY_TIMEOUT="${READY_TIMEOUT:-30}"  # max wait for radiod to stream + register mDNS
 STOP_TIMEOUT=20     # wait for radiod to exit after SIGINT
 FREE_TIMEOUT=10     # wait for the device to become host-claimable after stop
 
@@ -140,11 +141,17 @@ radiod_log()       { docker exec "$CONTAINER" cat "$LOG_IN" 2>/dev/null; }
 # MAX/MIN in dB, *100 as integers to stay shell-friendly), or nothing on
 # failure.  powers prints one CSV line: ts,fstart,fstop,binw,bincount,p0,p1...
 capture_spectrum() {
-    local csv
-    csv="$(docker exec "$CONTAINER" sh -c \
-        "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
-         -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP \
-         2>/dev/null" 2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
+    local csv tries=0
+    # Retry a few times: even after the status group is registered, the first
+    # mDNS resolve / spectrum-channel creation can lag a beat.
+    while (( tries < 3 )); do
+        csv="$(docker exec "$CONTAINER" sh -c \
+            "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
+             -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP \
+             2>/dev/null" 2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
+        [[ -n "$csv" ]] && break
+        tries=$((tries+1)); sleep 1
+    done
     [[ -z "$csv" ]] && return 1
     echo "$csv" | awk -F, -v dyn="$SPEC_DYN_RANGE_DB" '
         NF >= 6 {
@@ -177,6 +184,28 @@ start_radiod() {
     # (-d) is avoided so a failed `docker exec` surfaces; radiod's own
     # output is redirected to the in-container logfile regardless.
     RADIOD_EXEC_PID=$!
+}
+
+# Wait until radiod is actually serving, not merely alive: streaming has
+# begun, and (for the data plane) the status-group mDNS name is registered.
+# `powers` resolves $SPEC_GROUP via mDNS, so a capture before that name
+# exists races and returns an empty spectrum — the cause of "powers returned
+# no spectrum" on a freshly started radiod even though it is streaming fine.
+# Polls the fresh per-cycle log (start_radiod truncates it).
+wait_radiod_ready() {
+    local t=0 log
+    while (( t < READY_TIMEOUT )); do
+        radiod_running || return 1
+        log="$(radiod_log)"
+        if grep -q 'rx888 running' <<<"$log"; then
+            if (( DATA_PLANE != 1 )) \
+               || grep -q "Established under name '${SPEC_GROUP}'" <<<"$log"; then
+                return 0
+            fi
+        fi
+        sleep 1; t=$((t+1))
+    done
+    return 1
 }
 
 stop_radiod() {
@@ -301,11 +330,10 @@ while :; do
     (( now - start_ts >= DURATION )) && break
     cycle=$((cycle+1))
 
-    # --- Start radiod ---
+    # --- Start radiod and wait until it is actually serving ---
     start_radiod
-    sleep "$SETTLE"
-    if ! radiod_running; then
-        tap_fail "cycle $cycle: radiod died during init" "$(radiod_log | tail -25)"
+    if ! wait_radiod_ready; then
+        tap_fail "cycle $cycle: radiod not streaming/ready within ${READY_TIMEOUT}s" "$(radiod_log | tail -25)"
         stop_radiod; wait_dev_free || true
         continue
     fi
@@ -314,8 +342,8 @@ while :; do
     if [[ "$DATA_PLANE" == "1" ]]; then
         spec="$(capture_spectrum)"            # blocks ~SPEC_INTERVAL
     fi
-    remain=$((STREAM_SECS - SETTLE))
-    (( DATA_PLANE == 1 )) && remain=$((remain - SPEC_INTERVAL))
+    remain=$STREAM_SECS
+    (( DATA_PLANE == 1 )) && remain=$((STREAM_SECS - SPEC_INTERVAL))
     (( remain > 0 )) && sleep "$remain"
     if ! radiod_running; then
         tap_fail "cycle $cycle: radiod died mid-stream" "$(radiod_log | tail -25)"
