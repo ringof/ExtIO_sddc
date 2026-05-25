@@ -8,7 +8,7 @@ Branch: `claude/shdn-when-stopped`.
 ```bash
 cd <repo root>            # e.g. ~/code/sdr/ExtIO_sddc
 git pull
-docker build -t ka9q-radio docker/ka9q-radio/    # ka9q-radio 6a5094ac + ka9q-web b63c991
+docker build -t ka9q-radio docker/ka9q-radio/    # ka9q-radio 42273761 + ka9q-web + hack_no_usb_reset
 docker rm -f ka9q-radio; ./ka9q.sh start
 docker logs ka9q-radio | tail -20                # expect "rx888 running", "3 channels started", NO "reset failed"
 docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
@@ -17,20 +17,20 @@ docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
 
 ## Key facts (so they don't get re-derived)
 
-- **rx888 init-time USB reset:** pinned to ka9q-radio `6a5094ac`
-  (2026-05-02), where that reset defaults OFF (config key `reset`, default
-  false), so no workaround is needed — `rx888-test.conf` simply leaves
-  `reset` unset. (Pre-`6a5094ac` builds reset by default and required
-  `hack_no_usb_reset = yes`; this firmware reboots to DFU on a USB reset,
-  which the old default-on reset broke — `reset failed, -5`. The opt-out
-  knob was added by WA2N/Scott Newell; the May-2 commit flipped the default
-  to off. Verified on the wire via `tests/usb_trace.sh` that the firmware
-  does the right thing — reset -> DFU -> clean re-enumerate — never a defect.)
-- **ka9q-radio `6a5094ac` + ka9q-web `b63c991` is the chosen pair** and they
-  MUST move together. `6a5094ac` is the last revision before the
-  `Metadata_dest_socket` `struct sockaddr` -> `sockaddr_storage` change
-  (`12f0256a`, 2026-05-10), which this ka9q-web commit does not handle ->
-  compile error. Bumping past it requires a newer ka9q-web too.
+- **`hack_no_usb_reset = yes`** in `rx888-test.conf` is REQUIRED. ka9q-radio
+  42273761's rx888 driver does a `libusb_reset_device()` during init; this
+  firmware (correctly, by design) reboots to the bootloader (DFU) on a USB
+  reset, so the driver's reset drops the device to DFU and fails
+  `rx888_usb_init` (`reset failed, -5`). The knob — added by WA2N (Scott
+  Newell), the ka9q-web author — skips the reset. Verified on the wire
+  (`tests/usb_trace.sh`) that the firmware itself does the right thing
+  (reset -> DFU -> clean re-enumerate); the failure was purely the driver's
+  optional reset, NOT a firmware defect.
+- **ka9q-radio `42273761` + ka9q-web `b63c991` is the proven pair** (the
+  W1EUJ / palomar-sdr.com deployment) and they MUST move together. Newer
+  ka9q-radio (e.g. d555f185) changed `Metadata_dest_socket` from
+  `struct sockaddr` to `sockaddr_storage`, which this ka9q-web commit does
+  not handle -> compile error.
 - **Spectrum "really low" = no antenna** (noise floor ~-110 dB), not a bug.
   Connect an antenna or raise `gain` in `rx888-test.conf` to see signals.
 - **`powers` (CLI) uses `SPECT_DEMOD`** -> the half-flat/untuned output we
