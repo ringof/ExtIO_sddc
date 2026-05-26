@@ -39,6 +39,11 @@ CONTAINER="${CONTAINER:-ka9q-radio}"
 IMAGE="${IMAGE:-ka9q-radio}"
 KEEP_GOING=0
 CYCLE_SECS=12          # Stage 3B per-cycle stream window
+# Validation favours a fast, deterministic radiod start over FFT runtime
+# efficiency: `estimate` plans instantly (vs `measure`, which can take minutes
+# of FFTW wisdom generation on the first run and overran the readiness wait).
+FFTW_RIGOR="${FFTW_RIGOR:-estimate}"
+READY_SECS="${READY_SECS:-60}"   # max wait for radiod to reach "rx888 running"
 
 usage(){ sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -105,16 +110,19 @@ if want_stage 3; then
 
     # 3A — runs + produces real output
     echo "### Stage 3A — ka9q_smoke.sh (runs under ka9q-radio + real output)"
-    "$ROOT/docker/ka9q-radio/ka9q.sh" start >/dev/null 2>&1 || true
+    "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true   # clean start
+    FFTW_RIGOR="$FFTW_RIGOR" "$ROOT/docker/ka9q-radio/ka9q.sh" start >/dev/null 2>&1 || true
     ready=0
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$READY_SECS"); do
         docker logs "$CONTAINER" 2>&1 | grep -q "rx888 running" && { ready=1; break; }
         sleep 1
     done
     if [ "$ready" = 1 ]; then
         "$DIR/ka9q_smoke.sh" -c "$CONTAINER"; rc=$?
     else
-        echo "FAIL: radiod did not reach 'rx888 running' within 30s"; rc=1
+        echo "FAIL: radiod did not reach 'rx888 running' within ${READY_SECS}s (FFTW_RIGOR=$FFTW_RIGOR)"
+        echo "----- radiod log (tail) -----"; docker logs "$CONTAINER" 2>&1 | tail -20
+        rc=1
     fi
     "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true
     record "Stage 3A (real output)" "$rc"; gate "$rc"
