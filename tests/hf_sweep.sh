@@ -11,16 +11,21 @@
 # Adjacent clean intervals butt together (half-open), giving contiguous
 # coverage from tile interiors only.
 #
-# Two `powers` MEASUREMENT effects are corrected here. Both were isolated on
-# a 50R dummy load, where the floor is flat (~-131 dB) and stepped only at
-# tile boundaries — i.e. they are measurement artifacts, not receiver features:
+# Two `powers` MEASUREMENT effects are corrected here (artifacts of how this
+# script drives `powers`, not receiver features):
 #  - Bin-count normalization: a tile that requests fewer bins reads a uniform
-#    offset (measured ~+4.6 dB at 4000 bins vs 16000, same center/RBW). FIX:
-#    every tile requests the same MAXBINS — the requested window SLIDES to
-#    stay within [0, NYQ] instead of shrinking at the band ends.
-#  - Cold-channel settling: the first integration on a freshly created
-#    spectrum channel reads low (~1-3 dB), then settles. FIX: one throwaway
-#    warm-up read before the sweep; the channel then stays warm across tiles.
+#    offset (measured ~+4.6 dB at 4000 bins vs 16000, same center/RBW; seen on
+#    a 50R dummy load). FIX: every tile requests the same MAXBINS — the
+#    requested window SLIDES to stay within [0, NYQ] instead of shrinking at
+#    the band ends.
+#  - Unreliable first integration: the first integration after a channel is
+#    created OR retuned is wrong — a freshly created channel reads low (cold
+#    settling, ~1-3 dB; seen on the dummy load), and the first read after a
+#    retune still carries stale samples from the previous tile, so a strong
+#    signal ghosts in one tile-width away (seen on sig_gen). FIX: run_tile
+#    requests `-c 2` and keeps the SECOND (settled) spectrum, discarding the
+#    bad first read on every tile — which also makes tile 1 self-settle (no
+#    separate warm-up needed).
 #
 # Real band-EDGE features remain (NOT artifacts): the ADC DC spike at f=0 and
 # the fs/2 (32.4 MHz) Nyquist alias spike. Sweep a sub-band (e.g. -a 2000000
@@ -65,13 +70,21 @@ done
 # [clo, chi). powers returns bins low-to-high with bin 0 at rlo (its base =
 # center - (rb/2)*bw == rlo), so bin i freq = rlo + i*bw.
 run_tile() {                              # $1=rlo $2=rb $3=clo $4=chi
-    local rlo=$1 rb=$2 clo=$3 chi=$4 center out
+    local rlo=$1 rb=$2 clo=$3 chi=$4 center out tmo
     center=$(( rlo + (rb/2)*BIN_HZ ))
-    out="$(docker exec "$CONTAINER" powers -c 1 -i "$INT" -s "$SSRC" \
-              -f "$center" -w "$BIN_HZ" -b "$rb" "$GROUP" 2>/dev/null \
-           | grep -E '^[0-9].*,.*,' | tail -1)"
+    # -c 2, keep the SECOND spectrum (tail -1): the channel is retuned to this
+    # tile's center each call, and the first integration after a retune still
+    # carries stale samples from the previous tile's tuning — a strong signal
+    # leaks in at (new_center + old_offset), a ghost one tile-width away.
+    # Discarding the first (unsettled) integration removes it.
+    # Bound the wait (2 integrations + slack): if radiod is gone or
+    # unresponsive, fail this tile instead of hanging the whole sweep.
+    tmo=$(( 2*INT + 10 ))
+    out="$(docker exec "$CONTAINER" sh -c \
+              "timeout $tmo powers -c 2 -i $INT -s $SSRC -f $center -w $BIN_HZ -b $rb $GROUP 2>/dev/null" \
+           2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
     if [ -z "$out" ]; then
-        echo "hf_sweep: WARNING no data for tile rlo=$rlo bins=$rb" >&2
+        echo "hf_sweep: WARNING no data for tile rlo=$rlo bins=$rb (radiod down / timeout ${tmo}s?)" >&2
         return 1
     fi
     printf '%s\n' "$out" | awk -F', *' -v rlo="$rlo" -v bw="$BIN_HZ" -v clo="$clo" -v chi="$chi" '
@@ -89,14 +102,8 @@ fi
 
 sweep() {
     echo "# freq_hz,power_dB"
-    # Cold-channel warm-up: the first integration on a freshly created
-    # spectrum channel reads low (settling, ~1-3 dB). One throwaway read
-    # settles it; the channel then stays warm across the per-tile powers
-    # invocations, so tile 1 is as accurate as the interior tiles.
-    echo "# warming spectrum channel (one ${INT}s read, discarded)" >&2
-    docker exec "$CONTAINER" powers -c 1 -i "$INT" -s "$SSRC" \
-        -f "$(( START + WIN/2 ))" -w "$BIN_HZ" -b "$MAXBINS" "$GROUP" \
-        >/dev/null 2>&1 || true
+    # No warm-up needed: run_tile's `-c 2` discards each tile's first
+    # (unsettled) integration, so tile 1 self-settles on channel creation.
     local clo=$START tile=0 chi rlo rhi rb
     while [ "$clo" -lt "$STOP" ]; do
         tile=$((tile+1))
