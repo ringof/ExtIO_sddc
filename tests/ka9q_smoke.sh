@@ -33,7 +33,17 @@ LO=0; HI=32400000; INT=5; OUT=; SSRC=30303
 
 # Liveness thresholds (dB). A live HF floor sits well inside [-150,-100] with
 # many dB of bin-to-bin variance; a frozen/zeroed ADC collapses the spread.
-MEAN_LO=-150; MEAN_HI=-100; MIN_SPREAD=5
+MEAN_LO="${MEAN_LO:--150}"; MEAN_HI="${MEAN_HI:--100}"; MIN_SPREAD="${MIN_SPREAD:-5}"
+
+# fs/2 Nyquist-alias gate (RX888-specific, antenna-independent proof the ADC
+# is genuinely sampling at fs): require a peak within +/-ALIAS_WINDOW of
+# ALIAS_FREQ (fs/2 = 32.4 MHz for 64.8 Msps) at least ALIAS_MIN_DB above the
+# floor mean. Auto-skipped if ALIAS_FREQ is outside the swept band; set
+# ALIAS_MIN_DB=0 to disable. NOTE: coupled to the firmware's DC->Nyquist
+# alias; revisit if a future firmware nulls the ADC DC offset.
+ALIAS_FREQ="${ALIAS_FREQ:-32400000}"
+ALIAS_WINDOW="${ALIAS_WINDOW:-200000}"
+ALIAS_MIN_DB="${ALIAS_MIN_DB:-20}"
 
 while getopts "a:z:i:c:g:o:h" opt; do
     case "$opt" in
@@ -82,6 +92,19 @@ awk -v m="$MEAN" -v lo="$MEAN_LO" -v hi="$MEAN_HI" 'BEGIN{exit !(m>=lo && m<=hi)
     || fail "floor mean ${MEAN}dB outside sane window [${MEAN_LO},${MEAN_HI}] — no real samples?"
 awk -v s="$SPREAD" -v t="$MIN_SPREAD" 'BEGIN{exit !(s>=t)}' \
     || fail "spectrum is a flat line (spread ${SPREAD}dB < ${MIN_SPREAD}dB) — ADC frozen / not sampling?"
+
+# fs/2 Nyquist-alias gate (only if the alias freq is inside the swept band and enabled).
+if awk -v f="$ALIAS_FREQ" -v lo="$LO" -v hi="$HI" -v t="$ALIAS_MIN_DB" 'BEGIN{exit !(t>0 && f>=lo && f<=hi)}'; then
+    ALIAS_MAX=$(awk -F, -v lo="$((ALIAS_FREQ-ALIAS_WINDOW))" -v hi="$((ALIAS_FREQ+ALIAS_WINDOW))" \
+        '!/^#/&&NF==2 && $1>=lo && $1<=hi { if(n++==0||$2>mx)mx=$2 } END{ if(n>0)printf "%.2f",mx; else print "NA" }' "$OUT")
+    [ "$ALIAS_MAX" = "NA" ] && fail "no bins within +/-${ALIAS_WINDOW}Hz of fs/2 (${ALIAS_FREQ}Hz) — can't check the Nyquist alias"
+    ALIAS_MARGIN=$(awk -v a="$ALIAS_MAX" -v m="$MEAN" 'BEGIN{printf "%.1f", a-m}')
+    echo "ka9q smoke: fs/2 alias peak ${ALIAS_MAX}dB, margin ${ALIAS_MARGIN}dB over floor mean (need >= ${ALIAS_MIN_DB})"
+    awk -v a="$ALIAS_MAX" -v m="$MEAN" -v t="$ALIAS_MIN_DB" 'BEGIN{exit !((a-m)>=t)}' \
+        || fail "fs/2 Nyquist alias absent/weak (margin ${ALIAS_MARGIN}dB < ${ALIAS_MIN_DB}dB) — not a live RX888 ADC sampling at fs?"
+else
+    echo "ka9q smoke: fs/2 alias gate skipped (fs/2 not in swept band, or disabled)" >&2
+fi
 
 echo "PASS: firmware is streaming a live spectrum (radiod -> rx888.so -> FX3 -> ADC)."
 exit 0

@@ -354,6 +354,31 @@ Streams: `UDEV` (add/remove/bind events), `PID` (printed only on
 `04b4` PID change), `DMESG` (kernel USB log, root only, `--follow-new`).
 Env: `VID` (default `04b4`), `POLL` (PID poll interval).
 
+## End-to-end validation (`validate.sh`)
+
+`validate.sh` runs the full firmware-validation sequence against an attached
+RX888 in three sequential stages, each releasing the USB device before the
+next, ending in one overall PASS/FAIL. Hardware-only, never CI.
+
+```
+tests/validate.sh                       # all stages, 300 s soak
+tests/validate.sh --skip-soak           # quick: stages 1 + 3
+tests/validate.sh --stages 3            # just the ka9q-radio stage
+tests/validate.sh --soak-secs 3600 --keep-going
+```
+
+| Stage | What | PASS criteria |
+|-------|------|---------------|
+| 1 | `fw_test.sh` — vendor-command + data-flow | TAP: 0 failed |
+| 2 | `soak_test.sh` — stability (default 300 s; use hours for a real run) | no wedge / overrun / stall |
+| 3A | `ka9q_smoke.sh` — runs under ka9q-radio + real output | streams + sane floor + texture + **fs/2 alias present** |
+| 3B | `ka9q_test.sh` — kill-and-return + clean idle (#131) | every restart cycle re-streams and parks clean |
+
+Options: `--firmware PATH`, `--stages LIST`, `--soak-secs N`, `--skip-soak`,
+`--container/--image NAME`, `--keep-going` (don't stop at the first failure).
+Exit 0 iff every stage that ran passed. Needs `fx3_cmd` built (auto-builds)
+and, for Stage 3, the `ka9q-radio` docker image.
+
 ## ka9q-radio integration (`ka9q_smoke.sh`, `ka9q_test.sh`, `hf_sweep.sh`)
 
 These drive the `ka9q-radio` Docker image (see `docker/ka9q-radio/`) and
@@ -380,10 +405,16 @@ tests/ka9q_smoke.sh
 Healthy reference on a 50 Ω dummy load (measured, calibrated): floor flat at
 ~-131 to -133 dB edge-to-edge, the ADC DC spike at `f=0`, the `fs/2`
 (32.4 MHz) Nyquist alias spike (~-84 dB), and internal birdies — notably
-**6.48 MHz = fs/10**. PASS requires a non-empty spectrum, a sane mean floor,
-and several dB of natural bin-to-bin variance (the flat-line discriminator).
-FAIL means no spectrum (radiod not streaming), an out-of-range floor, or a
-flat line (ADC frozen / not sampling).
+**6.48 MHz = fs/10**. PASS requires: a non-empty spectrum (streaming); a sane
+mean floor; several dB of natural bin-to-bin variance (the flat-line
+discriminator); and the **fs/2 (32.4 MHz) Nyquist alias present** — a peak
+≥ `ALIAS_MIN_DB` (default 20) above the floor mean, an antenna-independent
+proof the ADC is genuinely sampling at fs. FAIL means no spectrum (radiod not
+streaming), an out-of-range floor, a flat line (ADC frozen), or a missing
+alias (not a live RX888 ADC). Thresholds are env-overridable (`MEAN_LO/HI`,
+`MIN_SPREAD`, `ALIAS_FREQ/WINDOW/MIN_DB`); the alias gate auto-skips if fs/2
+isn't in the swept band. NOTE: the alias gate is coupled to the firmware's
+DC→Nyquist alias — revisit it if a future firmware nulls the ADC DC offset.
 
 ### ka9q_test.sh -- radiod start/stop soak (Phase 1)
 
@@ -429,7 +460,8 @@ exclude them.
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
-| `ka9q_smoke.sh` | Whole-band (0..fs/2) streaming go/no-go via the noise floor (PASS/FAIL + PNG) |
+| `validate.sh` | End-to-end firmware validation: fw_test -> soak -> ka9q-radio real-output + kill-and-return, one overall PASS/FAIL |
+| `ka9q_smoke.sh` | Whole-band (0..fs/2) streaming go/no-go via the noise floor + fs/2-alias gate (PASS/FAIL + PNG) |
 | `ka9q_test.sh` | ka9q-radio radiod start/stop integration soak (Phase 1) |
 | `hf_sweep.sh` | Full-HF power-spectrum sweep via ka9q `powers` (CSV/PNG) |
 | `Makefile` | Build system for test tools |
