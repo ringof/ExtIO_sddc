@@ -75,6 +75,29 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
+### Full validation in one command
+
+`tests/validate.sh` runs the whole firmware-validation sequence against an
+attached RX888 — three sequential stages with one overall PASS/FAIL:
+
+```
+tests/validate.sh                 # all stages (300 s soak)
+tests/validate.sh --skip-soak     # quick: correctness + ka9q-radio only
+```
+
+1. **`fw_test.sh`** — vendor-command and data-flow correctness.
+2. **`soak_test.sh`** — stability (default 300 s; pass `--soak-secs N` /
+   run the soak standalone for hours for a real run).
+3. **ka9q-radio** — confirms the firmware runs under the real host stack
+   (`radiod` + `rx888.so`) **and produces real output**: a live power
+   spectrum (sane noise floor, natural variance, and the fs/2 Nyquist alias
+   — not the flat line a dead/frozen ADC would give), plus a kill-and-return
+   check that `radiod` restarts and re-streams cleanly (issue #131). Needs
+   the `ka9q-radio` docker image (see below).
+
+See [`tests/README.md`](tests/README.md) for the per-stage pass/fail
+criteria and the `ka9q_smoke.sh` / `ka9q_test.sh` details.
+
 ### USB device permissions
 
 The FX3 USB device must be accessible to the user running the tests.
