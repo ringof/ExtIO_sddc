@@ -1,5 +1,15 @@
 # CLAUDE.md — Working Agreement for Claude Code
 
+## Bench / Container Debugging
+
+- When debugging the ka9q-radio container interactively, work INSIDE the
+  container via persistent interactive shells (`docker exec -it ... bash`),
+  using plain commands (`radiod`, `pgrep`, `powers`, `lsusb`).
+- Do NOT wrap per-action commands in host-side `docker exec ...`. Each one
+  spawns a separate process — that has caused real bugs (unforwarded
+  Ctrl-C, stray radiod claiming the USB device).
+- Do not hand over one-off scripts for manual investigation unless asked.
+
 ## Commit and Push Policy
 
 - **Always ask before committing and pushing.** Never commit or push without explicit user approval.
