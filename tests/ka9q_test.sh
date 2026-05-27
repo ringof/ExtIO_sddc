@@ -193,26 +193,68 @@ start_radiod() {
     RADIOD_EXEC_PID=$!
 }
 
-# Wait until radiod is actually serving, not merely alive: streaming has
-# begun, and (for the data plane) the status-group mDNS name is registered.
-# `powers` resolves $SPEC_GROUP via mDNS, so a capture before that name
-# exists races and returns an empty spectrum — the cause of "powers returned
-# no spectrum" on a freshly started radiod even though it is streaming fine.
+# Classify a RUNNING radiod's bring-up state from its log + mDNS. The mDNS
+# resolve is the "real" check, not just a log grep: radiod can log
+# "Established under name 'hf.local'" yet have the name actually lost to a
+# Local name collision, so it never resolves and `powers` gets nothing. We
+# require the group to BOTH be logged AND actually resolve.
+#   SETUP   - no "rx888 running" yet (still in / wedged in rx888_setup)
+#   NO_MDNS - streaming, but $SPEC_GROUP not registered/resolvable
+#   READY   - streaming and the status group resolves
+radiod_bringup_state() {
+    local log="$1"
+    grep -q 'rx888 running' <<<"$log" || { echo SETUP; return; }
+    (( DATA_PLANE != 1 )) && { echo READY; return; }
+    if grep -q "Established under name '${SPEC_GROUP}'" <<<"$log" \
+       && docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
+        echo READY
+    else
+        echo NO_MDNS
+    fi
+}
+
+# Wait until radiod is actually serving. Sets READY_REASON to the final state
+# (LAUNCHING|EXITED|SETUP|NO_MDNS|READY) for the caller's diagnostics. Returns
+# 0 only on READY. Bails early on EXITED (a crash won't recover by waiting).
 # Polls the fresh per-cycle log (start_radiod truncates it).
+READY_REASON=""
 wait_radiod_ready() {
-    local t=0 log
+    local t=0 st seen=0 log
     while (( t < READY_TIMEOUT )); do
-        radiod_running || return 1
-        log="$(radiod_log)"
-        if grep -q 'rx888 running' <<<"$log"; then
-            if (( DATA_PLANE != 1 )) \
-               || grep -q "Established under name '${SPEC_GROUP}'" <<<"$log"; then
-                return 0
-            fi
+        if radiod_running; then
+            seen=1
+            log="$(radiod_log)"
+            st="$(radiod_bringup_state "$log")"
+        elif (( seen )); then
+            st=EXITED          # was running, now gone -> crashed in bring-up
+        else
+            st=LAUNCHING       # not spawned yet; keep waiting
         fi
+        READY_REASON="$st"
+        [[ "$st" == READY  ]] && return 0
+        [[ "$st" == EXITED ]] && return 1
         sleep 1; t=$((t+1))
     done
     return 1
+}
+
+# Build a human-readable diagnosis of a non-READY radiod for TAP failure
+# output, so a failure says WHAT happened instead of just "timed out".
+readiness_diag() {
+    local reason="$1" pid log markers
+    pid="$(docker exec "$CONTAINER" pgrep -x radiod 2>/dev/null | head -1)"
+    log="$(radiod_log)"
+    case "$reason" in
+        LAUNCHING) echo "radiod never started — no process within ${READY_TIMEOUT}s" ;;
+        EXITED)    echo "radiod EXITED during bring-up (process gone) — see markers below" ;;
+        SETUP)     echo "radiod SETUP-stuck — pid ${pid:-?} alive but no 'rx888 running' after ${READY_TIMEOUT}s (wedged in rx888_setup / USB claim)" ;;
+        NO_MDNS)   echo "radiod NO_MDNS — streaming, but status group '${SPEC_GROUP}' not registered/resolvable after ${READY_TIMEOUT}s (avahi name collision?)" ;;
+        *)         echo "radiod not ready (${reason})" ;;
+    esac
+    markers="$(grep -nE 'Error claiming|device setup returned|rx888 running|Established under name|Local name collision|aborted|usb_init' <<<"$log")"
+    [[ -n "$markers" ]] && { echo "--- markers ---"; echo "$markers"; }
+    echo "--- last 20 log lines ---"
+    tail -20 <<<"$log"
 }
 
 stop_radiod() {
@@ -373,7 +415,9 @@ while :; do
     # --- Start radiod and wait until it is actually serving ---
     start_radiod
     if ! wait_radiod_ready; then
-        if [[ -n "${KA9Q_GDB_ON_STALL:-}" ]]; then
+        # Only backtrace when actually wedged in setup (SETUP); EXITED/NO_MDNS
+        # aren't hangs, so a gdb capture there is noise.
+        if [[ -n "${KA9Q_GDB_ON_STALL:-}" && "$READY_REASON" == SETUP ]]; then
             # Capture WHERE the stalled radiod is stuck, before we kill it.
             docker exec "$CONTAINER" sh -c 'command -v gdb >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y gdb >/dev/null 2>&1; }'
             rpid=$(docker exec "$CONTAINER" pgrep -x radiod 2>/dev/null | head -1)
@@ -396,7 +440,7 @@ while :; do
                 radiod_log | tail -20 | sed 's/^/#   /' >&2
             fi
         fi
-        tap_fail "cycle $cycle: radiod not streaming/ready within ${READY_TIMEOUT}s" "$(radiod_log | tail -25)"
+        tap_fail "cycle $cycle: radiod not ready (${READY_REASON}) within ${READY_TIMEOUT}s" "$(readiness_diag "$READY_REASON")"
         stop_radiod; wait_dev_free || true
         continue
     fi
@@ -417,8 +461,11 @@ while :; do
     spec_msg=""
     if [[ "$DATA_PLANE" == "1" ]]; then
         if [[ -z "$spec" ]]; then
-            tap_fail "cycle $cycle: powers returned no spectrum (radiod streaming?)" \
-                     "$(radiod_log | tail -15)"
+            # radiod was confirmed READY (running + 'rx888 running' + group
+            # resolves) before we got here, so this is a data-plane/resolve
+            # problem, NOT radiod being down.
+            tap_fail "cycle $cycle: powers returned no spectrum despite radiod READY (data-plane/resolve issue, not radiod-down)" \
+                     "$(echo "${SPEC_GROUP} resolves to: $(docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" 2>&1)"; radiod_log | tail -15)"
             stop_radiod; wait_dev_free || true
             continue
         fi
