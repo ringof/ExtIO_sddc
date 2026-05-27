@@ -14,7 +14,7 @@
 #                          -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro \
 #                          -v "$(pwd)/SDDC_FX3:/firmware" \
 #                          -v "$(pwd)/wisdom:/var/lib/ka9q-radio" \
-#                          --network host ka9q-radio bash
+#                          -p 127.0.0.1:8081:8081 ka9q-radio bash
 #                        (inside)  radiod /etc/radio/radiod@rx888-test.conf
 #
 # Three timestamped streams, easy to correlate with radiod's own log:

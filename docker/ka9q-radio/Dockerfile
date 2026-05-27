@@ -2,11 +2,16 @@
 #
 # Build:   docker build -t ka9q-radio docker/ka9q-radio/
 # Run:     docker run --rm -it --privileged -v /dev/bus/usb:/dev/bus/usb \
-#            --network host ka9q-radio
+#            -p 127.0.0.1:8081:8081 ka9q-radio
 #
 # The --privileged flag is needed because the FX3 changes USB PID during
 # firmware upload (0x00F3 -> 0x00F1), which changes the device path.
-# --network host is needed for ka9q-radio's multicast UDP output.
+# A plain bridge network (NOT --network host) is used: radiod, powers and
+# ka9q-web all run inside this one container, so ka9q's multicast stays on the
+# container's own lo/eth0 and is deterministic. --network host exposes every
+# host interface, and since `powers` has no --iface flag it picks one by
+# routing — on a multi-homed host radiod and powers can land on different
+# interfaces and never see each other. Publish ka9q-web's port to reach it.
 
 FROM debian:bookworm-slim AS builder
 
@@ -142,7 +147,7 @@ COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
 #   docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
-# then browse http://localhost:8081 (container uses --network host).
+# then browse http://localhost:8081 (container publishes -p 127.0.0.1:8081:8081).
 COPY --from=builder /usr/local/lib/libonion*.so* /usr/local/lib/
 COPY --from=builder /build/ka9q-web/ka9q-web /usr/local/sbin/ka9q-web
 COPY --from=builder /build/ka9q-web/html /usr/local/share/ka9q-web/html

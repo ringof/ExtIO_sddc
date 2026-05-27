@@ -51,7 +51,7 @@ container is Linux-only.
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  --network host \
+  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
 
@@ -63,9 +63,16 @@ docker run --rm -it --privileged \
   -v /run/udev:/run/udev:ro \
   -v $(pwd)/SDDC_FX3:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
-  --network host \
+  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
+
+> A plain bridge network is used (not `--network host`): radiod, `powers` and
+> ka9q-web all run inside the one container, so ka9q's multicast stays on the
+> container's own `lo`/`eth0` and is deterministic. `--network host` exposes
+> every host interface and `powers` (no `--iface` flag) can pick a different
+> one than radiod on a multi-homed host. ka9q-web is published on localhost
+> (`-p 127.0.0.1:8081:8081`); NAT still provides apt egress for debugging.
 
 The `/run/udev` bind mount is **required** when radiod uploads the
 firmware: after the FX3 re-enumerates from `04b4:00f3` (DFU) to
@@ -194,7 +201,7 @@ docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v $(pwd)/SDDC_FX3:/firmware \
-  --network host \
+  -p 127.0.0.1:8081:8081 \
   ka9q-radio bash
 ```
 

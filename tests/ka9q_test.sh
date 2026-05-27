@@ -285,14 +285,18 @@ if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     note "reusing running container '$CONTAINER'"
 else
     mkdir -p "$PROJECT_ROOT/wisdom"
-    note "starting idle container (first run generates FFTW wisdom — may take minutes)"
+    note "starting idle container"
+    # Bridge network (NOT --network host): keeps ka9q multicast on the
+    # container's own lo/eth0 so radiod and powers always agree on the
+    # interface (a multi-homed host with --network host can land them on
+    # different interfaces; powers has no --iface flag). estimate FFTW rigor
+    # keeps radiod's first start fast/deterministic for the soak.
     if ! docker run --rm -d --name "$CONTAINER" --privileged \
             -v /dev/bus/usb:/dev/bus/usb \
             -v /run/udev:/run/udev:ro \
             -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \
             -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
-            --network host \
-            -e FFTW_RIGOR="${FFTW_RIGOR:-measure}" \
+            -e FFTW_RIGOR="${FFTW_RIGOR:-estimate}" \
             "$IMAGE" sleep infinity >/dev/null; then
         echo "Bail out! failed to start container"; exit 1
     fi

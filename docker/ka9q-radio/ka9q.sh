@@ -56,13 +56,20 @@ cmd_start() {
     if [ -e /dev/snd ]; then
         snd_args+=(--device /dev/snd --group-add audio)
     fi
+    # Bridge network (NOT --network host): radiod, powers and ka9q-web all run
+    # in this one container, so ka9q's multicast stays on the container's own
+    # lo/eth0 and is deterministic. --network host exposes every host interface
+    # (wifi + docker0 + virbr0 + ...), and since `powers` has no --iface flag it
+    # picks one by routing — on a multi-homed host radiod and powers can land on
+    # different interfaces and never see each other. ka9q-web is reached via the
+    # published localhost port; NAT still gives apt egress for debugging.
     docker run --rm -d --name "$CONTAINER_NAME" --privileged \
         -v /dev/bus/usb:/dev/bus/usb \
         -v /run/udev:/run/udev:ro \
         -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
-        --network host \
+        -p 127.0.0.1:8081:8081 \
         -e FFTW_RIGOR="${FFTW_RIGOR:-measure}" \
         "$IMAGE_NAME" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
