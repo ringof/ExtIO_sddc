@@ -774,7 +774,7 @@ static void print_local_help(void)
            "  stats_i2c / stats_pib / stats_pll   Counter tests\n"
            "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
            "  stop_start_cycle              Cycle STOP+START N times\n"
-           "  resetup_cycle                 Full re-setup restart cycling (host-style); env RESETUP_STANDBY_MS/CYCLES/GPIO\n"
+           "  resetup_cycle                 Full re-setup restart cycling (host-style); env RESETUP_STANDBY_MS/CYCLES/GPIO/REOPEN\n"
            "  pll_preflight                 Verify START rejected without clock\n"
            "  clk0_chip_query               Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
            "  wedge_recovery                Provoke DMA wedge, test recovery\n"
@@ -1901,63 +1901,98 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
  * STARTFX3 doesn't restart the SM after STOPFX3 leaves it stuck. */
 /* resetup_cycle: exercise a FULL re-setup restart each cycle -- the way a host
  * (e.g. radiod) actually restarts streaming, NOT the bare STARTFX3/STOPFX3 of
- * stop_start_cycle. Per cycle: STOPFX3 (firmware parks the ADC in SHDN standby,
- * #131); dwell in standby for RESETUP_STANDBY_MS to mimic the host's re-setup
- * burst between stop and start (the gap stop_start_cycle never exercises);
- * then re-init clock + GPIO + atten/VGA + TUNERSTDBY + STARTFX3 (firmware wakes
- * the ADC, settles ADC_WAKEUP_SETTLE_MS, starts the GPIF) and confirm the
- * stream flows. Reproduces a wake-on-restart stall with no host SDR app in the
- * loop; the standby dwell is the knob to bisect the wake timing.
- *   env: RESETUP_CYCLES (default 8), RESETUP_STANDBY_MS (default 40),
- *        RESETUP_GPIO (default 0). */
+ * stop_start_cycle. Per cycle: dwell in SHDN standby for RESETUP_STANDBY_MS
+ * (the gap stop_start_cycle never exercises), then re-init clock + GPIO +
+ * atten/VGA + TUNERSTDBY + STARTFX3 (firmware wakes the ADC, settles
+ * ADC_WAKEUP_SETTLE_MS, starts the GPIF) and confirm the stream flows. The
+ * standby dwell is the knob to bisect the wake timing.
+ *
+ * RESETUP_REOPEN=1 goes further: each cycle uses a brand-new libusb handle
+ * (open_rx888 -> claim -> stream -> STOPFX3 -> release -> close), mimicking
+ * radiod restarting as a fresh PROCESS. Caveat: the caller's handle stays open
+ * (interface released, re-claimed at the end), so the device isn't fully at
+ * zero open handles between cycles.
+ *   env: RESETUP_CYCLES (8), RESETUP_STANDBY_MS (40), RESETUP_GPIO (0),
+ *        RESETUP_REOPEN (0). */
 static int do_test_resetup_cycle(libusb_device_handle *h)
 {
-    int cycles = 8, standby_ms = 40;
+    int cycles = 8, standby_ms = 40, reopen = 0;
     uint32_t gpios = 0;
     const char *e;
     if ((e = getenv("RESETUP_CYCLES")))     cycles = atoi(e);
     if ((e = getenv("RESETUP_STANDBY_MS"))) standby_ms = atoi(e);
     if ((e = getenv("RESETUP_GPIO")))       gpios = (uint32_t)strtoul(e, NULL, 0);
+    if ((e = getenv("RESETUP_REOPEN")))     reopen = atoi(e);
 
-    printf("# resetup_cycle: %d cycles, %d ms standby before wake, gpio=0x%x\n",
-           cycles, standby_ms, gpios);
+    printf("# resetup_cycle: %d cycles, %d ms standby, gpio=0x%x, reopen=%d\n",
+           cycles, standby_ms, gpios, reopen);
 
+    /* Reopen mode: free interface 0 so each cycle's fresh handle can claim it. */
+    if (reopen)
+        libusb_release_interface(h, 0);
+
+    int rc = 0;
     for (int i = 0; i < cycles; i++) {
-        /* Stop the previous session: firmware parks the ADC in SHDN standby. */
-        cmd_u32(h, STOPFX3, 0);
-        /* Dwell in standby as long as a host spends re-setting up between
-         * STOPFX3 and STARTFX3 -- the prime suspect for a wake-on-restart race. */
-        usleep((useconds_t)standby_ms * 1000);
+        libusb_device_handle *use = h;
+
+        if (reopen) {
+            /* Device idle in SHDN standby, no streaming handle (between
+             * "processes"), then a fresh open+claim -- like radiod restarting. */
+            usleep((useconds_t)standby_ms * 1000);
+            use = open_rx888(g_ctx);
+            if (!use) {
+                printf("FAIL resetup_cycle: cycle %d/%d open_rx888 failed "
+                       "(device gone after restart?)\n", i + 1, cycles);
+                rc = 1; break;
+            }
+        } else {
+            cmd_u32(use, STOPFX3, 0);                /* park ADC in standby */
+            usleep((useconds_t)standby_ms * 1000);
+        }
 
         /* Full re-setup burst (5 ms gaps), mirroring a host restart. */
-        cmd_u32_retry(h, STARTADC, 64800000); usleep(5000);  /* re-init ADC clock */
-        do_gpio(h, gpios);                    usleep(5000);
-        do_att(h, 0);                         usleep(5000);
-        do_vga(h, 0);                         usleep(5000);
-        cmd_u32(h, TUNERSTDBY, 0);            usleep(5000);  /* HF: harmless STALL */
-        do_gpio(h, gpios);                    usleep(5000);
+        cmd_u32_retry(use, STARTADC, 64800000); usleep(5000);  /* re-init ADC clock */
+        do_gpio(use, gpios);                    usleep(5000);
+        do_att(use, 0);                         usleep(5000);
+        do_vga(use, 0);                         usleep(5000);
+        cmd_u32(use, TUNERSTDBY, 0);            usleep(5000);  /* HF: harmless STALL */
+        do_gpio(use, gpios);                    usleep(5000);
 
         /* STARTFX3 (firmware wakes the ADC + settle + GPIF) + primed bulk read. */
-        int got = primed_start_and_read(h, 16384, 2000);
-        cmd_u32(h, TUNERSTDBY, 0);
+        int got = primed_start_and_read(use, 16384, 2000);
+        cmd_u32(use, TUNERSTDBY, 0);
 
         if (got < 1024) {
             struct fx3_stats s = {0};
-            read_stats(h, &s);
+            read_stats(use, &s);
             printf("FAIL resetup_cycle: cycle %d/%d stalled after restart: "
-                   "%d bytes (standby=%d ms); GPIF_state=%u DMA_count=%u "
-                   "PIB_err=%u faults=%u\n",
-                   i + 1, cycles, got < 0 ? 0 : got, standby_ms,
+                   "%d bytes (standby=%d ms, reopen=%d); GPIF_state=%u "
+                   "DMA_count=%u PIB_err=%u faults=%u\n",
+                   i + 1, cycles, got < 0 ? 0 : got, standby_ms, reopen,
                    s.gpif_state, s.dma_count, s.pib_errors, s.streaming_faults);
-            cmd_u32(h, STOPFX3, 0);
-            return 1;
+            cmd_u32(use, STOPFX3, 0);
+            if (reopen) { libusb_release_interface(use, 0); libusb_close(use); }
+            rc = 1; break;
+        }
+
+        if (reopen) {
+            cmd_u32(use, STOPFX3, 0);            /* "process" exits: stop + close */
+            libusb_release_interface(use, 0);
+            libusb_close(use);
         }
         usleep(100000);  /* brief dwell while streaming */
     }
-    cmd_u32(h, STOPFX3, 0);
-    printf("PASS resetup_cycle: %d full re-setup restarts, stream flowed each time "
-           "(standby=%d ms)\n", cycles, standby_ms);
-    return 0;
+
+    if (reopen)
+        libusb_claim_interface(h, 0);   /* re-claim for the caller's cleanup */
+    else
+        cmd_u32(h, STOPFX3, 0);
+
+    if (rc == 0)
+        printf("PASS resetup_cycle: %d %s restarts, stream flowed each time "
+               "(standby=%d ms)\n", cycles, reopen ? "fresh-handle" : "in-handle",
+               standby_ms);
+    return rc;
 }
 
 static int do_test_stop_start_cycle(libusb_device_handle *h)
@@ -5510,7 +5545,7 @@ static void usage(const char *prog)
         "  stats_pll                    Verify Si5351 PLL lock status\n"
         "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
-        "  resetup_cycle                Full re-setup restart cycling, host-style (RESETUP_STANDBY_MS knob)\n"
+        "  resetup_cycle                Full re-setup restart cycling, host-style (RESETUP_STANDBY_MS, RESETUP_REOPEN knobs)\n"
         "  pll_preflight                Verify STARTFX3 rejected without clock\n"
         "  clk0_chip_query              Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
         "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
