@@ -21,6 +21,16 @@ Branch `claude/shdn-when-stopped` (PR #132).
 - Container reverted to ka9q-radio 42273761 + hack_no_usb_reset (the
   6a5094ac bump segfaults — audit §10, report upstream later).
 - Docs (tests/README, docker README, PLAN-SHDN integration gate) updated.
+- **validate.sh** — end-to-end wrapper (Stage 1 fw_test, 2 soak, 3A
+  ka9q_smoke + fs/2-alias gate, 3B ka9q_test kill-and-return). 1/2/3A green.
+- **Container networking: bridge, not `--network host`** — radiod/powers/
+  ka9q-web all in-container so multicast stays on the container's `lo`
+  (deterministic; a multi-homed host with host networking landed radiod and
+  powers on different interfaces). ka9q-web published on `127.0.0.1:8081`.
+- **ka9q_test.sh** hardening: cross-cycle avahi-collision wait + restart
+  fallback; FFTW `estimate`; `KA9Q_SPEC_DEBUG` to surface powers stderr.
+- **fx3_cmd `resetup_cycle`** — host-style full re-setup restart, in-handle +
+  `RESETUP_REOPEN` fresh-handle, `RESETUP_STANDBY_MS` knob.
 
 ## Hardware-free ka9q + sig_gen rig (reproducible; no RX888 needed)
 
@@ -45,45 +55,36 @@ What it proved today: the `powers` TLV fix is real and deterministic; the
 original RX888 first/last-tile baseline shifts reproduce exactly when the fix
 is unwound; and it surfaced the retune ghost the dummy-load sweep never could.
 
-## Open — ka9q_test.sh (the soak harness) is NOT green yet
+## Conclusion: the restart issues are ka9q-side; firmware is exonerated
 
-Last bench run (`--duration 150 --reload-interval 60 --stream-secs 12`),
-after the readiness-wait fix (commit c4e2f1d), still showed TWO problems:
+Stages 1/2/3A are green. Stage 3B (ka9q_test kill-and-return soak) is red, but
+**both failure modes are ka9q-radio's, not the RX888 firmware** (audit §11):
 
-1. **Cycle 1: radiod fully up (`rx888 running`, `hf.local` registered) but
-   `powers` capture returns nothing** in the `ka9q-radio-soak` container.
-   **New lead from the local rig:** the *only* things that made `powers`
-   return empty locally were (a) radiod dead, or (b) **avahi dead / the
-   `.local` name not resolvable** — in which case `powers` blocks until
-   timeout with no data. radiod registering `hf.local` in its *log* is not
-   the same as the name being resolvable via getaddrinfo at capture time
-   (mDNS propagation lag, or avahi not up in the soak container). This is now
-   the prime suspect for cycle 1.
-2. **Cycles 2/3: radiod stalls in rx888 init on restart** — reaches "found
-   rx888 / Si5351 programmed" but never `rx888 running` within 30s. Plain
-   restarts (no reload). Restart-path problem. NOT explained.
+1. **cross-cycle "no spectrum"** — the persistent container's avahi carries
+   `hf.local` across radiod restarts → `Local name collision` → powers
+   resolves a stale entry. Mitigated in `stop_radiod` (wait for withdrawal +
+   avahi-restart fallback); the root is radiod's withdrawal lag.
+2. **restart stall** — radiod hangs in its own streaming-transfer setup
+   *after* claiming the device. **Firmware exonerated:** `fx3_cmd
+   resetup_cycle` reproduces a full host re-setup restart (in-handle AND
+   `RESETUP_REOPEN` fresh-handle) at 0/40/200 ms standby and **passes every
+   time** — vendor sequence, wake timing, and fresh open/claim/stream/release/
+   close per cycle all clean. So it's radiod's per-restart USB/URB handling.
 
-## Next step (do this FIRST, before any code change)
+#131's real claim (clean ADC-parked idle between sessions) is proven without
+ka9q-radio at all by `fw_test`/`soak` + the green `ka9q_smoke` gate.
 
-Run the capture command with **stderr visible** (the harness hides it with
-`2>/dev/null`) to see *why* cycle 1's `powers` returns empty — expect either
-a name-resolution error or a silent timeout:
+## Interim workaround still in place (revisit)
 
-```bash
-# in the soak/dbg container, while radiod is confirmed up:
-avahi-resolve -n hf.local                      # does the name resolve at all?
-docker exec ka9q-radio-soak sh -c 'timeout 10 powers -c 1 -i 2 -f 10000000 -b 256 -w 10000 -s 30303 hf.local'; echo "exit=$?"
-```
+`validate.sh` Stage 3A pre-loads firmware (`fx3_cmd reload`) before radiod
+because radiod's self-upload is flaky (the ka9q `sleep(1)`-after-upload
+re-enumeration race, audit §1). Not acceptable long-term; marked INTERIM
+in-code. The firmware re-enumerates fine; it's ka9q's fixed wait.
 
-- If `hf.local` doesn't resolve / `powers` errors on it → it's the mDNS path
-  (suspect #1): fix by waiting on `avahi-resolve` success (not just the log
-  line) before capture, or by giving radiod a literal multicast group.
-- If it resolves and `powers` still times out empty → multicast/data-plane,
-  dig further.
+## Next — into ka9q-radio itself
 
-Then probe #2 by stop/restarting radiod in the same container and watching
-whether the 2nd start ever reaches `rx888 running` (and whether a forced
-reload between restarts clears it).
-
-Reminder: get the stderr/resolve result first — don't theorize the fix from
-the symptom.
+All firmware-side restart angles are eliminated, so debug ka9q-radio directly:
+why `radiod` hangs in streaming-transfer setup on the 2nd/3rd restart in one
+container, and the avahi withdrawal lag. Carry the `resetup_cycle` evidence
+(firmware streams across the full restart surface) when raising it upstream.
+Tools: the hardware-free `sig_gen` rig (above) and `fx3_cmd resetup_cycle`.

@@ -282,6 +282,35 @@ it (or a later SHA) is verified crash-free, the container stays on
 `42273761`, and the reset workaround remains required (see §1 and the
 `rx888-test.conf` comment).
 
+### 11. radiod restart stall *(ka9q-side; firmware exonerated)*
+
+Under the `ka9q_test.sh` multi-cycle soak, `radiod` intermittently stalls when
+restarted in the same container: it finds the device at `00f1`, programs the
+Si5351, sets gain, sends `TUNERSTDBY` (0xB8) — then hangs *before* `rx888
+running`, never starting the stream. (Distinct from the cycle-1 "no spectrum",
+which is the avahi/mDNS and `powers` dynamic-channel timing on restart.)
+
+**The firmware is not the cause.** `tests/fx3_cmd resetup_cycle` reproduces a
+host's full re-setup restart with no SDR app in the loop — per cycle: park ADC
+in SHDN standby (`STOPFX3`, #131), dwell, then re-init clock + GPIO + atten/VGA
++ `TUNERSTDBY` + `STARTFX3` (firmware wakes the ADC, settles, starts the GPIF)
++ a primed bulk read. It **passes every time** across:
+
+- the vendor-command sequence + 5 ms inter-command timing,
+- ADC wake-on-restart timing — `RESETUP_STANDBY_MS` = 0 / 40 / 200 ms (rules
+  out `ADC_WAKEUP_SETTLE_MS` being too short after a long standby),
+- `RESETUP_REOPEN=1` — a brand-new libusb handle each cycle
+  (open → claim → stream → stop → release → close), mimicking radiod restarting
+  as a fresh process.
+
+So the firmware streams reliably across the full restart surface; the stall is
+in `radiod`'s own per-restart USB/URB handling (it hangs *after* claiming the
+device, in its streaming-transfer setup). Out of scope for the firmware; raise
+upstream with the `resetup_cycle` evidence. Note also that #131's actual claim
+— device returns to a usable, ADC-parked idle between sessions — is covered
+without ka9q-radio at all by `fw_test`/`soak` (fx3_cmd-side) and the green
+`ka9q_smoke` real-output gate.
+
 ## Container-side requirements (no patches needed)
 
 A bind-mount of `/run/udev:/run/udev:ro` is **required** at
