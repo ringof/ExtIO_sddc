@@ -362,8 +362,19 @@ while :; do
             docker exec "$CONTAINER" sh -c 'command -v gdb >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y gdb >/dev/null 2>&1; }'
             rpid=$(docker exec "$CONTAINER" pgrep -x radiod 2>/dev/null | head -1)
             if [[ -n "$rpid" ]]; then
-                echo "# === radiod STALLED (cycle $cycle, pid $rpid) — backtrace ===" >&2
-                docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread apply all bt' 2>&1 | sed 's/^/#   /' >&2
+                snaps="${KA9Q_GDB_SNAPS:-4}"
+                echo "# === radiod STALLED (cycle $cycle, pid $rpid) — $snaps snapshots ~2s apart ===" >&2
+                for n in $(seq 1 "$snaps"); do
+                    echo "# --- snapshot $n/$snaps ---" >&2
+                    if [[ "$n" == "1" ]]; then
+                        # first snapshot: all threads for context
+                        docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread apply all bt' 2>&1 | sed 's/^/#   /' >&2
+                    else
+                        # later snapshots: main thread only, to see if it moves
+                        docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread 1' -ex 'bt' 2>&1 | sed 's/^/#   /' >&2
+                    fi
+                    sleep 2
+                done
             else
                 echo "# radiod not running at stall (exited, not hung); log tail:" >&2
                 radiod_log | tail -20 | sed 's/^/#   /' >&2
