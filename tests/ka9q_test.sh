@@ -222,6 +222,20 @@ stop_radiod() {
     fi
     # Reap the background docker-exec job.
     wait "${RADIOD_EXEC_PID:-}" 2>/dev/null || true
+    # Wait for this radiod's mDNS name to be WITHDRAWN before the next cycle
+    # starts in the same (persistent) container. Otherwise the next radiod
+    # registers while the stale name lingers -> "Local name collision", and
+    # powers resolves $SPEC_GROUP to the stale/renamed entry -> no spectrum.
+    local w=0
+    while (( w < 10 )); do
+        docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1 || break
+        sleep 0.5; w=$((w+1))
+    done
+    if docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
+        note "warning: $SPEC_GROUP still resolves after stop — restarting avahi to clear stale registration"
+        docker exec "$CONTAINER" sh -c 'pkill -x avahi-daemon; sleep 1; avahi-daemon --daemonize --no-drop-root' >/dev/null 2>&1 || true
+        sleep 1
+    fi
 }
 
 wait_dev_free() {
