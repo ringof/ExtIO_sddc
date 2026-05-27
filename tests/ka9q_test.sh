@@ -357,6 +357,18 @@ while :; do
     # --- Start radiod and wait until it is actually serving ---
     start_radiod
     if ! wait_radiod_ready; then
+        if [[ -n "${KA9Q_GDB_ON_STALL:-}" ]]; then
+            # Capture WHERE the stalled radiod is stuck, before we kill it.
+            docker exec "$CONTAINER" sh -c 'command -v gdb >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y gdb >/dev/null 2>&1; }'
+            rpid=$(docker exec "$CONTAINER" pgrep -x radiod 2>/dev/null | head -1)
+            if [[ -n "$rpid" ]]; then
+                echo "# === radiod STALLED (cycle $cycle, pid $rpid) — backtrace ===" >&2
+                docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread apply all bt' 2>&1 | sed 's/^/#   /' >&2
+            else
+                echo "# radiod not running at stall (exited, not hung); log tail:" >&2
+                radiod_log | tail -20 | sed 's/^/#   /' >&2
+            fi
+        fi
         tap_fail "cycle $cycle: radiod not streaming/ready within ${READY_TIMEOUT}s" "$(radiod_log | tail -25)"
         stop_radiod; wait_dev_free || true
         continue
