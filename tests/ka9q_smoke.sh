@@ -66,9 +66,11 @@ if ! docker exec "$CONTAINER" true 2>/dev/null; then
 fi
 
 OUT=${OUT:-$(mktemp /tmp/ka9q_smoke.XXXXXX.csv)}
-echo "ka9q smoke: sweeping $(awk "BEGIN{printf \"%.3f-%.3f\",$LO/1e6,$HI/1e6}") MHz via powers ..." >&2
+echo "ka9q smoke: sweeping $(awk "BEGIN{printf \"%.3f-%.3f\",$LO/1e6,$HI/1e6}") MHz via powers (per-tile progress below)..." >&2
+# Keep the sweep's stderr (its per-tile "# tile N ..." progress) visible; only
+# the CSV (stdout, via -o) is silenced. The sweep is the slow part (~minutes).
 "$SWEEP" -a "$LO" -z "$HI" -i "$INT" -c "$CONTAINER" -g "$GROUP" -s "$SSRC" \
-         -o "$OUT" -p >/dev/null 2>&1 || true
+         -o "$OUT" -p >/dev/null || true
 
 # Reduce the spectrum to mean / stdev / min / max.
 read -r N MEAN SD MN MX <<EOF
@@ -87,23 +89,27 @@ echo "ka9q smoke: bins=$N mean=${MEAN}dB spread=${SPREAD}dB (min=${MN} max=${MX}
 
 fail() { echo "FAIL: $1"; exit 1; }
 
+echo "ka9q smoke: [1/4] streaming — spectrum returned ($N bins)"
 [ "$N" -gt 0 ] 2>/dev/null || fail "no spectrum returned — is radiod streaming, and is 'powers' in the image?"
+echo "ka9q smoke: [2/4] floor mean ${MEAN}dB within sane window [${MEAN_LO},${MEAN_HI}]"
 awk -v m="$MEAN" -v lo="$MEAN_LO" -v hi="$MEAN_HI" 'BEGIN{exit !(m>=lo && m<=hi)}' \
     || fail "floor mean ${MEAN}dB outside sane window [${MEAN_LO},${MEAN_HI}] — no real samples?"
+echo "ka9q smoke: [3/4] variance — spread ${SPREAD}dB >= ${MIN_SPREAD}dB (not a flat line)"
 awk -v s="$SPREAD" -v t="$MIN_SPREAD" 'BEGIN{exit !(s>=t)}' \
     || fail "spectrum is a flat line (spread ${SPREAD}dB < ${MIN_SPREAD}dB) — ADC frozen / not sampling?"
 
 # fs/2 Nyquist-alias gate (only if the alias freq is inside the swept band and enabled).
+echo "ka9q smoke: [4/4] fs/2 Nyquist alias near $(awk "BEGIN{printf \"%.3f\",$ALIAS_FREQ/1e6}") MHz"
 if awk -v f="$ALIAS_FREQ" -v lo="$LO" -v hi="$HI" -v t="$ALIAS_MIN_DB" 'BEGIN{exit !(t>0 && f>=lo && f<=hi)}'; then
     ALIAS_MAX=$(awk -F, -v lo="$((ALIAS_FREQ-ALIAS_WINDOW))" -v hi="$((ALIAS_FREQ+ALIAS_WINDOW))" \
         '!/^#/&&NF==2 && $1>=lo && $1<=hi { if(n++==0||$2>mx)mx=$2 } END{ if(n>0)printf "%.2f",mx; else print "NA" }' "$OUT")
     [ "$ALIAS_MAX" = "NA" ] && fail "no bins within +/-${ALIAS_WINDOW}Hz of fs/2 (${ALIAS_FREQ}Hz) — can't check the Nyquist alias"
     ALIAS_MARGIN=$(awk -v a="$ALIAS_MAX" -v m="$MEAN" 'BEGIN{printf "%.1f", a-m}')
-    echo "ka9q smoke: fs/2 alias peak ${ALIAS_MAX}dB, margin ${ALIAS_MARGIN}dB over floor mean (need >= ${ALIAS_MIN_DB})"
+    echo "ka9q smoke:       alias peak ${ALIAS_MAX}dB, margin ${ALIAS_MARGIN}dB over floor mean (need >= ${ALIAS_MIN_DB})"
     awk -v a="$ALIAS_MAX" -v m="$MEAN" -v t="$ALIAS_MIN_DB" 'BEGIN{exit !((a-m)>=t)}' \
         || fail "fs/2 Nyquist alias absent/weak (margin ${ALIAS_MARGIN}dB < ${ALIAS_MIN_DB}dB) — not a live RX888 ADC sampling at fs?"
 else
-    echo "ka9q smoke: fs/2 alias gate skipped (fs/2 not in swept band, or disabled)" >&2
+    echo "ka9q smoke:       skipped (fs/2 not in swept band, or disabled)"
 fi
 
 echo "PASS: firmware is streaming a live spectrum (radiod -> rx888.so -> FX3 -> ADC)."
