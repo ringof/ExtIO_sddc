@@ -141,14 +141,20 @@ radiod_log()       { docker exec "$CONTAINER" cat "$LOG_IN" 2>/dev/null; }
 # MAX/MIN in dB, *100 as integers to stay shell-friendly), or nothing on
 # failure.  powers prints one CSV line: ts,fstart,fstop,binw,bincount,p0,p1...
 capture_spectrum() {
-    local csv tries=0
+    local csv tries=0 perr=/dev/null
+    # KA9Q_SPEC_DEBUG=1 surfaces powers' stderr + raw output so a "no spectrum"
+    # can be diagnosed (resolve error / invalid responses / timeout).
+    [[ -n "${KA9Q_SPEC_DEBUG:-}" ]] && perr=/dev/stderr
     # Retry a few times: even after the status group is registered, the first
     # mDNS resolve / spectrum-channel creation can lag a beat.
     while (( tries < 3 )); do
+        if [[ -n "${KA9Q_SPEC_DEBUG:-}" ]]; then
+            note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP"
+        fi
         csv="$(docker exec "$CONTAINER" sh -c \
             "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
              -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP \
-             2>/dev/null" 2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
+             2>$perr" 2>"$perr" | grep -E '^[0-9].*,.*,' | tail -1)"
         [[ -n "$csv" ]] && break
         tries=$((tries+1)); sleep 1
     done
