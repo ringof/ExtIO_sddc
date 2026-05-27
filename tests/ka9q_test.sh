@@ -149,7 +149,7 @@ capture_spectrum() {
     # mDNS resolve / spectrum-channel creation can lag a beat.
     while (( tries < 3 )); do
         if [[ -n "${KA9Q_SPEC_DEBUG:-}" ]]; then
-            note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP"
+            note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP" >&2
         fi
         csv="$(docker exec "$CONTAINER" sh -c \
             "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
