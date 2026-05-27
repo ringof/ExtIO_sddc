@@ -54,7 +54,8 @@ KEEP_CONTAINER=0
 
 # Timing knobs (seconds)
 SETTLE=3            # let radiod claim + init before the first liveness check
-READY_TIMEOUT="${READY_TIMEOUT:-30}"  # max wait for radiod to stream + register mDNS
+READY_TIMEOUT="${READY_TIMEOUT:-60}"  # max wait for radiod to stream + register mDNS
+                                       # (restart bring-up in rx888_setup can run ~30s; 30s was too tight)
 STOP_TIMEOUT=20     # wait for radiod to exit after SIGINT
 FREE_TIMEOUT=10     # wait for the device to become host-claimable after stop
 
@@ -237,10 +238,25 @@ stop_radiod() {
         docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1 || break
         sleep 0.5; w=$((w+1))
     done
+    # Unconditionally bounce avahi between cycles. The graceful-withdrawal wait
+    # above is racy: in the persistent container the previous radiod's stale
+    # registration repeatedly survived into the next start -> "Local name
+    # collision" / "Failed to add service", and powers then resolved a stale
+    # $SPEC_GROUP -> no spectrum. A clean restart flushes ALL registrations;
+    # we then wait until the daemon is responsive again AND $SPEC_GROUP is
+    # gone before returning, so the next radiod registers into a clean slate.
+    docker exec "$CONTAINER" sh -c 'pkill -x avahi-daemon 2>/dev/null; sleep 1; avahi-daemon --daemonize --no-drop-root' >/dev/null 2>&1 || true
+    local a=0
+    while (( a < 20 )); do
+        # Daemon up (any query returns) and the stale name no longer resolves.
+        if docker exec "$CONTAINER" avahi-daemon --check >/dev/null 2>&1 \
+           && ! docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5; a=$((a+1))
+    done
     if docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
-        note "warning: $SPEC_GROUP still resolves after stop — restarting avahi to clear stale registration"
-        docker exec "$CONTAINER" sh -c 'pkill -x avahi-daemon; sleep 1; avahi-daemon --daemonize --no-drop-root' >/dev/null 2>&1 || true
-        sleep 1
+        note "warning: $SPEC_GROUP still resolves after avahi restart — stale registration persists"
     fi
 }
 
