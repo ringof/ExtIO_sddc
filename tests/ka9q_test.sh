@@ -87,6 +87,15 @@ SPEC_INTERVAL="${SPEC_INTERVAL:-2}"       # powers integration time (s)
 SPEC_SSRC="${SPEC_SSRC:-30303}"           # arbitrary SSRC for the temp channel
 SPEC_DYN_RANGE_DB="${SPEC_DYN_RANGE_DB:-60}"
 SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
+# Multicast interface to pin powers' join to. In a bridge-networked container
+# radiod sends status on lo ("Multicast enabled on loopback interface lo")
+# while powers without an iface joins on the default route's interface
+# (eth0) -> command never reaches radiod, powers spends 5-7s in
+# "Invalid response, length 0" retries, often exhausting timeout -> no
+# spectrum. ka9q resolve_mcast takes a "name,iface" suffix; default to lo,
+# set SPEC_IFACE= (empty) to skip on hosts where the iface isn't ambiguous.
+SPEC_IFACE="${SPEC_IFACE:-lo}"
+SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
 
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
 # process-liveness and a clean idle device after stop.  radiod emits several
@@ -150,11 +159,11 @@ capture_spectrum() {
     # mDNS resolve / spectrum-channel creation can lag a beat.
     while (( tries < 3 )); do
         if [[ -n "${KA9Q_SPEC_DEBUG:-}" ]]; then
-            note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP" >&2
+            note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL" >&2
         fi
         csv="$(docker exec "$CONTAINER" sh -c \
             "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
-             -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP \
+             -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL \
              2>$perr" 2>"$perr" | grep -E '^[0-9].*,.*,' | tail -1)"
         [[ -n "$csv" ]] && break
         tries=$((tries+1)); sleep 1
