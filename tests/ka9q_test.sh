@@ -271,34 +271,24 @@ stop_radiod() {
     fi
     # Reap the background docker-exec job.
     wait "${RADIOD_EXEC_PID:-}" 2>/dev/null || true
-    # Wait for this radiod's mDNS name to be WITHDRAWN before the next cycle
-    # starts in the same (persistent) container. Otherwise the next radiod
-    # registers while the stale name lingers -> "Local name collision", and
-    # powers resolves $SPEC_GROUP to the stale/renamed entry -> no spectrum.
+    # Wait briefly for radiod's mDNS name to be WITHDRAWN before the next
+    # cycle. A clean SIGINT triggers radiod's D-Bus disconnect, which makes
+    # avahi auto-tear-down that client's entry groups — including
+    # $SPEC_GROUP — so this normally clears quickly on its own. No daemon
+    # bounce: an earlier "harden the avahi reset" unconditionally killed
+    # and respawned avahi-daemon here, which produced zombie daemonize
+    # parents (PID 1 = `sleep infinity` doesn't reap) and a respawned
+    # daemon that was alive-but-wedged on D-Bus — so the next cycle's
+    # avahi-resolve / getaddrinfo both timed out, manifesting as "powers
+    # returned no spectrum" despite radiod READY. If the name still
+    # resolves, log it and continue rather than tear the daemon down.
     local w=0
     while (( w < 10 )); do
         docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1 || break
         sleep 0.5; w=$((w+1))
     done
-    # Unconditionally bounce avahi between cycles. The graceful-withdrawal wait
-    # above is racy: in the persistent container the previous radiod's stale
-    # registration repeatedly survived into the next start -> "Local name
-    # collision" / "Failed to add service", and powers then resolved a stale
-    # $SPEC_GROUP -> no spectrum. A clean restart flushes ALL registrations;
-    # we then wait until the daemon is responsive again AND $SPEC_GROUP is
-    # gone before returning, so the next radiod registers into a clean slate.
-    docker exec "$CONTAINER" sh -c 'pkill -x avahi-daemon 2>/dev/null; sleep 1; avahi-daemon --daemonize --no-drop-root' >/dev/null 2>&1 || true
-    local a=0
-    while (( a < 20 )); do
-        # Daemon up (any query returns) and the stale name no longer resolves.
-        if docker exec "$CONTAINER" avahi-daemon --check >/dev/null 2>&1 \
-           && ! docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
-            break
-        fi
-        sleep 0.5; a=$((a+1))
-    done
     if docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
-        note "warning: $SPEC_GROUP still resolves after avahi restart — stale registration persists"
+        note "warning: $SPEC_GROUP still resolves after stop — stale registration persists (not bouncing avahi)"
     fi
 }
 
