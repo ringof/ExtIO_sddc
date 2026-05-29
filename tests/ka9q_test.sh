@@ -53,9 +53,7 @@ CONTAINER="${CONTAINER:-ka9q-radio-soak}"
 KEEP_CONTAINER=0
 
 # Timing knobs (seconds)
-SETTLE=3            # let radiod claim + init before the first liveness check
 READY_TIMEOUT="${READY_TIMEOUT:-60}"  # max wait for radiod to stream + register mDNS
-                                       # (restart bring-up in rx888_setup can run ~30s; 30s was too tight)
 STOP_TIMEOUT=20     # wait for radiod to exit after SIGINT
 FREE_TIMEOUT=10     # wait for the device to become host-claimable after stop
 
@@ -87,20 +85,11 @@ SPEC_INTERVAL="${SPEC_INTERVAL:-2}"       # powers integration time (s)
 SPEC_SSRC="${SPEC_SSRC:-30303}"           # arbitrary SSRC for the temp channel
 SPEC_DYN_RANGE_DB="${SPEC_DYN_RANGE_DB:-60}"
 SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
-# Multicast interface to pin powers' join to. In a bridge-networked container
-# radiod sends status on lo ("Multicast enabled on loopback interface lo")
-# while powers without an iface joins on the default route's interface
-# (eth0) -> command never reaches radiod, powers spends 5-7s in
-# "Invalid response, length 0" retries, often exhausting timeout -> no
-# spectrum. ka9q resolve_mcast takes a "name,iface" suffix; default to lo,
-# set SPEC_IFACE= (empty) to skip on hosts where the iface isn't ambiguous.
+# Pin powers' multicast join to the same interface radiod uses. See
+# docs/docker.md sec 2 — bridge networking + ka9q's `name,iface` suffix.
 SPEC_IFACE="${SPEC_IFACE:-lo}"
 SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
-# powers' first command/response handshake against a freshly-published
-# status group can occasionally spend a few seconds in "Invalid response,
-# length 0" retries before producing a CSV. SPEC_TIMEOUT_PAD adds headroom
-# over SPEC_INTERVAL (the actual integration time) so the timeout never
-# races a slow first handshake.
+# Headroom over SPEC_INTERVAL for powers' first handshake to settle.
 SPEC_TIMEOUT_PAD="${SPEC_TIMEOUT_PAD:-15}"
 
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
@@ -175,14 +164,9 @@ capture_spectrum() {
         tries=$((tries+1)); sleep 1
     done
     [[ -z "$csv" ]] && return 1
-    # -F', *' (not -F,): powers writes its CSV with a space after each comma
-    # (e.g. "..., 8720000, 11270000, -113.63, ..."). With plain -F, the
-    # leading space was part of every numeric field, the validity regex
-    # below rejected them all, n stayed 0, awk exit 1, and the harness
-    # reported "no spectrum despite radiod READY" — even though the CSV
-    # was 2000+ chars of perfectly good spectrum data. Splitting on ", *"
-    # eats the space cleanly and is backward-compatible with CSV without
-    # spaces.
+    # -F', *' (not -F,): powers writes CSV with a space after each comma;
+    # plain -F, leaves a leading space on every numeric field that the
+    # validity regex rejects. See docs/docker.md sec 1.
     echo "$csv" | awk -F', *' -v dyn="$SPEC_DYN_RANGE_DB" '
         NF >= 6 {
             n = 0; max = -1e18; min = 1e18;
@@ -294,17 +278,10 @@ stop_radiod() {
     fi
     # Reap the background docker-exec job.
     wait "${RADIOD_EXEC_PID:-}" 2>/dev/null || true
-    # Wait briefly for radiod's mDNS name to be WITHDRAWN before the next
-    # cycle. A clean SIGINT triggers radiod's D-Bus disconnect, which makes
-    # avahi auto-tear-down that client's entry groups — including
-    # $SPEC_GROUP — so this normally clears quickly on its own. No daemon
-    # bounce: an earlier "harden the avahi reset" unconditionally killed
-    # and respawned avahi-daemon here, which produced zombie daemonize
-    # parents (PID 1 = `sleep infinity` doesn't reap) and a respawned
-    # daemon that was alive-but-wedged on D-Bus — so the next cycle's
-    # avahi-resolve / getaddrinfo both timed out, manifesting as "powers
-    # returned no spectrum" despite radiod READY. If the name still
-    # resolves, log it and continue rather than tear the daemon down.
+    # Wait briefly for radiod's mDNS name to be WITHDRAWN; clean SIGINT
+    # makes avahi tear it down via D-Bus disconnect. Do NOT bounce the
+    # daemon here — that produced zombie daemonize parents and a wedged
+    # daemon. See docs/docker.md sec 3.
     local w=0
     while (( w < 10 )); do
         docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1 || break
@@ -339,9 +316,7 @@ cleanup() {
         docker stop "$CONTAINER" >/dev/null 2>&1 || true
     fi
 }
-# On INT/TERM, exit so the loop stops; the EXIT trap runs cleanup exactly
-# once. (Trapping cleanup directly on INT let the main loop continue after
-# the container was already stopped, spamming "No such container".)
+# EXIT trap runs cleanup exactly once; INT/TERM just exit so the loop stops.
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
@@ -406,14 +381,9 @@ if [[ "$DATA_PLANE" == "1" ]]; then
     fi
 fi
 
-# NOTE: no host-side force_reload here. ka9q's radiod uploads firmware to
-# the FX3 itself when it sees PID 0x00F3; after upload the device
-# re-enumerates to 0x00F1 and the first radiod attempt fails with
-# "Error or device could not be found" (its libusb handle is to the
-# now-gone F3 device). The cycle loop below retries once on that exact
-# condition, which is the documented ka9q workflow. Doing a host-side
-# reload first was the previous "interim" workaround and produced
-# spurious failures in the cycle that followed.
+# No host-side baseline force_reload: radiod uploads firmware itself when
+# it sees PID 0x00F3, and the cycle loop handles the F3->F1 re-enumerate
+# retry inline (ka9q's documented one-shot).
 
 # ---- Main cycle loop ----
 start_ts=$(date +%s)
@@ -428,26 +398,20 @@ while :; do
     # --- Start radiod and wait until it is actually serving ---
     start_radiod
     if ! wait_radiod_ready; then
-        # F3->F1 retry: radiod's first attempt against a device at PID 0x00F3
-        # uploads firmware, then fails with "Error or device could not be
-        # found" because its libusb handle was to the now-gone F3 device.
-        # The device is now at 0x00F1; a second radiod immediately succeeds.
-        # This is the documented ka9q workflow (a supervisor restart). Do it
-        # inline once before reporting a real failure.
+        # F3->F1 firmware-upload retry: radiod's first attempt against a
+        # bootloader-PID device uploads firmware then loses its handle to the
+        # now-re-enumerated F1 device. Retrying once finds the new handle.
         if [[ "$READY_REASON" == EXITED ]] \
            && radiod_log | grep -q 'Error or device could not be found'; then
-            note "cycle $cycle: F3->F1 firmware-upload retry (radiod's documented one-shot)"
+            note "cycle $cycle: F3->F1 firmware-upload retry"
             wait "${RADIOD_EXEC_PID:-}" 2>/dev/null || true
             start_radiod
             wait_radiod_ready || true   # READY_REASON reflects retry outcome
         fi
     fi
-    # If still not ready after the optional F3->F1 retry, report and continue.
     if [[ "$READY_REASON" != READY ]]; then
-        # Only backtrace when actually wedged in setup (SETUP); EXITED/NO_MDNS
-        # aren't hangs, so a gdb capture there is noise.
+        # gdb only on SETUP (genuine hang); EXITED/NO_MDNS aren't hangs.
         if [[ -n "${KA9Q_GDB_ON_STALL:-}" && "$READY_REASON" == SETUP ]]; then
-            # Capture WHERE the stalled radiod is stuck, before we kill it.
             docker exec "$CONTAINER" sh -c 'command -v gdb >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y gdb >/dev/null 2>&1; }'
             rpid=$(docker exec "$CONTAINER" pgrep -x radiod 2>/dev/null | head -1)
             if [[ -n "$rpid" ]]; then
@@ -456,10 +420,8 @@ while :; do
                 for n in $(seq 1 "$snaps"); do
                     echo "# --- snapshot $n/$snaps ---" >&2
                     if [[ "$n" == "1" ]]; then
-                        # first snapshot: all threads for context
                         docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread apply all bt' 2>&1 | sed 's/^/#   /' >&2
                     else
-                        # later snapshots: main thread only, to see if it moves
                         docker exec "$CONTAINER" gdb -p "$rpid" -batch -ex 'thread 1' -ex 'bt' 2>&1 | sed 's/^/#   /' >&2
                     fi
                     sleep 2
@@ -490,9 +452,7 @@ while :; do
     spec_msg=""
     if [[ "$DATA_PLANE" == "1" ]]; then
         if [[ -z "$spec" ]]; then
-            # radiod was confirmed READY (running + 'rx888 running' + group
-            # resolves) before we got here, so this is a data-plane/resolve
-            # problem, NOT radiod being down.
+            # radiod was READY before this, so the failure is data-plane/resolve.
             tap_fail "cycle $cycle: powers returned no spectrum despite radiod READY (data-plane/resolve issue, not radiod-down)" \
                      "$(echo "${SPEC_GROUP} resolves to: $(docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" 2>&1)"; radiod_log | tail -15)"
             stop_radiod; wait_dev_free || true
@@ -510,8 +470,7 @@ while :; do
         spec_msg="; spec=${s_live}/${s_n}bins max=$((s_max/100))dB"
     fi
     # --- Advisory log scan: flag suspicious lines, minus known-benign ones.
-    # radiod survived warmup (checked above) so it is not a hard failure;
-    # only fail the cycle when KA9Q_STRICT_LOG=1. ---
+    # Only fails the cycle when KA9Q_STRICT_LOG=1.
     log="$(radiod_log)"
     residual="$(echo "$log" | grep -iE "$FATAL_PATTERN" | grep -ivE "$BENIGN_PATTERN")"
     if [[ -n "$residual" ]]; then
