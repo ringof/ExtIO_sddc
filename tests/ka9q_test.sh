@@ -97,16 +97,11 @@ SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
 SPEC_IFACE="${SPEC_IFACE:-lo}"
 SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
 # powers' first command/response handshake against a freshly-published
-# status group can spend 5-7s in "Invalid response, length 0" retries
-# before producing a CSV. Give the timeout enough headroom to ride that
-# out; SPEC_INTERVAL alone is the integration time, not the total budget.
+# status group can occasionally spend a few seconds in "Invalid response,
+# length 0" retries before producing a CSV. SPEC_TIMEOUT_PAD adds headroom
+# over SPEC_INTERVAL (the actual integration time) so the timeout never
+# races a slow first handshake.
 SPEC_TIMEOUT_PAD="${SPEC_TIMEOUT_PAD:-15}"
-# Settle pause between wait_radiod_ready returning READY and the first
-# powers invocation. `Established under name 'hf.local'` hitting the log
-# does not mean radiod's spectrum-channel responder is ready to answer a
-# command/response handshake — there's a brief window where powers'
-# first attempt gets "Invalid response, length 0". A 2-3s pause closes it.
-SPEC_SETTLE="${SPEC_SETTLE:-3}"
 
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
 # process-liveness and a clean idle device after stop.  radiod emits several
@@ -172,12 +167,6 @@ capture_spectrum() {
         if [[ -n "${KA9Q_SPEC_DEBUG:-}" ]]; then
             note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL" >&2
         fi
-        # No sh -c wrap: docker exec runs `timeout powers ...` directly. The
-        # earlier `docker exec sh -c "..."` form left powers in a session
-        # state where its multicast handshake failed with persistent
-        # "Invalid response, length 0" — same as the radiod launch issue
-        # (see docs/docker.md sec 1). The 2>"$perr" redirect is host-side,
-        # forwarding docker exec's stderr.
         csv="$(docker exec "$CONTAINER" \
             timeout "$((SPEC_INTERVAL + SPEC_TIMEOUT_PAD))" powers -c 1 -i "$SPEC_INTERVAL" \
             -f "$SPEC_FREQ" -b "$SPEC_BINS" -w "$SPEC_BINWIDTH" -s "$SPEC_SSRC" "$SPEC_GROUP_FULL" \
@@ -219,17 +208,11 @@ stats_field() {
 }
 
 start_radiod() {
-    # `docker exec -t bash -c "..."` rather than `sh -c "..."`: a non-TTY
-    # docker exec wrapped in dash (the default sh) leaves spawned processes
-    # in a session state that breaks ka9q's multicast handshake for powers
-    # — exact same `powers ... hf.local,lo` args produce a CSV from a TTY
-    # bash session and `Invalid response, length 0` from a non-TTY sh -c
-    # session. See docs/docker.md §1.
-    docker exec -t "$CONTAINER" bash -c "rm -f $LOG_IN; radiod $RADIOD_CONF > $LOG_IN 2>&1" &
-    # The above blocks for the radiod lifetime in a background shell job;
-    # we control radiod via pkill, then reap the job.  Detached exec
-    # (-d) is avoided so a failed `docker exec` surfaces; radiod's own
-    # output is redirected to the in-container logfile regardless.
+    # Backgrounded `docker exec`: blocks for radiod's lifetime in a host
+    # shell job; we control radiod via pkill inside the container, then
+    # reap the job. Detached exec (-d) is avoided so a failed exec
+    # surfaces; radiod's own output goes to the in-container logfile.
+    docker exec "$CONTAINER" sh -c "rm -f $LOG_IN; radiod $RADIOD_CONF > $LOG_IN 2>&1" &
     RADIOD_EXEC_PID=$!
 }
 
@@ -491,11 +474,6 @@ while :; do
         continue
     fi
     # --- Stream window (with spectrum capture if enabled) ---
-    # Brief settle: radiod logs Established hf.local the moment avahi
-    # commits the registration, but its spectrum-channel responder may
-    # need a beat before answering powers' first command. Without this
-    # pause, powers reliably gets "Invalid response, length 0" on try 1.
-    (( SPEC_SETTLE > 0 )) && sleep "$SPEC_SETTLE"
     spec=""
     if [[ "$DATA_PLANE" == "1" ]]; then
         spec="$(capture_spectrum)"            # blocks ~SPEC_INTERVAL
