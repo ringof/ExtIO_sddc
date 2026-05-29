@@ -30,15 +30,19 @@ Concrete things that bit us:
   and the next start fails. To signal a process inside the container,
   use `docker exec CONTAINER pkill -INT -x procname` — that's a real
   in-container SIGINT.
-- **`docker exec sh -c "tool ..."` differs materially from the same
-  `tool ...` typed in `docker exec -it bash`**, even with identical
-  args. The harness firing `powers ... hf.local,lo` via `sh -c` got
-  `Invalid response, length 0` indefinitely, while the exact same
-  command typed in an interactive shell returned an instant CSV. The
-  mechanism wasn't fully isolated (TTY-vs-pipe stdio buffering and
-  process-group/session differences are both candidates), but the
-  divergence is real and reproducible. **Treat the harness's invocation
-  path as a variable under test, not as a trusted measurement device.**
+- **Don't blame the invocation form for downstream parsing bugs.** A
+  long detour during the SHDN soak attributed harness-vs-interactive
+  divergence (`Invalid response, length 0` in the harness, instant CSV
+  by hand) to TTY / process-group / session differences between
+  `docker exec sh -c "..."` and `docker exec -it bash`. The actual root
+  cause was an `awk -F,` field-separator bug in `capture_spectrum`: the
+  CSV was *being captured* by the harness identically in both forms;
+  the parser was throwing it away because powers writes `", "` between
+  fields and the validity regex didn't allow the leading space. The
+  misleading TAP message `powers returned no spectrum despite radiod
+  READY` then sent us hunting through invocation layers when the real
+  bug was 5 lines downstream. Before suspecting the invocation form,
+  print the captured value and exercise the parser by hand.
 - **Stdout buffering changes when stdout is not a TTY.** libc switches
   block-buffered (4 KB) for piped/redirected stdout. A tool that prints
   one short line then exits may produce no observable output before a
@@ -71,11 +75,8 @@ What this means:
 - ka9q's `resolve_mcast` (`src/multicast.c`) parses a `,iface` suffix on
   group names: `hf.local,lo` pins the consumer's join to `lo`. In an
   interactive shell that flips powers from 5–7s of `Invalid response,
-  length 0` retries to **instant**.
-- **But the iface pin alone was NOT sufficient via the harness's
-  `docker exec sh -c "..."` invocation.** Pinning is necessary, possibly
-  not sufficient. The invocation form interacts with multicast somehow
-  (unresolved as of this writing).
+  length 0` retries to **instant** CSV. The harness sets `SPEC_IFACE=lo`
+  by default and appends `,lo` to the group name passed to `powers`.
 
 If you're adding a new consumer of a status group inside this container,
 think about the iface explicitly — don't assume routing will pick `lo`.
@@ -225,21 +226,27 @@ matches what the *consumer* needs, not what's easy to grep.
 ## 9. The harness is under test, not above it
 
 A pattern that ate hours: when manual cycling in `docker exec -it bash`
-works and the harness fails, **the harness is the variable**. Specific
-manifestations:
+works and the harness fails, **the harness is the variable** — but
+investigate the *whole* harness path (invocation, capture, parsing,
+classification), not just the parts that look like environment quirks.
+The headline lesson from the SHDN soak:
 
-- The harness's `docker exec sh -c "radiod > log 2>&1" &` launch form
-  alters stdio buffering of `radiod`'s output.
-- The harness's per-second `docker exec` poll for readiness — fine
-  on its own, but its specific timing interacts with avahi/radiod
-  bring-up in ways that bare manual cycling doesn't.
-- The harness's `docker exec sh -c "powers ... 2>/dev/null"` capture
-  fails where the same `powers` typed at an interactive shell prompt
-  succeeds, even with identical args (Section 1).
+- The harness fired `powers` correctly, the CSV came back correctly,
+  and an `awk -F,` field-separator bug in `capture_spectrum` threw it
+  away because powers writes `", "` between fields. The TAP message
+  `powers returned no spectrum despite radiod READY` then sent the
+  investigation chasing avahi, multicast interfaces, `docker exec`
+  forms, TTYs, process groups, and settle pauses — all wrong layers.
+- The right move on the *first* `no spectrum` failure would have been
+  to capture the raw `$csv` value and run the parser against it. That
+  one probe would have located the bug in minutes.
 
 **Rule:** when you have manual evidence that a flow works and the
 harness fails to reproduce it, the next investigation is the harness
-itself — strip its wrapping layer by layer until you find which one
-flips the result. Do not propose patches to radiod/avahi/firmware on
-the theory that the harness is just observing a real bug; the harness
+itself — strip its wrapping layer by layer **and inspect what each
+layer actually produces vs. consumes** until you find where the value
+disappears. A misleading error message naming a downstream effect
+(`powers returned no spectrum`) is not evidence about which layer is
+broken. Do not propose patches to radiod/avahi/firmware on the theory
+that the harness is just observing a real bug; the harness
 may be *causing* the bug it's claiming to observe.
