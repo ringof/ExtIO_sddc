@@ -96,6 +96,11 @@ SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
 # set SPEC_IFACE= (empty) to skip on hosts where the iface isn't ambiguous.
 SPEC_IFACE="${SPEC_IFACE:-lo}"
 SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
+# powers' first command/response handshake against a freshly-published
+# status group can spend 5-7s in "Invalid response, length 0" retries
+# before producing a CSV. Give the timeout enough headroom to ride that
+# out; SPEC_INTERVAL alone is the integration time, not the total budget.
+SPEC_TIMEOUT_PAD="${SPEC_TIMEOUT_PAD:-15}"
 
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
 # process-liveness and a clean idle device after stop.  radiod emits several
@@ -162,7 +167,7 @@ capture_spectrum() {
             note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL" >&2
         fi
         csv="$(docker exec "$CONTAINER" sh -c \
-            "timeout $((SPEC_INTERVAL + 8)) powers -c 1 -i $SPEC_INTERVAL \
+            "timeout $((SPEC_INTERVAL + SPEC_TIMEOUT_PAD)) powers -c 1 -i $SPEC_INTERVAL \
              -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL \
              2>$perr" 2>"$perr" | grep -E '^[0-9].*,.*,' | tail -1)"
         [[ -n "$csv" ]] && break
@@ -194,7 +199,13 @@ stats_field() {
 }
 
 start_radiod() {
-    docker exec "$CONTAINER" sh -c "rm -f $LOG_IN; radiod $RADIOD_CONF > $LOG_IN 2>&1" &
+    # `docker exec -t bash -c "..."` rather than `sh -c "..."`: a non-TTY
+    # docker exec wrapped in dash (the default sh) leaves spawned processes
+    # in a session state that breaks ka9q's multicast handshake for powers
+    # — exact same `powers ... hf.local,lo` args produce a CSV from a TTY
+    # bash session and `Invalid response, length 0` from a non-TTY sh -c
+    # session. See docs/docker.md §1.
+    docker exec -t "$CONTAINER" bash -c "rm -f $LOG_IN; radiod $RADIOD_CONF > $LOG_IN 2>&1" &
     # The above blocks for the radiod lifetime in a background shell job;
     # we control radiod via pkill, then reap the job.  Detached exec
     # (-d) is avoided so a failed `docker exec` surfaces; radiod's own
@@ -392,14 +403,14 @@ if [[ "$DATA_PLANE" == "1" ]]; then
     fi
 fi
 
-# ---- Establish a known-good loaded state up front (also tests reload once) ----
-note "initial force_reload to establish a clean baseline"
-if "$FX3_CMD" -F "$FIRMWARE" reload | tail -1 | grep -q '^PASS'; then
-    tap_ok "baseline reload: device re-flashed and healthy"
-else
-    tap_fail "baseline reload failed" "$("$FX3_CMD" -F "$FIRMWARE" reload 2>&1 | tail -20)"
-    echo "1..$TEST_NUM"; exit 1
-fi
+# NOTE: no host-side force_reload here. ka9q's radiod uploads firmware to
+# the FX3 itself when it sees PID 0x00F3; after upload the device
+# re-enumerates to 0x00F1 and the first radiod attempt fails with
+# "Error or device could not be found" (its libusb handle is to the
+# now-gone F3 device). The cycle loop below retries once on that exact
+# condition, which is the documented ka9q workflow. Doing a host-side
+# reload first was the previous "interim" workaround and produced
+# spurious failures in the cycle that followed.
 
 # ---- Main cycle loop ----
 start_ts=$(date +%s)
@@ -414,6 +425,22 @@ while :; do
     # --- Start radiod and wait until it is actually serving ---
     start_radiod
     if ! wait_radiod_ready; then
+        # F3->F1 retry: radiod's first attempt against a device at PID 0x00F3
+        # uploads firmware, then fails with "Error or device could not be
+        # found" because its libusb handle was to the now-gone F3 device.
+        # The device is now at 0x00F1; a second radiod immediately succeeds.
+        # This is the documented ka9q workflow (a supervisor restart). Do it
+        # inline once before reporting a real failure.
+        if [[ "$READY_REASON" == EXITED ]] \
+           && radiod_log | grep -q 'Error or device could not be found'; then
+            note "cycle $cycle: F3->F1 firmware-upload retry (radiod's documented one-shot)"
+            wait "${RADIOD_EXEC_PID:-}" 2>/dev/null || true
+            start_radiod
+            wait_radiod_ready || true   # READY_REASON reflects retry outcome
+        fi
+    fi
+    # If still not ready after the optional F3->F1 retry, report and continue.
+    if [[ "$READY_REASON" != READY ]]; then
         # Only backtrace when actually wedged in setup (SETUP); EXITED/NO_MDNS
         # aren't hangs, so a gdb capture there is noise.
         if [[ -n "${KA9Q_GDB_ON_STALL:-}" && "$READY_REASON" == SETUP ]]; then
