@@ -110,6 +110,11 @@ if want_stage 3; then
 
     # 3A — runs + produces real output
     echo "### Stage 3A — ka9q_smoke.sh (runs under ka9q-radio + real output)"
+    # Pass --image/--container through to ka9q.sh, which honors
+    # IMAGE_NAME / CONTAINER_NAME env-overrides. Otherwise ka9q.sh would
+    # always touch its hard-coded default while the readiness loop
+    # polled $CONTAINER (false timeouts on custom names).
+    export IMAGE_NAME="$IMAGE" CONTAINER_NAME="$CONTAINER"
     "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true   # free device + clean start
     # No host-side fx3_cmd reload preload: radiod uploads firmware itself
     # when it sees PID 0x00F3. The first attempt then exits with "Error or

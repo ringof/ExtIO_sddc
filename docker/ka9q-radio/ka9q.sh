@@ -24,8 +24,10 @@
 
 set -euo pipefail
 
-CONTAINER_NAME="ka9q-radio"
-IMAGE_NAME="ka9q-radio"
+# Env-overridable so callers (e.g. tests/validate.sh) can drive a
+# differently-named container or image without modifying this script.
+CONTAINER_NAME="${CONTAINER_NAME:-ka9q-radio}"
+IMAGE_NAME="${IMAGE_NAME:-ka9q-radio}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # This script lives in docker/ka9q-radio/; project root is two levels up.
