@@ -111,31 +111,38 @@ if want_stage 3; then
     # 3A — runs + produces real output
     echo "### Stage 3A — ka9q_smoke.sh (runs under ka9q-radio + real output)"
     "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true   # free device + clean start
-    # INTERIM WORKAROUND (not the desired end state): pre-load firmware so
-    # radiod finds a ready 00f1 device. radiod SHOULD self-upload reliably; it
-    # doesn't here -- ka9q's sleep(1)-after-upload re-enumeration is flaky
-    # ("Error or device could not be found"; see audit §1). Remove this once
-    # radiod's self-upload is fixed. (The soak also leaves the device in DFU.)
-    echo "Stage 3A: pre-loading firmware (fx3_cmd reload) [INTERIM]"
-    if "$FX3_CMD" -F "$FIRMWARE" reload >/dev/null 2>&1; then
+    # No host-side fx3_cmd reload preload: radiod uploads firmware itself
+    # when it sees PID 0x00F3. The first attempt then exits with "Error or
+    # device could not be found" because its libusb handle is to the now
+    # re-enumerated F1 device; ka9q.sh start re-creates the container and
+    # the second radiod finds F1 cleanly. (Same F3->F1 one-shot the
+    # cycle loop in ka9q_test.sh handles for Stage 3B.)
+    ready=0
+    attempt=1
+    while [ "$attempt" -le 2 ]; do
         FFTW_RIGOR="$FFTW_RIGOR" "$ROOT/docker/ka9q-radio/ka9q.sh" start >/dev/null 2>&1 || true
-        ready=0
         for _ in $(seq 1 "$READY_SECS"); do
             docker logs "$CONTAINER" 2>&1 | grep -q "rx888 running" && { ready=1; break; }
+            # If the container exited (radiod failed), break out fast so the
+            # retry attempt can kick in instead of waiting the full timeout.
+            docker ps --format '{{.Names}}' | grep -qx "$CONTAINER" || break
             sleep 1
         done
-        if [ "$ready" = 1 ]; then
-            "$DIR/ka9q_smoke.sh" -c "$CONTAINER"; rc=$?
-        else
-            echo "FAIL: radiod did not reach 'rx888 running' within ${READY_SECS}s (FFTW_RIGOR=$FFTW_RIGOR)"
-            echo "----- radiod log (tail) -----"; docker logs "$CONTAINER" 2>&1 | tail -20
-            rc=1
+        [ "$ready" = 1 ] && break
+        if [ "$attempt" = 1 ]; then
+            echo "Stage 3A: first start didn't reach 'rx888 running' — F3->F1 retry"
+            "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true
         fi
-        "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true
+        attempt=$(( attempt + 1 ))
+    done
+    if [ "$ready" = 1 ]; then
+        "$DIR/ka9q_smoke.sh" -c "$CONTAINER"; rc=$?
     else
-        echo "FAIL: firmware pre-load (fx3_cmd reload) failed — device not ready for radiod"
+        echo "FAIL: radiod did not reach 'rx888 running' within ${READY_SECS}s after retry (FFTW_RIGOR=$FFTW_RIGOR)"
+        echo "----- radiod log (tail) -----"; docker logs "$CONTAINER" 2>&1 | tail -20
         rc=1
     fi
+    "$ROOT/docker/ka9q-radio/ka9q.sh" stop >/dev/null 2>&1 || true
     record "Stage 3A (real output)" "$rc"; gate "$rc"
 
     # 3B — kill-and-return + clean idle (a few short start/stop cycles)
