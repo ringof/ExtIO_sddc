@@ -101,6 +101,12 @@ SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
 # before producing a CSV. Give the timeout enough headroom to ride that
 # out; SPEC_INTERVAL alone is the integration time, not the total budget.
 SPEC_TIMEOUT_PAD="${SPEC_TIMEOUT_PAD:-15}"
+# Settle pause between wait_radiod_ready returning READY and the first
+# powers invocation. `Established under name 'hf.local'` hitting the log
+# does not mean radiod's spectrum-channel responder is ready to answer a
+# command/response handshake — there's a brief window where powers'
+# first attempt gets "Invalid response, length 0". A 2-3s pause closes it.
+SPEC_SETTLE="${SPEC_SETTLE:-3}"
 
 # Log scanning is ADVISORY by default: the hard pass/fail gates are radiod
 # process-liveness and a clean idle device after stop.  radiod emits several
@@ -166,10 +172,16 @@ capture_spectrum() {
         if [[ -n "${KA9Q_SPEC_DEBUG:-}" ]]; then
             note "capture try $((tries+1)): powers -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL" >&2
         fi
-        csv="$(docker exec "$CONTAINER" sh -c \
-            "timeout $((SPEC_INTERVAL + SPEC_TIMEOUT_PAD)) powers -c 1 -i $SPEC_INTERVAL \
-             -f $SPEC_FREQ -b $SPEC_BINS -w $SPEC_BINWIDTH -s $SPEC_SSRC $SPEC_GROUP_FULL \
-             2>$perr" 2>"$perr" | grep -E '^[0-9].*,.*,' | tail -1)"
+        # No sh -c wrap: docker exec runs `timeout powers ...` directly. The
+        # earlier `docker exec sh -c "..."` form left powers in a session
+        # state where its multicast handshake failed with persistent
+        # "Invalid response, length 0" — same as the radiod launch issue
+        # (see docs/docker.md sec 1). The 2>"$perr" redirect is host-side,
+        # forwarding docker exec's stderr.
+        csv="$(docker exec "$CONTAINER" \
+            timeout "$((SPEC_INTERVAL + SPEC_TIMEOUT_PAD))" powers -c 1 -i "$SPEC_INTERVAL" \
+            -f "$SPEC_FREQ" -b "$SPEC_BINS" -w "$SPEC_BINWIDTH" -s "$SPEC_SSRC" "$SPEC_GROUP_FULL" \
+            2>"$perr" | grep -E '^[0-9].*,.*,' | tail -1)"
         [[ -n "$csv" ]] && break
         tries=$((tries+1)); sleep 1
     done
@@ -471,6 +483,11 @@ while :; do
         continue
     fi
     # --- Stream window (with spectrum capture if enabled) ---
+    # Brief settle: radiod logs Established hf.local the moment avahi
+    # commits the registration, but its spectrum-channel responder may
+    # need a beat before answering powers' first command. Without this
+    # pause, powers reliably gets "Invalid response, length 0" on try 1.
+    (( SPEC_SETTLE > 0 )) && sleep "$SPEC_SETTLE"
     spec=""
     if [[ "$DATA_PLANE" == "1" ]]; then
         spec="$(capture_spectrum)"            # blocks ~SPEC_INTERVAL
