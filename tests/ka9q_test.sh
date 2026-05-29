@@ -186,7 +186,15 @@ capture_spectrum() {
         tries=$((tries+1)); sleep 1
     done
     [[ -z "$csv" ]] && return 1
-    echo "$csv" | awk -F, -v dyn="$SPEC_DYN_RANGE_DB" '
+    # -F', *' (not -F,): powers writes its CSV with a space after each comma
+    # (e.g. "..., 8720000, 11270000, -113.63, ..."). With plain -F, the
+    # leading space was part of every numeric field, the validity regex
+    # below rejected them all, n stayed 0, awk exit 1, and the harness
+    # reported "no spectrum despite radiod READY" — even though the CSV
+    # was 2000+ chars of perfectly good spectrum data. Splitting on ", *"
+    # eats the space cleanly and is backward-compatible with CSV without
+    # spaces.
+    echo "$csv" | awk -F', *' -v dyn="$SPEC_DYN_RANGE_DB" '
         NF >= 6 {
             n = 0; max = -1e18; min = 1e18;
             for (i = 6; i <= NF; i++) {
