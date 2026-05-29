@@ -288,7 +288,7 @@ stop_radiod() {
         sleep 0.5; w=$((w+1))
     done
     if docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
-        note "warning: $SPEC_GROUP still resolves after stop — stale registration persists (not bouncing avahi)"
+        note "WARN: $SPEC_GROUP still resolves after stop — stale registration persists (not bouncing avahi)"
     fi
 }
 
