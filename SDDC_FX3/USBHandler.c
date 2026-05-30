@@ -18,6 +18,8 @@
 
 #include "health.h"
 
+#include "gpif_states.h"
+
 /* Settle time after waking the ADC from SHDN standby before the GPIF
  * state machine starts clocking samples (issue #131). A few ms is well
  * within the host's start-command tolerance. */
@@ -229,7 +231,7 @@ CyFxSlFifoApplnUSBSetupCB (
 						{
 							uint8_t smState = 0xFF;
 							CyU3PGpifGetSMState(&smState);
-							if (smState != 0 && smState != 0xFF) {
+							if (smState != GPIF_RESET && smState != 0xFF) {
 								DebugPrint(4, "\r\nSTARTADC: implicit GPIF stop (SM=%d)", smState);
 								CyU3PGpifControlSWInput(CyFalse);
 								CyU3PGpifDisable(CyTrue);
@@ -448,7 +450,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint8_t smState = 0xFF;
 						CyU3PGpifGetSMState(&smState);
-						if (smState == 1 /* IDLE */) {
+						if (smState == GPIF_IDLE) {
 							CyU3PGpifDisable(CyFalse);
 						} else {
 							DebugPrint(4, "\r\nSTP soft-stop fail SM=%d, forcing", smState);

@@ -15,6 +15,15 @@ below where it changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **GPIF state checks now use named constants.** The streaming watchdog
+  (`RunApplication.c`) and the `STOPFX3` / `STARTADC` stop paths
+  (`USBHandler.c`) previously compared the `CyU3PGpifGetSMState()` result
+  against raw numeric literals (`5`, `7`, `8`, `9`, `1`, `0`). These now
+  use named macros from a new `SDDC_FX3/gpif_states.h` that mirrors the
+  state indices generated into `SDDC_GPIF.h`. No behavior change. (#116)
+
 ### Added
 
 - **ADC low-power standby when idle.** The firmware now drives the ADC

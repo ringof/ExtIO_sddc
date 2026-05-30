@@ -15,6 +15,8 @@
 
 #include "health.h"
 
+#include "gpif_states.h"
+
 #define R828D_I2C_ADDR		0x74
 
 #include "radio.h"
@@ -260,8 +262,8 @@ void ApplicationThread ( uint32_t input)
 						uint8_t gpifState = 0xFF;
 						CyU3PGpifGetSMState(&gpifState);
 
-						if (gpifState == 5 || gpifState == 7 ||
-						    gpifState == 8 || gpifState == 9)
+						if (gpifState == GPIF_TH0_BUSY || gpifState == GPIF_TH1_BUSY ||
+						    gpifState == GPIF_TH1_WAIT || gpifState == GPIF_TH0_WAIT)
 						{
 							stallCount++;
 							DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
@@ -299,7 +301,7 @@ void ApplicationThread ( uint32_t input)
 									{
 										uint8_t smState = 0xFF;
 										CyU3PGpifGetSMState(&smState);
-										if (smState == 1 /* IDLE */) {
+										if (smState == GPIF_IDLE) {
 											CyU3PGpifDisable(CyFalse);
 										} else {
 											DebugPrint(4, "\r\nWDG: soft-stop fail SM=%d, forcing", smState);
