@@ -51,6 +51,13 @@ extern uint8_t glWdgRecoveryCount;
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
 
+/* GETSTATS payload length. Single source of truth; the per-field writes
+ * inside the GETSTATS handler must sum to exactly this. Compile-time
+ * guard below catches any future addition that would overrun glEp0Buffer. */
+#define GETSTATS_PAYLOAD_LEN  30
+_Static_assert(GETSTATS_PAYLOAD_LEN <= CYFX_SDRAPP_MAX_EP0LEN,
+               "GETSTATS payload exceeds EP0 buffer");
+
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
 static uint8_t  *glEp0Buffer = 0;       /* Buffer used to handle vendor specific control requests. */
@@ -290,6 +297,19 @@ CyFxSlFifoApplnUSBSetupCB (
 						glEp0Buffer[off++] = clk0_reg16;                 /* [24] */
 						glEp0Buffer[off++] = si5351_clk0_enabled() ? 1 : 0; /* [25] */
 					}
+					{
+						/* User-visible steady-state GPIOs, packed using the
+						 * same bit positions as the GPIOFX3 control word
+						 * (enum GPIOPin). Mainly for #131: lets the host
+						 * verify SHDWN is asserted after every teardown
+						 * path. See rx888r2_ReadGpioState() for details. */
+						uint32_t gpio_state = rx888r2_ReadGpioState(); /* [26..29] */
+						memcpy(&glEp0Buffer[off], &gpio_state, 4); off += 4;
+					}
+					/* Tripwire: if per-field writes ever drift from the
+					 * declared payload length, truncate the response
+					 * rather than risk leaking stale buffer contents. */
+					if (off > GETSTATS_PAYLOAD_LEN) off = GETSTATS_PAYLOAD_LEN;
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}

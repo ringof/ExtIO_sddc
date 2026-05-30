@@ -67,6 +67,13 @@
                               * test_main_recovery to trip the FX3
                               * hardware watchdog (Level 5). */
 
+/* GPIOFX3 control-word bit positions (subset — mirrors enum GPIOPin in
+ * SDDC_FX3/protocol.h). GETSTATS gpio_state field [26..29] uses the same
+ * positions, so the same constants apply to both write (GPIOFX3) and
+ * read (GETSTATS.gpio_state). */
+#define SHDWN         (1U << 5)
+#define LED_BLUE      (1U << 11)
+
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
 #define AD8370_VGA    11
@@ -664,6 +671,7 @@ static int do_test_stack_check(libusb_device_handle *h);
 static int do_test_stats_i2c(libusb_device_handle *h);
 static int do_test_stats_pib(libusb_device_handle *h);
 static int do_test_stats_pll(libusb_device_handle *h);
+static int do_test_stats_shdn(libusb_device_handle *h);
 static int do_test_stop_gpif_state(libusb_device_handle *h);
 static int do_test_stop_start_cycle(libusb_device_handle *h);
 static int do_test_resetup_cycle(libusb_device_handle *h);
@@ -721,6 +729,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stats_i2c",        do_test_stats_i2c},
     {"stats_pib",        do_test_stats_pib},
     {"stats_pll",        do_test_stats_pll},
+    {"stats_shdn",       do_test_stats_shdn},
     {"stop_gpif_state",  do_test_stop_gpif_state},
     {"stop_start_cycle", do_test_stop_start_cycle},
     {"resetup_cycle",    do_test_resetup_cycle},
@@ -772,6 +781,7 @@ static void print_local_help(void)
            "  gpio <bits>                   Set GPIO word\n"
            "  stats                         Read GETSTATS counters\n"
            "  stats_i2c / stats_pib / stats_pll   Counter tests\n"
+           "  stats_shdn                    SHDN asserted after STOPFX3 (#131)\n"
            "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
            "  stop_start_cycle              Cycle STOP+START N times\n"
            "  resetup_cycle                 Full re-setup restart cycling (host-style); env RESETUP_STANDBY_MS/CYCLES/GPIO/REOPEN\n"
@@ -1480,7 +1490,8 @@ static int do_test_stack_check(libusb_device_handle *h)
 /* GETSTATS tests                                                     */
 /* ------------------------------------------------------------------ */
 
-/* GETSTATS response layout (20 bytes, little-endian):
+/* GETSTATS response layout (firmware: SDDC_FX3/USBHandler.c GETSTATS handler,
+ * GETSTATS_PAYLOAD_LEN is its single source of truth — keep in sync):
  *   [0..3]   uint32  DMA buffer completions
  *   [4]      uint8   GPIF state machine state
  *   [5..8]   uint32  PIB error count
@@ -1488,12 +1499,21 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [11..14] uint32  I2C failure count
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
+ *   [20..23] uint32  Firmware boot counter (mismatch = reset between reads)
+ *   [24]     uint8   Si5351 CLK0_CONTROL reg (bit 7 = CLK0_PDN: 0=on, 1=off)
+ *   [25]     uint8   si5351_clk0_enabled() result (1 = firmware sees CLK0 on)
+ *   [26..29] uint32  GPIO state — bit positions match enum GPIOPin in
+ *                    protocol.h (SHDWN, DITH, RANDO, BIAS_HF, BIAS_VHF,
+ *                    LED_BLUE, VHF_EN, PGA_EN). PGA is un-inverted here so
+ *                    the readback matches control-word semantics.
  */
-#define GETSTATS_LEN  26    /* bumped from 24 in si5351-chip-query PR — adds
-                             * clk0_reg16 [24] and clk0_result [25] diagnostic
-                             * bytes.  Strict-length check below means flashing
-                             * the new firmware is required after this host
-                             * update. */
+#define GETSTATS_LEN  30    /* bumped 26 -> 30: adds gpio_state [26..29] for
+                             * #131 observability (SHDWN assertion can now be
+                             * asserted post-stop). Strict-length check below
+                             * means flashing the new firmware is required
+                             * after this host update — paired flash, same as
+                             * the previous 24 -> 26 bump for clk0_reg16/
+                             * clk0_result. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1512,6 +1532,10 @@ struct fx3_stats {
     uint8_t  clk0_result;      /* Boolean returned by si5351_clk0_enabled():
                                 * 1 if firmware sees CLK0 as enabled (i.e.
                                 * reg16 bit 7 == 0), 0 otherwise. */
+    uint32_t gpio_state;       /* Steady-state GPIO snapshot, bit positions
+                                * match the GPIOFX3 control word (enum
+                                * GPIOPin in protocol.h). PGA is un-inverted
+                                * — a host can do `if (gs & SHDWN)` etc. */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1530,6 +1554,7 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->boot_count, &buf[20], 4);
     s->clk0_reg16  = buf[24];
     s->clk0_result = buf[25];
+    memcpy(&s->gpio_state, &buf[26], 4);
     return 0;
 }
 
@@ -1542,10 +1567,11 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u gpio=0x%05X\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result);
+           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result,
+           s.gpio_state);
     return 0;
 }
 
@@ -1666,6 +1692,44 @@ static int do_test_stats_pll(libusb_device_handle *h)
 
     printf("PASS stats_pll: si5351_status=0x%02X (SYS_INIT clear, PLL A locked)\n",
            s.si5351_status);
+    return 0;
+}
+
+/* Verify the firmware parks the ADC in SHDN standby after STOPFX3
+ * (issue #131). Sequence: STARTADC -> STARTFX3 (wakes SHDN) -> STOPFX3
+ * (firmware asserts SHDN in the stop path) -> read gpio_state from
+ * GETSTATS and check the SHDWN bit is set. The gpio_state bit positions
+ * mirror enum GPIOPin in protocol.h, so we mask with the same SHDWN
+ * constant the host uses for the GPIOFX3 control word. */
+static int do_test_stats_shdn(libusb_device_handle *h)
+{
+    struct fx3_stats s;
+    int r;
+
+    /* Bring the ADC into a known-awake state: STARTADC + STARTFX3. */
+    cmd_u32(h, STARTADC, 32000000);
+    if (cmd_u32(h, STARTFX3, 0) != 0) {
+        printf("FAIL stats_shdn: STARTFX3 failed\n");
+        return 1;
+    }
+    usleep(50000);  /* let the wake settle */
+
+    /* Stop. Firmware's STOPFX3 handler asserts SHDN at the end. */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(50000);
+
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL stats_shdn: GETSTATS: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    if (!(s.gpio_state & SHDWN)) {
+        printf("FAIL stats_shdn: SHDWN not asserted after STOPFX3 (gpio_state=0x%05X)\n",
+               s.gpio_state);
+        return 1;
+    }
+    printf("PASS stats_shdn: SHDWN asserted after STOPFX3 (gpio_state=0x%05X)\n",
+           s.gpio_state);
     return 0;
 }
 
@@ -5044,7 +5108,13 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * Rule for new scenarios: always STOPFX3 on the success path,
          * and rely on this safety net for early-exit failure paths. */
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
-        cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
+        cmd_u32(h, GPIOFX3, 0x0820); /* LED_BLUE on, SHDWN asserted — match
+                                      * the firmware-side standby state that
+                                      * STOPFX3 leaves the ADC in (issue #131),
+                                      * so soak inter-scenario idle exercises
+                                      * that state. Scenarios that need the
+                                      * ADC awake go through STARTFX3, which
+                                      * wakes SHDN in firmware. */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
         /* NOTE: do NOT call libusb_clear_halt(EP1_IN) here unconditionally.
          * The FX3 CLEAR_FEATURE handler calls CyU3PUsbStall(ep,false,true)
@@ -5134,14 +5204,11 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     }
 
     /* Final teardown: park the ADC in low-power standby (SHDN) so the
-     * soak does not leave the LTC2208 cooking after the run.  The
-     * inter-scenario cleanup above intentionally CLEARS SHDWN (0x0800)
-     * every cycle so each scenario starts with the ADC awake; without
-     * this final pass the device would be left in that awake state.
-     * STOPFX3 already asserts SHDN in firmware (issue #131); the explicit
-     * GPIOFX3 (LED_BLUE | SHDWN) makes the parked state independent of
-     * that path in case the last scenario aborted mid-stream.  Guarded on
-     * a live handle — after a NO_DEVICE abort there is nothing to talk to. */
+     * soak does not leave the LTC2208 cooking after the run. Inter-scenario
+     * cleanup above now also asserts SHDWN, so the device should already
+     * be parked; this final pass is a belt-and-suspenders in case the last
+     * scenario aborted mid-stream before reaching cleanup. Guarded on a
+     * live handle — after a NO_DEVICE abort there is nothing to talk to. */
     if (h) {
         cmd_u32(h, STOPFX3, 0);
         cmd_u32(h, GPIOFX3, 0x0800 | 0x20); /* LED_BLUE on, SHDWN set — ADC standby */

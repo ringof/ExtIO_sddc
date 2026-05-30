@@ -206,7 +206,7 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
-#      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL
+#      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL + 1 GETSTATS SHDN (#131)
 #      + 5 new coverage-gap tests (vendor_rqt_wrap, stale_vendor_codes,
 #        setarg_gap_index, gpio_extremes, i2c_write_bad_addr)
 #      + 1 hw_smoke (ADC alive after GPIO extremes)
@@ -214,7 +214,7 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 #      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=36
+PLANNED=37
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
@@ -499,6 +499,20 @@ output=$(run_cmd stats_pll) && {
     tap_ok "stats_pll: Si5351 PLL locked, SYS_INIT clear"
 } || {
     tap_fail "stats_pll: PLL not locked or SYS_INIT set" "$output"
+}
+
+# ==================================================================
+# 18b. GETSTATS GPIO state — SHDN asserted after STOPFX3 (#131)
+# ==================================================================
+# Verifies the firmware parks the ADC in SHDN standby on stop, via the
+# new GETSTATS.gpio_state field [26..29]. The test sub-command runs
+# STARTADC -> STARTFX3 -> STOPFX3 then reads gpio_state and checks the
+# SHDWN bit (bit 5, matching enum GPIOPin in protocol.h) is set.
+
+output=$(run_cmd stats_shdn) && {
+    tap_ok "stats_shdn: SHDN asserted after STOPFX3 (#131)"
+} || {
+    tap_fail "stats_shdn: SHDN not asserted after STOPFX3" "$output"
 }
 
 # ==================================================================

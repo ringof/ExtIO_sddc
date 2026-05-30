@@ -33,6 +33,29 @@ void rx888r2_AdcStandby(CyBool_t standby)
     CyU3PGpioSetValue (GPIO_SHDWN, standby);
 }
 
+/* Pack the current state of every user-visible steady-state GPIO into one
+ * 32-bit word, using the GPIOFX3 control-word bit positions (enum GPIOPin
+ * in protocol.h). PGA is inverted in rx888r2_GpioSet (control PGA_EN=1
+ * drives pin LOW for high-gain range); we un-invert here so a host that
+ * does `if (gpio_state & PGA_EN)` matches what it sent.
+ * The transient shift-register strobe lines (ATT_LE/CLK/DATA, VGA_LE) are
+ * intentionally omitted — their values mid-operation are meaningless. */
+uint32_t rx888r2_ReadGpioState(void)
+{
+    CyBool_t v;
+    uint32_t s = 0;
+    if (CyU3PGpioGetValue(GPIO_SHDWN,    &v) == CY_U3P_SUCCESS && v) s |= SHDWN;
+    if (CyU3PGpioGetValue(GPIO_DITH,     &v) == CY_U3P_SUCCESS && v) s |= DITH;
+    if (CyU3PGpioGetValue(GPIO_RANDO,    &v) == CY_U3P_SUCCESS && v) s |= RANDO;
+    if (CyU3PGpioGetValue(GPIO_BIAS_HF,  &v) == CY_U3P_SUCCESS && v) s |= BIAS_HF;
+    if (CyU3PGpioGetValue(GPIO_BIAS_VHF, &v) == CY_U3P_SUCCESS && v) s |= BIAS_VHF;
+    if (CyU3PGpioGetValue(GPIO_LED_BLUE, &v) == CY_U3P_SUCCESS && v) s |= LED_BLUE;
+    if (CyU3PGpioGetValue(GPIO_VHF_EN,   &v) == CY_U3P_SUCCESS && v) s |= VHF_EN;
+    /* PGA pin is inverted: pin LOW means logical PGA_EN asserted. */
+    if (CyU3PGpioGetValue(GPIO_PGA,      &v) == CY_U3P_SUCCESS && !v) s |= PGA_EN;
+    return s;
+}
+
 void rx888r2_GpioInitialize()
 {
     ConfGPIOsimpleout (GPIO_SHDWN);
