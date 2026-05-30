@@ -55,8 +55,19 @@ to bootloader first if needed).  Both use `rx888_stream` from the
 ./fx3_cmd i2cw 0xC0 3 0xFF              # I2C write
 ./fx3_cmd raw 0xCC                      # send arbitrary vendor request
 ./fx3_cmd stats                         # read GETSTATS counters
-./fx3_cmd reset                         # reboot FX3 to bootloader
+./fx3_cmd reset                         # reboot FX3 to bootloader (RESETFX3)
+./fx3_cmd usbreset                      # host-side USB port reset (USBDEVFS_RESET)
+./fx3_cmd -F ../SDDC_FX3/SDDC_FX3.img reload   # reset -> bootloader -> re-upload -> verify
 ```
+
+`usbreset` issues a raw `USBDEVFS_RESET` on the `/dev/bus/usb` node
+(libusb-enumerate only, no claim), so it recovers a wedged device that
+can't be opened.  On this firmware a USB reset reboots the FX3 to the
+bootloader, so `usbreset` returns the device to DFU; `ENODEV` from the
+ioctl is the expected "device re-enumerated" result, not an error.
+`reload` chains `RESETFX3` + `usbreset` -> wait for bootloader ->
+re-upload firmware (`-F`) -> verify the device answers `TESTFX3` at the
+app PID — the force-reload primitive.
 
 ### Automated test commands
 
@@ -327,12 +338,131 @@ varies as scenarios are added.  Each block in the script prints
 `ok` or `not ok` for one numbered TAP entry; the streaming test at
 the end contributes a few additional sub-assertions.
 
+## usb_trace.sh -- Host-side USB lifecycle tracer
+
+Watches the RX888's USB lifecycle (enumerate / reset / PID flips
+`00f3`<->`00f1` / kernel-driver bind) in real time, timestamped, **without
+claiming the device** — so it runs safely alongside radiod or any other
+consumer.  Use it to watch what the firmware/device does through a
+driver-initiated USB reset and line it up against radiod's own log.
+
+```
+sudo tests/usb_trace.sh          # UDEV + PID + (root) kernel-log streams
+```
+
+Streams: `UDEV` (add/remove/bind events), `PID` (printed only on
+`04b4` PID change), `DMESG` (kernel USB log, root only, `--follow-new`).
+Env: `VID` (default `04b4`), `POLL` (PID poll interval).
+
+## End-to-end validation (`validate.sh`)
+
+`validate.sh` runs the full firmware-validation sequence against an attached
+RX888 in three sequential stages, each releasing the USB device before the
+next, ending in one overall PASS/FAIL. Hardware-only, never CI.
+
+```
+tests/validate.sh                       # all stages, 300 s soak
+tests/validate.sh --skip-soak           # quick: stages 1 + 3
+tests/validate.sh --stages 3            # just the ka9q-radio stage
+tests/validate.sh --soak-secs 3600 --keep-going
+```
+
+| Stage | What | PASS criteria |
+|-------|------|---------------|
+| 1 | `fw_test.sh` — vendor-command + data-flow | TAP: 0 failed |
+| 2 | `soak_test.sh` — stability (default 300 s; use hours for a real run) | no wedge / overrun / stall |
+| 3A | `ka9q_smoke.sh` — runs under ka9q-radio + real output | streams + sane floor + texture + **fs/2 alias present** |
+| 3B | `ka9q_test.sh` — kill-and-return + clean idle (#131) | every restart cycle re-streams and parks clean |
+
+Options: `--firmware PATH`, `--stages LIST`, `--soak-secs N`, `--skip-soak`,
+`--container/--image NAME`, `--keep-going` (don't stop at the first failure).
+Exit 0 iff every stage that ran passed. Needs `fx3_cmd` built (auto-builds)
+and, for Stage 3, the `ka9q-radio` docker image.
+
+## ka9q-radio integration (`ka9q_smoke.sh`, `ka9q_test.sh`, `hf_sweep.sh`)
+
+These drive the `ka9q-radio` Docker image (see `docker/ka9q-radio/`) and
+need a real RX888 with privileged USB passthrough — never CI.
+
+**The point of this stack:** prove the firmware is *really running the
+radio* without a receiver UI. `radiod` (with the `rx888.so` driver) uploads
+the firmware, programs the Si5351, and streams the ADC at 64.8 MSPS — then
+you look at the power spectrum and *see* a live, calibrated noise floor. A
+frozen / shut-down ADC FFTs to a featureless flat line, so a textured
+~-130 dB thermal floor across 0 .. fs/2 is itself the proof that the whole
+chain (`radiod` → `rx888.so` → FX3 → ADC) is genuinely sampling.
+
+### ka9q_smoke.sh -- whole-band streaming go/no-go (start here)
+
+One command: sweep `0 .. fs/2` and PASS/FAIL on whether `radiod` is
+streaming a live spectrum. Renders a PNG so you can also just look. Run it
+after the container is up (`./docker/ka9q-radio/ka9q.sh start`):
+
+```
+tests/ka9q_smoke.sh
+```
+
+Healthy reference on a 50 Ω dummy load (measured, calibrated): floor flat at
+~-131 to -133 dB edge-to-edge, the ADC DC spike at `f=0`, the `fs/2`
+(32.4 MHz) Nyquist alias spike (~-84 dB), and internal birdies — notably
+**6.48 MHz = fs/10**. PASS requires: a non-empty spectrum (streaming); a sane
+mean floor; several dB of natural bin-to-bin variance (the flat-line
+discriminator); and the **fs/2 (32.4 MHz) Nyquist alias present** — a peak
+≥ `ALIAS_MIN_DB` (default 20) above the floor mean, an antenna-independent
+proof the ADC is genuinely sampling at fs. FAIL means no spectrum (radiod not
+streaming), an out-of-range floor, a flat line (ADC frozen), or a missing
+alias (not a live RX888 ADC). Thresholds are env-overridable (`MEAN_LO/HI`,
+`MIN_SPREAD`, `ALIAS_FREQ/WINDOW/MIN_DB`); the alias gate auto-skips if fs/2
+isn't in the swept band. NOTE: the alias gate is coupled to the firmware's
+DC→Nyquist alias — revisit it if a future firmware nulls the ADC DC offset.
+
+### ka9q_test.sh -- radiod start/stop soak (Phase 1)
+
+Cycles the `radiod` session (start -> stream -> stop) in an idle
+container via `docker exec`, judging health by radiod liveness + an
+advisory log scan, and by `fx3_cmd stats` (GPIF idle, frozen DMA) once
+radiod releases the device.  Periodically forces a full firmware reload.
+Confirms the device returns to a usable, ADC-parked idle state between
+sessions (issue #131).  TAP output; `--help` for options (duration,
+reload interval, etc.).
+
+### hf_sweep.sh -- full-HF power spectrum via `powers`
+
+The analyzer the smoke test drives, usable on its own for a detailed look.
+Sweeps a band and emits `freq_hz,power_dB` CSV.  Auto-tiles (a single
+`powers` channel tops out ~16000 bins at the 64 KB datagram limit) with
+overlap+trim so per-tile channel-edge artifacts don't land in the output.
+Requires the patched `powers` in the image (see
+`docker/ka9q-radio/patches/`).
+
+```
+tests/hf_sweep.sh -o hf100.csv -p             # 0-32.4 MHz @ 100 Hz, CSV + PNG
+tests/hf_sweep.sh -a 5000000 -z 25000000 -p   # clean sub-band (away from DC/Nyquist)
+```
+
+Options: `-a/-z` band, `-w` bin width (default 100 Hz), `-G` guard bins
+trimmed per tile edge, `-i` integration/tile, `-o` CSV, `-p` render a PNG
+(gnuplot, headless).
+
+The floor is calibrated edge-to-edge: every tile requests the same bin count
+and a one-shot warm-up read settles the spectrum channel, so the first/last
+tile read the same level as the interior (a short tile reads ~+4.6 dB high
+and a cold channel reads low — both corrected; see the script header).  The
+only real band-edge features that remain are the ADC **DC spike** at `f=0`
+and the **fs/2 (32.4 MHz) Nyquist alias spike** — sweep a sub-band to
+exclude them.
+
 ## File map
 
 | File | Purpose |
 |------|---------|
-| `fx3_cmd.c` | Vendor command exerciser, test harness, and soak test |
-| `fw_test.sh` | TAP test suite wrapper (single-pass) |
+| `fx3_cmd.c` | Vendor command exerciser, test harness, soak test, `usbreset`/`reload` |
+| `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
+| `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
+| `validate.sh` | End-to-end firmware validation: fw_test -> soak -> ka9q-radio real-output + kill-and-return, one overall PASS/FAIL |
+| `ka9q_smoke.sh` | Whole-band (0..fs/2) streaming go/no-go via the noise floor + fs/2-alias gate (PASS/FAIL + PNG) |
+| `ka9q_test.sh` | ka9q-radio radiod start/stop integration soak (Phase 1) |
+| `hf_sweep.sh` | Full-HF power-spectrum sweep via ka9q `powers` (CSV/PNG) |
 | `Makefile` | Build system for test tools |
 | `rx888_tools/` | Git submodule: firmware uploader and USB streamer |

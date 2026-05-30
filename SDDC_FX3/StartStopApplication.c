@@ -14,6 +14,7 @@
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
 #include "Si5351.h"
+#include "radio.h"  /* rx888r2_AdcStandby for SHDN park (issue #131) */
 uint32_t glDMACount;
 uint16_t glLastPibArg;
 static volatile CyBool_t glPibNotified = CyFalse;  /* one-shot flag for PIB error queue event */
@@ -206,6 +207,13 @@ void StopApplication ( void )
     CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(epConfig));
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epConfig);
 	CheckStatus("SetEndpointConfig_Disable", Status);
+    /* Park the ADC in SHDN standby on every teardown path (issue #131),
+     * not just the explicit STOPFX3 vendor command. USBEventCallback
+     * routes SETCONF / RESET / DISCONNECT through here, so without this
+     * a host re-enumeration or unplug would leave the ADC powered while
+     * not streaming. The explicit STOPFX3 handler also calls this and
+     * the redundant GPIO write is harmless. */
+    rx888r2_AdcStandby(CyTrue);
     // OK, Application is now stopped
 	glIsApplnActive  = CyFalse;
 }

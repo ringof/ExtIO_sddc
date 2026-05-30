@@ -1,0 +1,27 @@
+diff --git a/src/rx888.c b/src/rx888.c
+index 20c1ecd9..ee653dc7 100644
+--- a/src/rx888.c
++++ b/src/rx888.c
+@@ -901,7 +901,10 @@ static void rx888_set_gain(struct sdrstate *sdr,double gain,bool vhf){
+ }
+ 
+ static void rx888_set_hf_mode(struct sdrstate *sdr){
+-  command_send(sdr->dev_handle,TUNERSTDBY,0); // Stop Tuner
++  // RX888mk2 is direct-sampling HF and has no tuner. SDDC_FX3 firmware has no
++  // TUNERSTDBY (0xB8) handler, so this send STALLs (LIBUSB_ERROR_PIPE). The
++  // STALL is harmless to streaming but can wedge radiod's restart bring-up;
++  // drop the no-op tuner-standby send. (was: command_send(...,TUNERSTDBY,0))
+   // switch to HF Antenna
+   usleep(5000);
+   sdr->gpios &= ~VHF_EN;
+@@ -960,8 +963,8 @@ static int rx888_start_rx(struct sdrstate *sdr,libusb_transfer_cb_fn callback){
+ 
+   usleep(5000);
+   command_send(sdr->dev_handle,STARTFX3,0);
+-  usleep(5000);
+-  command_send(sdr->dev_handle,TUNERSTDBY,0);
++  // No tuner on RX888mk2 — TUNERSTDBY (0xB8) STALLs on SDDC_FX3; drop it.
++  // (was: usleep(5000); command_send(sdr->dev_handle,TUNERSTDBY,0);)
+ 
+   return 0;
+ }

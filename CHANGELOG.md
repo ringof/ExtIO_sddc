@@ -15,7 +15,14 @@ below where it changes.
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **ADC low-power standby when idle.** The firmware now drives the ADC
+  `SHDN` line from the streaming state: the ADC is parked in low-power
+  standby at boot and on `STOPFX3`, and woken on `STARTFX3` (with a short
+  settle before the GPIF state machine starts). Saves ≥330 mA and reduces
+  heat whenever a stream is not running. Manual `GPIOFX3` SHDWN control is
+  unchanged. (#131)
 
 ## [0.1.0] — 2026-05-14
 

@@ -18,6 +18,11 @@
 
 #include "health.h"
 
+/* Settle time after waking the ADC from SHDN standby before the GPIF
+ * state machine starts clocking samples (issue #131). A few ms is well
+ * within the host's start-command tolerance. */
+#define ADC_WAKEUP_SETTLE_MS 5
+
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
@@ -45,6 +50,13 @@ extern uint8_t glWdgRecoveryCount;
 
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
+
+/* GETSTATS payload length. Single source of truth; the per-field writes
+ * inside the GETSTATS handler must sum to exactly this. Compile-time
+ * guard below catches any future addition that would overrun glEp0Buffer. */
+#define GETSTATS_PAYLOAD_LEN  30
+_Static_assert(GETSTATS_PAYLOAD_LEN <= CYFX_SDRAPP_MAX_EP0LEN,
+               "GETSTATS payload exceeds EP0 buffer");
 
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
@@ -285,6 +297,19 @@ CyFxSlFifoApplnUSBSetupCB (
 						glEp0Buffer[off++] = clk0_reg16;                 /* [24] */
 						glEp0Buffer[off++] = si5351_clk0_enabled() ? 1 : 0; /* [25] */
 					}
+					{
+						/* User-visible steady-state GPIOs, packed using the
+						 * same bit positions as the GPIOFX3 control word
+						 * (enum GPIOPin). Mainly for #131: lets the host
+						 * verify SHDWN is asserted after every teardown
+						 * path. See rx888r2_ReadGpioState() for details. */
+						uint32_t gpio_state = rx888r2_ReadGpioState(); /* [26..29] */
+						memcpy(&glEp0Buffer[off], &gpio_state, 4); off += 4;
+					}
+					/* Tripwire: if per-field writes ever drift from the
+					 * declared payload length, truncate the response
+					 * rather than risk leaking stale buffer contents. */
+					if (off > GETSTATS_PAYLOAD_LEN) off = GETSTATS_PAYLOAD_LEN;
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
@@ -359,6 +384,10 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
+				/* Wake the ADC from SHDN standby (issue #131) and let it
+				 * settle before the GPIF SM begins clocking samples. */
+				rx888r2_AdcStandby(CyFalse);
+				CyU3PThreadSleep(ADC_WAKEUP_SETTLE_MS);
 				/* Stop any running SM before restart.  Always use
 				 * CyTrue (force-reload) here because StartGPIF()
 				 * calls CyU3PGpifLoad() which reloads the config
@@ -430,6 +459,9 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
 					glWdgRecoveryCount = 0;  /* reset recovery cap */
+					/* No longer streaming — park the ADC in low-power
+					 * standby via SHDN (issue #131). */
+					rx888r2_AdcStandby(CyTrue);
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;

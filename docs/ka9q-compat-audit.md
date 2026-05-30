@@ -235,6 +235,82 @@ from ka9q.  The compatibility-matrix row for `TESTFX3` above
 reflects that it is *supported* by the firmware (returns a 4-byte
 response), not that it is *sent* by ka9q.
 
+### 10. `6a5094ac` rx888 driver segfaults in `command_send` *(ka9q-side regression; blocks the bump)*
+
+We attempted to bump the container from `42273761` to `6a5094ac`
+(2026-05-02) to pick up the change that flips the rx888 driver's
+init-time USB reset to default **off** (config key `reset`, default
+false) — which would have let us drop the `hack_no_usb_reset = yes`
+workaround. The bump had to be reverted: at `6a5094ac` `radiod`
+**segfaults during rx888 setup**, before it ever finds the device.
+
+It prints up through:
+
+```
+Dynamically loading rx888 hardware driver from /usr/local/lib/ka9q-radio/rx888.so
+Segmentation fault (core dumped)
+```
+
+`gdb` backtrace:
+
+```
+Program received signal SIGSEGV, Segmentation fault.
+#0  0x00007ffff7d00855 in ?? ()         /lib/x86_64-linux-gnu/libusb-1.0.so.0
+#1  command_send ()                      /usr/local/lib/ka9q-radio/rx888.so
+#2  rx888_setup ()                       /usr/local/lib/ka9q-radio/rx888.so
+#3  loadconfig ()                        radiod
+#4  main ()                              radiod
+```
+
+`rx888_setup()` calls `command_send()`, which calls into libusb and
+crashes there. A SIGSEGV *inside* libusb on a control transfer is the
+signature of a NULL/invalid device handle being handed to
+`libusb_control_transfer` — i.e. at this SHA the setup path reaches
+`command_send()` before it holds a valid handle (or after one was
+invalidated).
+
+Reproduced on **both** device states — with the FX3 in the bootloader
+(`04b4:00f3`) *and* with firmware already loaded and the device healthy
+at `04b4:00f1` — so it is **not** the firmware-upload path and **not**
+fixable by pre-loading firmware. It is an unconditional crash in
+`6a5094ac`'s rx888 init.
+
+Status: **reverted to `42273761` + `hack_no_usb_reset = yes`** (the
+proven pair with ka9q-web `b63c991`). This is a candidate upstream
+report to KA9Q; the backtrace above is the concrete evidence. Until
+it (or a later SHA) is verified crash-free, the container stays on
+`42273761`, and the reset workaround remains required (see §1 and the
+`rx888-test.conf` comment).
+
+### 11. radiod restart stall *(ka9q-side; firmware exonerated)*
+
+Under the `ka9q_test.sh` multi-cycle soak, `radiod` intermittently stalls when
+restarted in the same container: it finds the device at `00f1`, programs the
+Si5351, sets gain, sends `TUNERSTDBY` (0xB8) — then hangs *before* `rx888
+running`, never starting the stream. (Distinct from the cycle-1 "no spectrum",
+which is the avahi/mDNS and `powers` dynamic-channel timing on restart.)
+
+**The firmware is not the cause.** `tests/fx3_cmd resetup_cycle` reproduces a
+host's full re-setup restart with no SDR app in the loop — per cycle: park ADC
+in SHDN standby (`STOPFX3`, #131), dwell, then re-init clock + GPIO + atten/VGA
++ `TUNERSTDBY` + `STARTFX3` (firmware wakes the ADC, settles, starts the GPIF)
++ a primed bulk read. It **passes every time** across:
+
+- the vendor-command sequence + 5 ms inter-command timing,
+- ADC wake-on-restart timing — `RESETUP_STANDBY_MS` = 0 / 40 / 200 ms (rules
+  out `ADC_WAKEUP_SETTLE_MS` being too short after a long standby),
+- `RESETUP_REOPEN=1` — a brand-new libusb handle each cycle
+  (open → claim → stream → stop → release → close), mimicking radiod restarting
+  as a fresh process.
+
+So the firmware streams reliably across the full restart surface; the stall is
+in `radiod`'s own per-restart USB/URB handling (it hangs *after* claiming the
+device, in its streaming-transfer setup). Out of scope for the firmware; raise
+upstream with the `resetup_cycle` evidence. Note also that #131's actual claim
+— device returns to a usable, ADC-parked idle between sessions — is covered
+without ka9q-radio at all by `fw_test`/`soak` (fx3_cmd-side) and the green
+`ka9q_smoke` real-output gate.
+
 ## Container-side requirements (no patches needed)
 
 A bind-mount of `/run/udev:/run/udev:ro` is **required** at
@@ -267,3 +343,7 @@ future ask we make of the upstream maintainer.
   patches.
 - File issues for VHF support (firmware-side R82xx return) and the
   LED bit-position decision; both are non-blocking for HF receive.
+- Report the `6a5094ac` rx888-driver segfault (§10) upstream to KA9Q,
+  with the `gdb` backtrace, and retest a later SHA once it lands — the
+  bump is desirable (drops `hack_no_usb_reset`) but blocked until the
+  crash is fixed.
