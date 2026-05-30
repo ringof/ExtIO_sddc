@@ -5610,6 +5610,7 @@ static void usage(const char *prog)
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
         "  stats_pll                    Verify Si5351 PLL lock status\n"
+        "  stats_shdn                   SHDN asserted after STOPFX3 (#131)\n"
         "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
         "  resetup_cycle                Full re-setup restart cycling, host-style (RESETUP_STANDBY_MS, RESETUP_REOPEN knobs)\n"
@@ -5853,6 +5854,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stats_pll") == 0) {
         rc = do_test_stats_pll(h);
+
+    } else if (strcmp(cmd, "stats_shdn") == 0) {
+        rc = do_test_stats_shdn(h);
 
     } else if (strcmp(cmd, "stop_gpif_state") == 0) {
         rc = do_test_stop_gpif_state(h);
