@@ -42,6 +42,11 @@
 #   -G GUARD      edge bins trimmed/side(default 1000 = 100 kHz @ 100 Hz)
 #   -c CONTAINER  docker container      (default ka9q-radio)
 #   -g GROUP      radiod status group   (default hf.local)
+#   -I IFACE      multicast iface       (default lo; empty = let kernel pick).
+#                                       Pinning prevents the kernel from joining
+#                                       on eth0 in a bridge-networked container
+#                                       while radiod sends on lo — see
+#                                       docs/docker.md §2.
 #   -s SSRC       temp spectrum SSRC    (default 30303)
 #   -i SECS       integration per tile  (default 5)
 #   -o FILE       write CSV to FILE     (default stdout)
@@ -54,17 +59,21 @@ set -u
 START=0; STOP=32400000; BIN_HZ=100; MAXBINS=16000; GUARD=1000
 NYQ=32400000
 CONTAINER=ka9q-radio; GROUP=hf.local; SSRC=30303; INT=5; OUT=; PLOT=0
+IFACE="${IFACE:-lo}"
 
-while getopts "a:z:w:m:G:c:g:s:i:o:ph" opt; do
+while getopts "a:z:w:m:G:c:g:I:s:i:o:ph" opt; do
     case "$opt" in
         a) START=$OPTARG ;; z) STOP=$OPTARG ;; w) BIN_HZ=$OPTARG ;;
         m) MAXBINS=$OPTARG ;; G) GUARD=$OPTARG ;; c) CONTAINER=$OPTARG ;;
-        g) GROUP=$OPTARG ;; s) SSRC=$OPTARG ;; i) INT=$OPTARG ;; o) OUT=$OPTARG ;;
+        g) GROUP=$OPTARG ;; I) IFACE=$OPTARG ;; s) SSRC=$OPTARG ;;
+        i) INT=$OPTARG ;; o) OUT=$OPTARG ;;
         p) PLOT=1 ;;
-        h) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        h) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) exit 2 ;;
     esac
 done
+
+GROUP_FULL="${GROUP}${IFACE:+,$IFACE}"
 
 # One tile: request [rlo .. rlo+rb*bw], emit only bins whose freq lands in
 # [clo, chi). powers returns bins low-to-high with bin 0 at rlo (its base =
@@ -81,7 +90,7 @@ run_tile() {                              # $1=rlo $2=rb $3=clo $4=chi
     # unresponsive, fail this tile instead of hanging the whole sweep.
     tmo=$(( 2*INT + 10 ))
     out="$(docker exec "$CONTAINER" sh -c \
-              "timeout $tmo powers -c 2 -i $INT -s $SSRC -f $center -w $BIN_HZ -b $rb $GROUP 2>/dev/null" \
+              "timeout $tmo powers -c 2 -i $INT -s $SSRC -f $center -w $BIN_HZ -b $rb $GROUP_FULL 2>/dev/null" \
            2>/dev/null | grep -E '^[0-9].*,.*,' | tail -1)"
     if [ -z "$out" ]; then
         echo "hf_sweep: WARNING no data for tile rlo=$rlo bins=$rb (radiod down / timeout ${tmo}s?)" >&2

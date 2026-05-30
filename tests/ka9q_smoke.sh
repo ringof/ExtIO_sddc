@@ -20,6 +20,10 @@
 #   -i SECS       integration       (default 5)
 #   -c CONTAINER  docker container  (default ka9q-radio)
 #   -g GROUP      radiod status grp (default hf.local)
+#   -I IFACE      multicast iface   (default lo; empty = let kernel pick).
+#                                   Forwarded to hf_sweep.sh so powers joins
+#                                   on the same interface radiod sends on —
+#                                   see docs/docker.md §2.
 #   -o FILE       CSV output        (default a temp file)
 #
 # Exit: 0 = PASS (firmware streaming a live spectrum), 1 = FAIL.
@@ -30,6 +34,7 @@
 set -u
 CONTAINER=ka9q-radio; GROUP=hf.local
 LO=0; HI=32400000; INT=5; OUT=; SSRC=30303
+IFACE="${IFACE:-lo}"
 
 # Liveness thresholds (dB). A live HF floor sits well inside [-150,-100] with
 # many dB of bin-to-bin variance; a frozen/zeroed ADC collapses the spread.
@@ -45,11 +50,12 @@ ALIAS_FREQ="${ALIAS_FREQ:-32400000}"
 ALIAS_WINDOW="${ALIAS_WINDOW:-200000}"
 ALIAS_MIN_DB="${ALIAS_MIN_DB:-20}"
 
-while getopts "a:z:i:c:g:o:h" opt; do
+while getopts "a:z:i:c:g:I:o:h" opt; do
     case "$opt" in
         a) LO=$OPTARG ;; z) HI=$OPTARG ;; i) INT=$OPTARG ;;
-        c) CONTAINER=$OPTARG ;; g) GROUP=$OPTARG ;; o) OUT=$OPTARG ;;
-        h) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        c) CONTAINER=$OPTARG ;; g) GROUP=$OPTARG ;; I) IFACE=$OPTARG ;;
+        o) OUT=$OPTARG ;;
+        h) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) exit 2 ;;
     esac
 done
@@ -69,8 +75,8 @@ OUT=${OUT:-$(mktemp /tmp/ka9q_smoke.XXXXXX.csv)}
 echo "ka9q smoke: sweeping $(awk "BEGIN{printf \"%.3f-%.3f\",$LO/1e6,$HI/1e6}") MHz via powers (per-tile progress below)..." >&2
 # Keep the sweep's stderr (its per-tile "# tile N ..." progress) visible; only
 # the CSV (stdout, via -o) is silenced. The sweep is the slow part (~minutes).
-"$SWEEP" -a "$LO" -z "$HI" -i "$INT" -c "$CONTAINER" -g "$GROUP" -s "$SSRC" \
-         -o "$OUT" -p >/dev/null || true
+"$SWEEP" -a "$LO" -z "$HI" -i "$INT" -c "$CONTAINER" -g "$GROUP" -I "$IFACE" \
+         -s "$SSRC" -o "$OUT" -p >/dev/null || true
 
 # Reduce the spectrum to mean / stdev / min / max.
 read -r N MEAN SD MN MX <<EOF
