@@ -212,8 +212,12 @@ radiod_bringup_state() {
     local log="$1"
     grep -q 'rx888 running' <<<"$log" || { echo SETUP; return; }
     (( DATA_PLANE != 1 )) && { echo READY; return; }
+    # Use getent (NSS/nss-mdns/getaddrinfo path) here, not avahi-resolve
+    # (D-Bus path): powers uses ka9q's resolve_mcast which calls
+    # getaddrinfo, so the readiness gate must use the same resolver as the
+    # consumer it gates. See docs/docker.md sec 4.
     if grep -q "Established under name '${SPEC_GROUP}'" <<<"$log" \
-       && docker exec "$CONTAINER" avahi-resolve -n "$SPEC_GROUP" >/dev/null 2>&1; then
+       && docker exec "$CONTAINER" getent hosts "$SPEC_GROUP" >/dev/null 2>&1; then
         echo READY
     else
         echo NO_MDNS

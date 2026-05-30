@@ -153,8 +153,13 @@ if want_stage 3; then
     # 3B — kill-and-return + clean idle (a few short start/stop cycles)
     echo "### Stage 3B — ka9q_test.sh (kill-and-return + clean idle, #131)"
     dur=$(( CYCLE_SECS * 3 + 20 ))
+    # Forward --image and --container so a custom-name validate.sh run actually
+    # tests the requested image in Stage 3B too (otherwise ka9q_test.sh would
+    # fall back to its IMAGE=ka9q-radio / CONTAINER=ka9q-radio-soak defaults
+    # and Stage 3B would silently test the wrong container).
     "$DIR/ka9q_test.sh" --firmware "$FIRMWARE" --duration "$dur" \
-        --reload-interval "$(( dur + 100 ))" --stream-secs "$CYCLE_SECS"; rc=$?
+        --reload-interval "$(( dur + 100 ))" --stream-secs "$CYCLE_SECS" \
+        --image "$IMAGE" --container "${CONTAINER}-soak"; rc=$?
     record "Stage 3B (kill-and-return)" "$rc"; gate "$rc"
 fi
 
