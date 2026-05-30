@@ -11,11 +11,14 @@ This document describes the GPIF II state machine design, the soft-stop
 mechanism, and the GPIF-level recovery actions (force-stop fallback and
 the streaming-wedge watchdog) that keep the streaming pipeline alive.
 
-It covers the GPIF slice of the recovery story only.  The firmware also
-has higher-level recovery layers (EP0 vendor-handler liveness check with
-device reset, and an FX3 hardware-watchdog catastrophic backstop) that
-sit above the GPIF watchdog and handle wedges the GPIF layer cannot
-see.  For the full cascade across all layers, see
+It covers the GPIF slice of the recovery story only: the streaming-wedge
+watchdog is **Level 1** of the firmware's five-level recovery cascade.
+The firmware also has higher-level recovery layers (Level 4, the EP0
+vendor-handler liveness check with device reset, and Level 5, an FX3
+hardware-watchdog catastrophic backstop — both in `SDDC_FX3/health.c`)
+that sit above the GPIF watchdog and handle wedges the GPIF layer cannot
+see; Levels 2–3 are reserved and not yet implemented.  For the full
+cascade across all layers, see
 [README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness).
 
 For general firmware architecture, see [architecture.md](architecture.md).

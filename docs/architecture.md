@@ -243,11 +243,14 @@ for the full state machine design and GPIF-level recovery details.
 
 **Wider recovery cascade:**
 
-The GPIF watchdog is one level of a broader recovery cascade.  The
+The GPIF watchdog is **Level 1** of a broader five-level recovery
+cascade (the only level still living inline in `RunApplication.c`
+rather than `health.c` — migration tracked as issue #115).  The
 firmware also detects EP0 vendor-handler hangs (Level 4, in
 `SDDC_FX3/health.c`) and main-thread death via the FX3 hardware
 watchdog (Level 5, configured in `health.c` and petted by a
-heartbeat-gated ThreadX timer).  Test-only vendor commands `HANGFX3`
+heartbeat-gated ThreadX timer).  Levels 2–3 are reserved and not yet
+implemented.  Test-only vendor commands `HANGFX3`
 (0xCE) and `HANGMAIN` (0xCF) force each failure mode for round-trip
 validation.  A `boot_count` value in `GETSTATS` lets a host detect
 that the device reset between two snapshots regardless of cause.
