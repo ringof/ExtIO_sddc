@@ -183,6 +183,29 @@ static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
     return cmd_u32(h, cmd, val);
 }
 
+/* Survival check after an operation that *intentionally* STALLs EP0 —
+ * an out-of-range vendor wIndex (SETARGFX3), a bad-I2C-address write
+ * (I2CWFX3), etc.  A USB control endpoint auto-clears its stall on the
+ * next SETUP packet, but the FX3 occasionally races that clear, so the
+ * immediately-following control transfer can return LIBUSB_ERROR_PIPE
+ * even though the device is alive and answers the very next request
+ * (~0.1% of cycles — issue #135).  These scenarios verify device
+ * *survival*, not EP0 stall timing, so tolerate a single transient PIPE:
+ * retry once (the retry's own SETUP clears the stale stall).  A
+ * genuinely wedged EP0 stays stalled and fails both attempts, so this
+ * does not mask a real hang.  Returns the libusb rc of a TESTFX3 read
+ * (>= 0 means the device is alive). */
+static int ep0_alive_after_stall(libusb_device_handle *h)
+{
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r == LIBUSB_ERROR_PIPE) {
+        usleep(2000);  /* let the controller settle the stall-clear */
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    }
+    return r;
+}
+
 /* ------------------------------------------------------------------ */
 /* Device open / close                                                */
 /* ------------------------------------------------------------------ */
@@ -1113,26 +1136,10 @@ static int do_test_oob_setarg(libusb_device_handle *h)
         return 1;
     }
 
-    /* Verify device is still alive.
-     *
-     * The OOB SETARGFX3 above intentionally STALLs EP0 (the default
-     * case in the firmware's SETARGFX3 handler signals the unrecognized
-     * wIndex by stalling the status phase).  A USB control endpoint
-     * auto-clears its stall on the next SETUP packet, but the FX3
-     * occasionally races that clear: the immediately-following control
-     * transfer can still see LIBUSB_ERROR_PIPE (~0.1% of cycles, issue
-     * #135) even though the device is fine and answers the very next
-     * request.  This test checks device *survival*, not EP0 stall
-     * timing, so a single transient PIPE here is not a failure — retry
-     * once (the retry's own SETUP clears the stale stall) before
-     * declaring the device unresponsive.  A genuinely wedged EP0 stays
-     * stalled and fails both attempts, so this does not mask a real
-     * hang. */
-    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
-    if (r == LIBUSB_ERROR_PIPE) {
-        usleep(2000);  /* let the controller settle the stall-clear */
-        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
-    }
+    /* Verify the device survived.  The OOB SETARGFX3 above intentionally
+     * STALLs EP0; tolerate the transient post-STALL pipe error (issue
+     * #135 — see ep0_alive_after_stall). */
+    r = ep0_alive_after_stall(h);
     if (r < 0) {
         printf("FAIL oob_setarg: device unresponsive after OOB wIndex: %s\n",
                libusb_strerror(r));
@@ -3601,9 +3608,10 @@ static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
     r = ctrl_write_buf(h, I2CWFX3, 0x90, 0, &data, 1);
     /* Expected: STALL or error from NACK */
 
-    /* Verify alive */
-    uint8_t info[4] = {0};
-    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    /* Verify the device survived.  A NACK'd I2C write makes the I2CWFX3
+     * handler STALL EP0; tolerate the transient post-STALL pipe error
+     * (issue #135 — see ep0_alive_after_stall). */
+    r = ep0_alive_after_stall(h);
     if (r < 0) {
         printf("FAIL i2c_write_bad_addr: device unresponsive: %s\n",
                libusb_strerror(r));
