@@ -1113,8 +1113,26 @@ static int do_test_oob_setarg(libusb_device_handle *h)
         return 1;
     }
 
-    /* Verify device is still alive */
+    /* Verify device is still alive.
+     *
+     * The OOB SETARGFX3 above intentionally STALLs EP0 (the default
+     * case in the firmware's SETARGFX3 handler signals the unrecognized
+     * wIndex by stalling the status phase).  A USB control endpoint
+     * auto-clears its stall on the next SETUP packet, but the FX3
+     * occasionally races that clear: the immediately-following control
+     * transfer can still see LIBUSB_ERROR_PIPE (~0.1% of cycles, issue
+     * #135) even though the device is fine and answers the very next
+     * request.  This test checks device *survival*, not EP0 stall
+     * timing, so a single transient PIPE here is not a failure — retry
+     * once (the retry's own SETUP clears the stale stall) before
+     * declaring the device unresponsive.  A genuinely wedged EP0 stays
+     * stalled and fails both attempts, so this does not mask a real
+     * hang. */
     r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r == LIBUSB_ERROR_PIPE) {
+        usleep(2000);  /* let the controller settle the stall-clear */
+        r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    }
     if (r < 0) {
         printf("FAIL oob_setarg: device unresponsive after OOB wIndex: %s\n",
                libusb_strerror(r));
