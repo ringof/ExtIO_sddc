@@ -241,14 +241,16 @@ static CyBool_t streaming_wedge_detected(void)
 
 health_status_t health_evaluate(void)
 {
-    /* Level 1 — advance the streaming-stall sampler every tick (only while
-     * streaming is active).  Sampled before the EP0 check so its state
-     * machine keeps advancing regardless of EP0 status. */
-    CyBool_t streaming_wedged =
-        glIsApplnActive ? streaming_wedge_detected() : CyFalse;
-
-    /* Level 4 — EP0 handler duration vs timeout.  Takes precedence: an EP0
-     * deadlock resets the whole device, so it wins over a streaming wedge. */
+    /* Level 4 — EP0 handler duration vs timeout, checked FIRST.  An EP0
+     * deadlock takes precedence (it resets the whole device), and the
+     * remedy must make NO SDK/debug call before CyU3PDeviceReset() — the
+     * wedged vendor callback may itself be stuck inside an SDK call
+     * holding a lock.  So return HEALTH_WEDGED_EP0 before the streaming
+     * sampler below, which calls CyU3PGpifGetSMState()/DebugPrint() and
+     * could otherwise contend with that wedged call (the EP0 handlers
+     * most likely to hang — STOPFX3/STARTFX3/STARTADC — touch the same
+     * GPIF/DMA block).  This restores the pre-#115 ordering where the
+     * EP0 check/recover ran before the streaming watchdog. */
     if (glHealthState.ep0_handler_in_progress) {
         uint32_t now = CyU3PGetTime();
         uint32_t enter = glHealthState.ep0_handler_enter_ms;
@@ -259,7 +261,10 @@ health_status_t health_evaluate(void)
         }
     }
 
-    if (streaming_wedged) {
+    /* Level 1 — advance the streaming-stall sampler.  Runs every tick
+     * while streaming is active and EP0 is not already overdue, so its
+     * state machine keeps advancing in normal operation. */
+    if (glIsApplnActive && streaming_wedge_detected()) {
         return HEALTH_WEDGED_STREAMING;
     }
 
