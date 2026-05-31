@@ -357,6 +357,11 @@ CyFxSlFifoApplnUSBSetupCB (
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
+						case WDG_RESET_ESCALATE:
+							health_set_reset_escalation((wValue & 0xFF) != 0);
+							glVendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
 						default:
 							/* Data phase already ACKed; stall status to
 							   signal the unrecognized wIndex to the host. */
@@ -514,6 +519,18 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * after HWDT_PERIOD_MS and resets the device.  Used by
 				 * the host-side test_main_recovery scenario to validate
 				 * Level-5 end-to-end. */
+				case HANGCOLDSTART:
+					/* TEST-ONLY (#137): suppress DMA-progress accounting so the
+					 * GPIF SM runs but glDMACount stays 0 — reproduces a
+					 * cold-start wedge.  The streaming watchdog detects it,
+					 * light recovery fails to clear it, and (clock healthy)
+					 * escalates to a device reset, which clears this flag. */
+					DebugPrint(4, "\r\nHANGCOLDSTART: suppressing DMA progress (test-only)");
+					glHealthForceColdStart = 1;
+					CyU3PUsbAckSetup();
+					isHandled = CyTrue;
+					break;
+
 				case HANGMAIN:
 					DebugPrint(4, "\r\nHANGMAIN: arming main-loop hang (test-only)");
 					glHealthHangMain = 1;

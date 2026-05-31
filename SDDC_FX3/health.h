@@ -77,6 +77,13 @@ void health_main_heartbeat(void);
  * reset round-trip end-to-end. */
 extern volatile uint8_t glHealthHangMain;
 
+/* TEST-ONLY: when set non-zero (via the HANGCOLDSTART vendor command),
+ * the DMA producer callback (StartStopApplication.c) stops incrementing
+ * glDMACount, so the GPIF SM runs but records no buffer progress —
+ * reproducing a cold-start wedge for the host-side test_coldstart_recovery
+ * scenario (#137).  Cleared on device reset (RAM wiped). */
+extern volatile uint8_t glHealthForceColdStart;
+
 /* Read the boot counter — incremented once per firmware boot inside
  * health_init().  Exposed via GETSTATS so the host can detect that the
  * device reset between two snapshots, regardless of the cause (Level 4
@@ -110,5 +117,12 @@ void health_recover(health_status_t status);
  */
 void health_set_max_recovery(uint8_t max);
 void health_reset_recovery_count(void);
+
+/* Enable/disable autonomous device-reset escalation for an unrecoverable
+ * cold-start streaming wedge (#137).  Backs the WDG_RESET_ESCALATE
+ * SETARGFX3 arg; on by default.  When enabled, a COLD_START wedge that
+ * survives the recovery cap triggers CyU3PDeviceReset (clock-health-gated,
+ * once per session). */
+void health_set_reset_escalation(CyBool_t enabled);
 
 #endif /* _INCLUDED_HEALTH_H_ */

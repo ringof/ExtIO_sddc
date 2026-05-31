@@ -15,6 +15,7 @@
 #include "Application.h"
 #include "Si5351.h"
 #include "radio.h"  /* rx888r2_AdcStandby for SHDN park (issue #131) */
+#include "health.h" /* glHealthForceColdStart test hook (#137) */
 uint32_t glDMACount;
 uint16_t glLastPibArg;
 static volatile CyBool_t glPibNotified = CyFalse;  /* one-shot flag for PIB error queue event */
@@ -68,8 +69,13 @@ void DmaCallback (
     {
         /* This is a produce event notification to the CPU. This notification is
          * received upon reception of every buffer. The DMA transfer will not wait
-         * for the commit from CPU. Increment the counter. */
-        glDMACount++;
+         * for the commit from CPU. Increment the counter.
+         *
+         * The glHealthForceColdStart guard is a TEST-ONLY hook (HANGCOLDSTART):
+         * when set it suppresses progress accounting so the SM runs but
+         * glDMACount stays 0, reproducing a cold-start wedge for #137 testing. */
+        if (!glHealthForceColdStart)
+            glDMACount++;
     }
 }
 
