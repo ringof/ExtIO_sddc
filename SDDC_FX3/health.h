@@ -43,6 +43,7 @@ typedef enum {
 typedef enum {
     HEALTH_OK = 0,
     HEALTH_WEDGED_EP0,        /* Vendor callback hung in SDK call (issue #104, #105) */
+    HEALTH_WEDGED_STREAMING,  /* DMA stalled in a GPIF BUSY/WAIT state — Level 1 (#115) */
     HEALTH_WEDGED_UNKNOWN,    /* Unidentified wedge — fall-through case */
 } health_status_t;
 
@@ -96,5 +97,18 @@ health_status_t health_evaluate(void);
  * by main loop when health_evaluate() returns anything other than
  * HEALTH_OK.  May call CyU3PDeviceReset() for catastrophic statuses. */
 void health_recover(health_status_t status);
+
+/* Recovery-cap control for the Level-1 streaming watchdog (migrated from
+ * RunApplication.c into health_recover, issue #115).
+ *
+ *   health_set_max_recovery()     — backs the WDG_MAX_RECOV SETARGFX3 arg.
+ *                                    0 = unlimited; else stop attempting
+ *                                    after N consecutive recoveries until
+ *                                    the host starts a new session.
+ *   health_reset_recovery_count() — called on STARTFX3 / STOPFX3 to begin
+ *                                    a fresh streaming session.
+ */
+void health_set_max_recovery(uint8_t max);
+void health_reset_recovery_count(void);
 
 #endif /* _INCLUDED_HEALTH_H_ */

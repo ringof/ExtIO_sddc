@@ -190,10 +190,18 @@ static CyU3PReturnStatus_t MyDebugSNPrint (
                 if (intArg < 0)
                 {
                     debugMsg[i++] = '-';
-                    intArg = -intArg;
+                    /* Compute the magnitude in unsigned space.  Negating
+                     * intArg directly is undefined behaviour for INT32_MIN
+                     * (-(-2147483648) overflows int32_t); the unsigned
+                     * form is well-defined and correct for all values. */
+                    uintArg = (uint32_t)0 - (uint32_t)intArg;
+                }
+                else
+                {
+                    uintArg = (uint32_t)intArg;
                 }
 
-                argStr =  CyU3PDebugIntToStr (convertedString, intArg, 10);
+                argStr =  CyU3PDebugIntToStr (convertedString, uintArg, 10);
                 copyReqd = CyTrue;
             }
             break;

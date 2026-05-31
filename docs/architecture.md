@@ -243,11 +243,15 @@ for the full state machine design and GPIF-level recovery details.
 
 **Wider recovery cascade:**
 
-The GPIF watchdog is one level of a broader recovery cascade.  The
-firmware also detects EP0 vendor-handler hangs (Level 4, in
+The GPIF watchdog is **Level 1** of a broader five-level recovery
+cascade, implemented in `health.c` behind
+`health_recover(HEALTH_WEDGED_STREAMING)` (migrated out of
+`RunApplication.c` in #115, so all recovery now routes through the
+health module).  The firmware also detects EP0 vendor-handler hangs (Level 4, in
 `SDDC_FX3/health.c`) and main-thread death via the FX3 hardware
 watchdog (Level 5, configured in `health.c` and petted by a
-heartbeat-gated ThreadX timer).  Test-only vendor commands `HANGFX3`
+heartbeat-gated ThreadX timer).  Levels 2–3 are reserved and not yet
+implemented.  Test-only vendor commands `HANGFX3`
 (0xCE) and `HANGMAIN` (0xCF) force each failure mode for round-trip
 validation.  A `boot_count` value in `GETSTATS` lets a host detect
 that the device reset between two snapshots regardless of cause.
@@ -823,7 +827,8 @@ every vendor command through `fx3_cmd`.
 | File | Purpose |
 |------|---------|
 | `SDDC_FX3/StartUp.c` | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | Application thread, hardware detection, main loop, GPIF streaming watchdog, recovery cascade integration |
+| `SDDC_FX3/RunApplication.c` | Application thread, hardware detection, main loop, `health_tick()` (recovery cascade) integration |
+| `SDDC_FX3/health.c` | Recovery cascade: EP0-wedge (L4), HWDT (L5), and the Level-1 GPIF streaming watchdog (`health_evaluate` / `health_recover`) |
 | `SDDC_FX3/USBHandler.c` | USB setup callback (all vendor commands), USB init, EP0 liveness reporting into `health.c` |
 | `SDDC_FX3/StartStopApplication.c` | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
 | `SDDC_FX3/DebugConsole.c` | UART init, debug buffer, console parser, USB debug |

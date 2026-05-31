@@ -247,10 +247,18 @@ UART/debug subsystem is initialized.
 
 ## 5. GPIF Watchdog Recovery
 
-The application thread (`RunApplication.c:216-295`) runs a watchdog
-that detects and recovers from DMA stalls caused by host-side
+The health module (`health.c` — `health_evaluate()` / `health_recover()`,
+driven each ~100 ms `health_tick()` from `RunApplication.c`) runs a
+watchdog that detects and recovers from DMA stalls caused by host-side
 backpressure.  All watchdog activity is logged to the debug console
 with a `WDG:` prefix.
+
+This streaming watchdog is **Level 1** of the firmware's recovery
+cascade.  Levels 4 (EP0-handler hang) and 5 (main-thread death) live in
+`SDDC_FX3/health.c` and are exercised deterministically by the
+`HANGFX3` / `HANGMAIN` commands below; Levels 2–3 are reserved and not
+yet implemented.  The cascade is documented canonically in the
+[README "Firmware Robustness" section](../../README.md#firmware-robustness).
 
 ### Recovery Cap
 
@@ -334,6 +342,25 @@ WDG: === RECOVERY START ===
 The `wedge_recovery` test in `fx3_cmd` exercises this path
 programmatically and checks `glCounter[2]` via `GETSTATS`.
 
+### Deterministic recovery testing (HANGFX3 / HANGMAIN)
+
+Two **test-only** vendor commands deterministically trip the higher
+cascade levels so their reset paths can be validated end-to-end:
+
+| Command | bRequest | Trips | Mechanism |
+|---------|----------|-------|-----------|
+| `HANGFX3`  | `0xCE` | Level 4 | Sleeps `wValue` ms inside the EP0 vendor-callback thread.  `health_evaluate()` sees the handler exceed `EP0_HANDLER_TIMEOUT_MS` (2000 ms) and `health_recover()` calls `CyU3PDeviceReset(CyFalse)`. |
+| `HANGMAIN` | `0xCF` | Level 5 | Sets `glHealthHangMain`; the main loop spins forever on its next iteration, freezing `glMainHeartbeat`.  The WD-clear timer stops petting the FX3 HWDT, which fires after `HWDT_PERIOD_MS` (5000 ms) and hard-resets the device. |
+
+Both are driven by host-side scenarios that confirm recovery by watching
+`boot_count` (`GETSTATS` `[20..23]`) increment across the reset:
+
+- `fx3_cmd test_health_recovery` — HANGFX3 → Level-4 EP0 reset round-trip (#104, #105).
+- `fx3_cmd test_main_recovery` — HANGMAIN → Level-5 HWDT reset round-trip.
+
+These live in the soak rotation, not `fw_test.sh` (each takes a few
+seconds and re-uploads firmware after the reset).
+
 ---
 
 ## 6. Diagnostic Counters (GETSTATS)
@@ -350,14 +377,14 @@ Read-only EP0 vendor request (IN direction):
 bRequest = 0xB3 (GETSTATS)
 wValue   = 0
 wIndex   = 0
-wLength  = 26    (firmware sends exactly 26 bytes; host may request
+wLength  = 30    (firmware sends exactly 30 bytes; host may request
                   fewer and the firmware will truncate to the
                   requested length)
 ```
 
 ### Response Layout
 
-26 bytes, packed, little-endian (native ARM byte order):
+30 bytes, packed, little-endian (native ARM byte order):
 
 | Offset | Size | Field | Source |
 |--------|------|-------|--------|
@@ -371,6 +398,7 @@ wLength  = 26    (firmware sends exactly 26 bytes; host may request
 | 20--23 | 4 | `boot_count` | `health_boot_count()`; increments once per `health_init()`.  Use to detect mid-test resets (Level 4 `CyU3PDeviceReset`, Level 5 HWDT, manual `RESETFX3`, or power cycle): snapshot before, compare after, mismatch means the device reset. |
 | 24 | 1 | Si5351 CLK0_CONTROL (reg 16) | Live `I2cTransfer(0x10, 0xC0, …)`.  Bit 7 is `CLK0_PDN`: set means CLK0 is powered down, clear means CLK0 is enabled.  Returns `0xFF` if the I2C read fails. |
 | 25 | 1 | `clk0_result` | `si5351_clk0_enabled()` (1 = CLK0 enabled, 0 = disabled or I2C error).  Same value `GpifPreflightCheck()` consults at `STARTFX3` time. |
+| 26--29 | 4 | GPIO state | `rx888r2_ReadGpioState()` sampled at read time; packed with the same bit positions as the `GPIOFX3` control word (`enum GPIOPin`).  Lets the host confirm `SHDWN` is asserted after every teardown path (issue #131). |
 
 ### Counter Behavior
 
@@ -495,6 +523,8 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd stop_start_cycle` | Cycle STOP+START 5 times, verify bulk data flows each cycle | -- |
 | `fx3_cmd pll_preflight` | Verify STARTFX3 is rejected (STALL) when ADC clock is off | -- |
 | `fx3_cmd wedge_recovery` | Provoke DMA backpressure wedge, verify STOP+START recovers data flow | -- |
+| `fx3_cmd test_health_recovery` | HANGFX3 → Level-4 EP0 reset round-trip; verify `boot_count` increments | #104, #105 |
+| `fx3_cmd test_main_recovery` | HANGMAIN → Level-5 FX3 HWDT reset round-trip; verify `boot_count` increments | -- |
 | `fx3_cmd soak [N [seed]]` | Randomized stress test: N cycles (default 100) of random scenarios with health checks | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
@@ -526,7 +556,7 @@ Runs 36 tests (39 with streaming) in TAP format:
 | 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
 | 21 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 22 | GETSTATS readout | GETSTATS (0xB3) returns 26 bytes with sane values |
+| 22 | GETSTATS readout | GETSTATS (0xB3) returns 30 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
 | 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
 | 25 | GPIF stop state | GPIF SM state is 0, 1, or 255 after STOPFX3 (not stuck in read) |
@@ -564,7 +594,8 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
-| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery with recovery cap |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, `health_tick()` cascade driver |
+| `health.c` | Recovery cascade — EP0-wedge (L4), HWDT (L5), and the GPIF streaming watchdog detection + recovery with recovery cap (`health_evaluate` / `health_recover`) |
 | `tests/fx3_cmd.c` | Host-side vendor command tool, interactive debug console, soak test harness |
 | `tests/fw_test.sh` | Automated TAP test suite (36 tests + 3 streaming) |
 

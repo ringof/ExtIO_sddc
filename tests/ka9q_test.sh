@@ -10,7 +10,7 @@
 # sessions (issue #131).
 #
 # REQUIRES real hardware: an attached RX888mk2 and privileged Docker with
-# USB passthrough.  Never runs in CI.  See PLAN-KA9Q-HARNESS.md.
+# USB passthrough.  Never runs in CI.
 #
 # Design notes:
 #   * radiod runs inside a persistent, otherwise-idle container (CMD

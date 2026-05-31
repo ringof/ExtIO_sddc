@@ -115,6 +115,11 @@ the same list interactively.
 ./fx3_cmd abandoned_stream              # simulate host crash (no STOPFX3)
 ```
 
+> `test_health_recovery` / `test_main_recovery` deliberately reset the
+> device (Level 4 / Level 5) and re-upload firmware afterward, so they
+> run standalone or in the `soak` rotation but are **not** part of
+> `fw_test.sh`'s quick TAP pass.
+
 **Si5351 / ADC clock:**
 
 ```

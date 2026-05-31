@@ -17,9 +17,27 @@
  * handle it.  Do not pet HWDT from anywhere outside health_pet().
  */
 
+#ifdef HEALTH_HOST_TEST
+/* Host unit-test build (tests/host/): stub the FX3 SDK / DebugPrint
+ * surface so the real health.c logic can be exercised on a workstation
+ * with no SDK or hardware.  See tests/host/health_eval_test.c (#117). */
+#include "health_host_shim.h"
+#else
 #include "health.h"
 #include "cyu3os.h"
 #include "cyu3system.h"
+#include "Application.h"   /* DebugPrint, FIFO_DMA_RX_SIZE, CY_FX_EP_CONSUMER, SDK GPIF/DMA/USB APIs */
+#include "protocol.h"      /* WDG_MAX_RECOVERY_DEFAULT */
+#include "Si5351.h"        /* si5351_clk0_enabled / si5351_pll_locked (recovery gate) */
+#include "gpif_states.h"   /* GPIF_TH0_BUSY etc. */
+#endif
+
+/* Streaming-pipeline globals owned elsewhere, inspected and driven by the
+ * Level-1 streaming watchdog migrated into health_recover() (issue #115). */
+extern uint32_t glDMACount;                            /* StartStopApplication.c */
+extern uint32_t glCounter[20];                         /* DebugConsole.c */
+extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU; /* StartStopApplication.c */
+extern CyBool_t glIsApplnActive;                       /* RunApplication.c */
 
 /* If an EP0 vendor callback runs longer than this, declare it wedged
  * and reset the device.  Legitimate handlers complete in <100 ms
@@ -79,6 +97,19 @@ static volatile uint32_t glMainHeartbeat = 0;
 /* HANGMAIN test flag — set by the vendor handler in USBHandler.c,
  * read at the top of each main-loop iteration in RunApplication.c. */
 volatile uint8_t glHealthHangMain = 0;
+
+/* Level-1 streaming-watchdog recovery cap (migrated from RunApplication.c,
+ * issue #115).  glWdgMaxRecovery: 0 = unlimited, else stop attempting after
+ * N consecutive recoveries until health_reset_recovery_count() (STARTFX3 /
+ * STOPFX3) begins a fresh session. */
+static uint8_t glWdgMaxRecovery = WDG_MAX_RECOVERY_DEFAULT;
+static uint8_t glWdgRecoveryCount = 0;
+
+/* Streaming-stall sampler state — was static locals in the inline watchdog.
+ * glStallCount counts consecutive ~100 ms ticks with frozen DMA in a
+ * BUSY/WAIT state; glPrevDMACount is the previous glDMACount sample. */
+static uint32_t glPrevDMACount = 0;
+static uint8_t  glStallCount = 0;
 
 /* ThreadX timer used to pet the HWDT.  Per KB223337 the pet must
  * happen from a timer callback context, not from the main thread. */
@@ -157,9 +188,76 @@ void health_record_event(health_event_t event)
     }
 }
 
+void health_set_max_recovery(uint8_t max)
+{
+    glWdgMaxRecovery = max;
+}
+
+void health_reset_recovery_count(void)
+{
+    glWdgRecoveryCount = 0;
+}
+
+/* Level-1 streaming-stall detector.  Runs once per health_evaluate() tick
+ * (~10 Hz).  Samples glDMACount and the GPIF SM state, maintaining a
+ * 3-strike counter; returns CyTrue when the pipeline has been stuck in a
+ * BUSY/WAIT state with no DMA progress for 3 consecutive samples (~300 ms).
+ * The remedy lives in health_recover(HEALTH_WEDGED_STREAMING).  Migrated
+ * verbatim from the inline watchdog in RunApplication.c (issue #115); the
+ * `curDMA > 0` guard means a cold-start wedge (first buffer never arrives)
+ * is not yet detected — see #119 / #137. */
+static CyBool_t streaming_wedge_detected(void)
+{
+    uint32_t curDMA = glDMACount;
+
+    if (curDMA == glPrevDMACount && curDMA > 0)
+    {
+        uint8_t gpifState = 0xFF;
+        CyU3PGpifGetSMState(&gpifState);
+
+        if (gpifState == GPIF_TH0_BUSY || gpifState == GPIF_TH1_BUSY ||
+            gpifState == GPIF_TH1_WAIT || gpifState == GPIF_TH0_WAIT)
+        {
+            glStallCount++;
+            DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
+                glStallCount, gpifState, curDMA);
+            if (glStallCount >= 3)  /* 300ms in BUSY/WAIT */
+            {
+                glStallCount = 0;
+                return CyTrue;
+            }
+        }
+        else
+        {
+            if (glStallCount > 0)
+                DebugPrint(4, "\r\nWDG: stall cleared SM=%d (was %d/3)",
+                    gpifState, glStallCount);
+            glStallCount = 0;
+        }
+    }
+    else
+    {
+        if (glStallCount > 0)
+            DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
+                glPrevDMACount, curDMA);
+        glStallCount = 0;
+        glPrevDMACount = curDMA;
+    }
+    return CyFalse;
+}
+
 health_status_t health_evaluate(void)
 {
-    /* PR 2: one signal — EP0 handler duration vs timeout. */
+    /* Level 4 — EP0 handler duration vs timeout, checked FIRST.  An EP0
+     * deadlock takes precedence (it resets the whole device), and the
+     * remedy must make NO SDK/debug call before CyU3PDeviceReset() — the
+     * wedged vendor callback may itself be stuck inside an SDK call
+     * holding a lock.  So return HEALTH_WEDGED_EP0 before the streaming
+     * sampler below, which calls CyU3PGpifGetSMState()/DebugPrint() and
+     * could otherwise contend with that wedged call (the EP0 handlers
+     * most likely to hang — STOPFX3/STARTFX3/STARTADC — touch the same
+     * GPIF/DMA block).  This restores the pre-#115 ordering where the
+     * EP0 check/recover ran before the streaming watchdog. */
     if (glHealthState.ep0_handler_in_progress) {
         uint32_t now = CyU3PGetTime();
         uint32_t enter = glHealthState.ep0_handler_enter_ms;
@@ -169,6 +267,14 @@ health_status_t health_evaluate(void)
             return HEALTH_WEDGED_EP0;
         }
     }
+
+    /* Level 1 — advance the streaming-stall sampler.  Runs every tick
+     * while streaming is active and EP0 is not already overdue, so its
+     * state machine keeps advancing in normal operation. */
+    if (glIsApplnActive && streaming_wedge_detected()) {
+        return HEALTH_WEDGED_STREAMING;
+    }
+
     return HEALTH_OK;
 }
 
@@ -187,6 +293,66 @@ void health_recover(health_status_t status)
              * SDK call may itself be the thing hung, so avoid waiting. */
             CyU3PDeviceReset(CyFalse);
             /* Should not return. */
+            break;
+
+        case HEALTH_WEDGED_STREAMING:
+            /* Level 1 — streaming pipeline wedged in BUSY/WAIT with no DMA
+             * progress.  Soft-stop (force-stop fallback), reset the DMA
+             * channel + flush EP, and restart the GPIF SM if the ADC clock
+             * is healthy.  Migrated verbatim from RunApplication.c (#115). */
+            if (glWdgMaxRecovery > 0 && glWdgRecoveryCount >= glWdgMaxRecovery)
+            {
+                DebugPrint(4, "\r\nWDG: recovery limit (%d), waiting for STARTFX3",
+                    glWdgMaxRecovery);
+                return;
+            }
+            {
+                CyU3PReturnStatus_t rc_reset, rc_flush;
+                CyU3PReturnStatus_t rc_xfer = 0, rc_sm = 0;
+                CyBool_t hw_ok;
+                uint8_t smState = 0xFF;
+                uint32_t curDMA = glDMACount;
+
+                CyU3PGpifGetSMState(&smState);
+                glWdgRecoveryCount++;
+                DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u recov=%d/%d",
+                    smState, curDMA, glWdgRecoveryCount, glWdgMaxRecovery);
+                /* Soft-stop: deassert FW_TRG so the SM exits to IDLE via the
+                 * !FW_TRG transitions.  Caveat: soft-stop needs the external
+                 * clock to advance the SM; if the Si5351 is dead or PLL
+                 * unlocked the SM can't transition and soft-stop fails — fall
+                 * back to force-stop. */
+                CyU3PGpifControlSWInput(CyFalse);
+                CyU3PThreadSleep(1);
+                smState = 0xFF;
+                CyU3PGpifGetSMState(&smState);
+                if (smState == GPIF_IDLE) {
+                    CyU3PGpifDisable(CyFalse);
+                } else {
+                    DebugPrint(4, "\r\nWDG: soft-stop fail SM=%d, forcing", smState);
+                    CyU3PGpifDisable(CyTrue);
+                }
+
+                rc_reset = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
+                rc_flush = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
+
+                /* Only restart streaming if the ADC clock is healthy — a
+                 * soft-stop with a dead clock leaves the SM unable to move. */
+                hw_ok = si5351_clk0_enabled() && si5351_pll_locked();
+                if (hw_ok)
+                {
+                    rc_xfer = CyU3PDmaMultiChannelSetXfer(
+                        &glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
+                    rc_sm = CyU3PGpifSMStart(0, 0);
+                    CyU3PGpifControlSWInput(CyTrue);
+                }
+                glCounter[2]++;  /* streaming fault counter — GETSTATS [15..18];
+                                  * also incremented by EP_UNDERRUN in USBHandler.c */
+                DebugPrint(4, "\r\nWDG: === RECOVERY %s === rst=%d flush=%d xfer=%d sm=%d",
+                    hw_ok ? "DONE" : "WAIT", rc_reset, rc_flush, rc_xfer, rc_sm);
+                glPrevDMACount = 0;
+                glDMACount = 0;
+            }
             break;
 
         case HEALTH_OK:

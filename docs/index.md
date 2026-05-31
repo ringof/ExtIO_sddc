@@ -99,11 +99,11 @@ and [host application compatibility]({{ '/compatibility/' | relative_url }}).
 
 ### Exposing FX3 firmware counters to a host application
 
-`GETSTATS` (`0xB3`) is a 26-byte EP0 vendor read that returns DMA
+`GETSTATS` (`0xB3`) is a 30-byte EP0 vendor read that returns DMA
 buffer count, GPIF state, PIB error counts, I2C failure counts,
 streaming-fault count, Si5351 PLL status, a boot counter (for
-mid-test reset detection), and Si5351 CLK0 raw register plus the
-chip-query boolean.  Drop-in pattern for any FX3 firmware that
+mid-test reset detection), Si5351 CLK0 raw register plus the
+chip-query boolean, and packed GPIO state.  Drop-in pattern for any FX3 firmware that
 needs a host-readable health view.  See
 [USB API reference]({{ '/api/' | relative_url }}) (GETSTATS section)
 and the [diagnostics side-channel]({{ '/diagnostics_side_channel/' | relative_url }})

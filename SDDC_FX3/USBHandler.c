@@ -18,6 +18,8 @@
 
 #include "health.h"
 
+#include "gpif_states.h"
+
 /* Settle time after waking the ADC from SHDN standby before the GPIF
  * state machine starts clocking samples (issue #131). A few ms is well
  * within the host's start-command tolerance. */
@@ -44,8 +46,6 @@ extern uint8_t glBufDebug[MAXLEN_D_USB];
 extern uint32_t glCounter[20];
 extern uint16_t glLastPibArg;
 extern uint32_t glDMACount;
-extern uint8_t glWdgMaxRecovery;
-extern uint8_t glWdgRecoveryCount;
 
 
 
@@ -229,7 +229,7 @@ CyFxSlFifoApplnUSBSetupCB (
 						{
 							uint8_t smState = 0xFF;
 							CyU3PGpifGetSMState(&smState);
-							if (smState != 0 && smState != 0xFF) {
+							if (smState != GPIF_RESET && smState != 0xFF) {
 								DebugPrint(4, "\r\nSTARTADC: implicit GPIF stop (SM=%d)", smState);
 								CyU3PGpifControlSWInput(CyFalse);
 								CyU3PGpifDisable(CyTrue);
@@ -353,7 +353,7 @@ CyFxSlFifoApplnUSBSetupCB (
 							isHandled = CyTrue;
 							break;
 						case WDG_MAX_RECOV:
-							glWdgMaxRecovery = (uint8_t)(wValue & 0xFF);
+							health_set_max_recovery((uint8_t)(wValue & 0xFF));
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
@@ -414,7 +414,7 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * what is actually wrong — the symptom it masked was an
 				 * xHCI endpoint-ring issue fixed host-side by clear_halt. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
-				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
+				health_reset_recovery_count();  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
 				if (apiRetStatus == CY_U3P_SUCCESS) {
 					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
@@ -448,7 +448,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint8_t smState = 0xFF;
 						CyU3PGpifGetSMState(&smState);
-						if (smState == 1 /* IDLE */) {
+						if (smState == GPIF_IDLE) {
 							CyU3PGpifDisable(CyFalse);
 						} else {
 							DebugPrint(4, "\r\nSTP soft-stop fail SM=%d, forcing", smState);
@@ -458,7 +458,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
-					glWdgRecoveryCount = 0;  /* reset recovery cap */
+					health_reset_recovery_count();  /* reset recovery cap */
 					/* No longer streaming — park the ADC in low-power
 					 * standby via SHDN (issue #131). */
 					rx888r2_AdcStandby(CyTrue);

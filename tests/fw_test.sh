@@ -203,7 +203,8 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 
 # ---- Test Plan ----
 
-# Tests: 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
+# Tests: 1 host unit test (health_evaluate invariants, hardware-free)
+#      + 1 upload + 1 probe + 1 gpio + 1 adc + 2 att + 2 vga + 1 stop
 #      + 3 stale commands + 1 i2c_nack + 1 adc_off
 #      + 1 ep0_overflow + 5 debug/OOB tests + 1 stack check
 #      + 2 GETSTATS (readout + I2C) + 1 GETSTATS PLL + 1 GETSTATS SHDN (#131)
@@ -214,11 +215,22 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 #      + 1 PIB overflow + 1 GETSTATS PIB
 #      + optional streaming (3 checks)
 # NOTE: pib_overflow wedges DMA/GPIF — run all clean-state tests first
-PLANNED=37
+PLANNED=38
 if [[ $SKIP_STREAM -eq 0 ]]; then
     PLANNED=$((PLANNED + 3))
 fi
 echo "1..$PLANNED"
+
+# ==================================================================
+# 0. Host unit tests (hardware-free) — run before touching the device.
+#    Pure-logic checks like the health_evaluate() cascade-ordering
+#    invariant that the on-hardware soak can't deterministically reach.
+# ==================================================================
+if health_out=$(make -s -C "$SCRIPT_DIR" check-health 2>&1); then
+    tap_ok "host unit tests: health_evaluate() invariants (make check-health)"
+else
+    tap_fail "host unit tests: health_evaluate() invariants failed" "$health_out"
+fi
 
 # ==================================================================
 # 1. Firmware upload via rx888_stream

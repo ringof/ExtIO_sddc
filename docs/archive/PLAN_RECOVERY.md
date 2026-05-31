@@ -5,8 +5,8 @@
 > see `README.md` §"Firmware Robustness" for the canonical current
 > description of the implemented cascade.  The one remaining item — §5
 > "PR N (deferred)", migrating the existing streaming watchdog from
-> `RunApplication.c` into `health_recover(WEDGED_STREAMING)` — is now
-> tracked as issue #115.
+> `RunApplication.c` into `health_recover(HEALTH_WEDGED_STREAMING)` —
+> has since landed (#115); the watchdog now lives in `health.c`.
 
 ## 1. Context and motivation
 
