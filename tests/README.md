@@ -231,6 +231,43 @@ Type `!` to switch to local command mode.  This lets you run any
 Debug output polling continues between commands.  Some test commands
 take several seconds; output is paused during execution.
 
+### Seeded fuzzing (`protocol_fuzz`, `stream_fuzz`)
+
+Black-box, **input-fuzz** testing of the USB interface (issue #139) — as
+opposed to the scenario-random `soak`.  Both use a reproducible PRNG
+independent of the soak's `rand()`, so a printed seed replays a run exactly.
+Individual STALLs are expected and only logged; the PASS/FAIL gate is a
+periodic health probe (`TESTFX3` + `GETSTATS`).  On a health failure they
+print a **failure log**: the seed, the last ≤32 generated operations
+(decoded), the failure-time `GETSTATS`, and which PID (app/bootloader/none)
+is visible — enough to reproduce with the same seed.
+
+```
+./fx3_cmd protocol_fuzz [ops] [seed]     # default 5000 ops
+./fx3_cmd stream_fuzz   [secs] [seed]    # default 60 s
+./fx3_cmd protocol_fuzz 5000 0x12345678  # reproducible run
+```
+
+**`protocol_fuzz`** generates random EP0 control transfers: `bRequest`
+(biased to the known command set, plus unknown codes), `bmRequestType`
+(fully fuzzed **direction** and **recipient**), `wValue`/`wIndex`, `wLength`
+(0 / short / exact / larger-than-EP0-buffer), and OUT payloads.  It ends with
+a per-command **coverage report** (sends / accepts / STALLs / errors / IN /
+OUT / oversize / during-stream, plus resets observed).  It is
+**non-destructive**: `RESETFX3`/`HANGFX3`/`HANGMAIN` are remapped out, and the
+`bmRequestType` *type* field is held at VENDOR (standard/class requests are
+serviced by the Cypress SDK enumeration layer, not the firmware under test,
+and fuzzing them can deconfigure the device — full type fuzzing is a
+documented follow-up).
+
+**`stream_fuzz`** drives the bulk endpoint and host lifecycle: async reads of
+random sizes (1 B … 1 MiB) and timeouts, random cancellation, `STOPFX3`/EP0
+ops while reads are in flight, release/re-claim and close/reopen cycles, and
+abandon windows — then checks the device returns to a healthy, bounded state.
+
+Both are also wired into the `soak` rotation as bounded, low-weight bursts
+(`protocol_fuzz_burst`, `stream_fuzz_burst`) seeded from the soak seed.
+
 ### Soak test (multi-hour stress)
 
 ```
@@ -461,7 +498,12 @@ exclude them.
 
 | File | Purpose |
 |------|---------|
-| `fx3_cmd.c` | Vendor command exerciser, test harness, soak test, `usbreset`/`reload` |
+| `fx3_cmd.c` | Vendor command exerciser, scenarios, soak test, `usbreset`/`reload`, `main()` |
+| `fx3_proto.h` | Shared protocol constants (IDs, command codes, GPIO/arg masks) |
+| `fx3_usb.{c,h}` | USB transport + device open/close/upload helpers |
+| `fx3_stats.{c,h}` | `GETSTATS` decoding (`struct fx3_stats`, `read_stats`) |
+| `fx3_bulk.{c,h}` | Bulk (EP1-IN) read helpers (primed async start-and-read) |
+| `fx3_fuzz.{c,h}` | Seeded `protocol_fuzz` / `stream_fuzz` + coverage/failure log (#139) |
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |

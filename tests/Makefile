@@ -23,8 +23,15 @@ RX888_STREAM_BIN := $(RX888_TOOLS)/rx888_stream
 
 all: fx3_cmd rx888_stream
 
-fx3_cmd: fx3_cmd.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+# fx3_cmd is built from several modules (issue #139 modularization start).
+FX3_OBJS := fx3_cmd.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o
+FX3_HDRS := fx3_proto.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h
+
+fx3_cmd: $(FX3_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(FX3_OBJS) $(LDLIBS)
+
+%.o: %.c $(FX3_HDRS)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
@@ -46,7 +53,7 @@ check-health: $(HOST_HEALTH_BIN)
 	./$(HOST_HEALTH_BIN)
 
 clean:
-	rm -f fx3_cmd rx888_stream $(HOST_HEALTH_BIN)
+	rm -f fx3_cmd $(FX3_OBJS) rx888_stream $(HOST_HEALTH_BIN)
 	$(MAKE) -C $(RX888_TOOLS) clean 2>/dev/null || true
 
 .PHONY: all clean rx888_stream check-health

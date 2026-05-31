@@ -47,6 +47,19 @@ identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
 
 ### Added
 
+- **Seeded USB/vendor-command fuzzing for the host test suite.** New
+  `tests/fx3_cmd protocol_fuzz` (seeded EP0 control-transfer fuzzer:
+  `bmRequestType` direction/recipient, `bRequest`, `wValue`/`wIndex`,
+  `wLength`, payload) and `stream_fuzz` (seeded bulk + host-lifecycle fuzzer:
+  random read sizes/timeouts, cancellation, EP0 ops while reads pending,
+  close/reopen, abandon). Both add a reproducible PRNG, an operation
+  ring-buffer **failure log** (seed + last 32 ops + failure-time GETSTATS +
+  visible PID) and a per-command **coverage report**, and run in the `soak`
+  rotation as bounded low-weight bursts. A first step on modularizing the
+  host harness landed alongside: the shared USB/stats/bulk layers moved out
+  of `fx3_cmd.c` into `fx3_proto.h` / `fx3_usb` / `fx3_stats` / `fx3_bulk`,
+  and the fuzzer into `fx3_fuzz`, behind a multi-object build. Host-side test
+  tooling only — no firmware change. (#139)
 - **ADC low-power standby when idle.** The firmware now drives the ADC
   `SHDN` line from the streaming state: the ADC is parked in low-power
   standby at boot and on `STOPFX3`, and woken on `STARTFX3` (with a short
