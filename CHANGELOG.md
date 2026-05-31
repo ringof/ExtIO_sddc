@@ -47,6 +47,18 @@ identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
 
 ### Added
 
+- **Cold-start wedge detection + autonomous reset recovery.** The
+  streaming watchdog now also detects a *cold-start* wedge — the GPIF SM
+  left IDLE (a stream was commanded) but the first DMA buffer never
+  arrives (`glDMACount` frozen at 0 for ~500 ms) — which the previous
+  `curDMA > 0` guard could not see (#119). Light recovery is tried first;
+  if it can't clear it (the cap exhausts), `health_recover` escalates to
+  `CyU3PDeviceReset`, gated on a healthy ADC clock and limited to once per
+  session. Post-stream backpressure stalls and abandoned streams are
+  unaffected — they still cap-and-wait (escalation is cold-start-only). On
+  by default; disable at runtime via the new `WDG_RESET_ESCALATE`
+  SETARGFX3 arg (15). Adds a test-only `HANGCOLDSTART` (0xD0) command for
+  deterministic bench validation. (#137, #119)
 - **ADC low-power standby when idle.** The firmware now drives the ADC
   `SHDN` line from the streaming state: the ADC is parked in low-power
   standby at boot and on `STOPFX3`, and woken on `STARTFX3` (with a short

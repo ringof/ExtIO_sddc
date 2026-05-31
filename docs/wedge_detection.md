@@ -146,9 +146,20 @@ per interval.  A zero-delta is an unambiguous stall indicator.
 **Implementation:** The GPIF watchdog in `SDDC_FX3/health.c`
 (`health_evaluate()`'s `streaming_wedge_detected()`, sampled once per
 ~100 ms main-loop tick) uses `glDMACount` delta == 0 as the first
-trigger condition.  The count
-must also be > 0 (streaming has started) to avoid false triggers
-on idle devices.
+trigger condition.  Two cases are distinguished:
+
+- **Post-stream stall** — `glDMACount > 0` frozen with the SM in a
+  BUSY/WAIT state for ≥3 ticks (~300 ms).  Light recovery clears it
+  (host back-pressure, etc.).
+- **Cold-start wedge** (#119, #137) — `glDMACount` frozen at **0** while
+  the SM is in an active streaming state (left IDLE, i.e. `STARTFX3` ran)
+  for ≥5 ticks (~500 ms): the SM came up but the first DMA buffer never
+  arrived.  The longer grace window avoids flagging a healthy bring-up
+  before its first buffer.  Light recovery is tried first; if the cap
+  exhausts, `health_recover()` escalates to `CyU3PDeviceReset` (clock-
+  health-gated, once per session, disable-able via `WDG_RESET_ESCALATE`).
+
+An idle device (SM in IDLE/RESET, `glDMACount == 0`) is **not** flagged.
 
 ### 3. GPIF state machine polling
 

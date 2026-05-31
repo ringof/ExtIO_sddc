@@ -186,6 +186,16 @@ a new evaluation branch — not writing a new watchdog.
   (`health_evaluate` / `health_recover`) detects and recovers; observed
   reliable across `wedge_recovery` scenarios in `fw_test.sh` and the
   soak rotation.
+- **Cold-start streaming wedges** — the GPIF SM left IDLE (a stream was
+  commanded) but the first DMA buffer never arrives (`glDMACount` frozen
+  at 0 for ~500 ms).  `health_evaluate()` detects it; light recovery is
+  tried, and if it can't clear it the cap exhausts and
+  `health_recover()` escalates to `CyU3PDeviceReset` — gated on a healthy
+  ADC clock, once per session, and disable-able via the
+  `WDG_RESET_ESCALATE` arg.  Post-stream backpressure / abandoned streams
+  are unaffected (they cap-and-wait).  Validated by the
+  `test_coldstart_recovery` host scenario (firmware-side `HANGCOLDSTART`)
+  and the `health_eval_test` host unit test (#137, #119).
 - **EP0 vendor-handler hangs** — a vendor request callback wedged
   inside an SDK call for >2 s.  `health_evaluate()` detects via the
   EP0 enter/exit timestamp; `health_recover(HEALTH_WEDGED_EP0)` fires
