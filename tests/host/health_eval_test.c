@@ -182,6 +182,44 @@ int main(void)
     reset_counts();
     CHECK(health_evaluate() == HEALTH_OK, "advancing DMA -> HEALTH_OK");
 
+    /* ========== #137: GPIF state classification (per-state) ==========
+     * Lock the two classifier helpers against a typo or a gpif_states.h
+     * regeneration drift: every one of the 10 SM states must land in the
+     * intended class.  streaming-active = "left RESET/IDLE" (2..9);
+     * busy/wait = the four back-pressure states (5,7,8,9). */
+    {
+        struct { uint8_t st; const char *name; int active; int busy_wait; } S[] = {
+            { GPIF_RESET,     "RESET",     0, 0 },
+            { GPIF_IDLE,      "IDLE",      0, 0 },
+            { GPIF_TH0_RD,    "TH0_RD",    1, 0 },
+            { GPIF_TH1_RD_LD, "TH1_RD_LD", 1, 0 },
+            { GPIF_TH0_RD_LD, "TH0_RD_LD", 1, 0 },
+            { GPIF_TH0_BUSY,  "TH0_BUSY",  1, 1 },
+            { GPIF_TH1_RD,    "TH1_RD",    1, 0 },
+            { GPIF_TH1_BUSY,  "TH1_BUSY",  1, 1 },
+            { GPIF_TH1_WAIT,  "TH1_WAIT",  1, 1 },
+            { GPIF_TH0_WAIT,  "TH0_WAIT",  1, 1 },
+        };
+        int n = (int)(sizeof(S) / sizeof(S[0]));
+        CHECK(n == 10, "classifier: all 10 GPIF states enumerated");
+        int active_ok = 1, bw_ok = 1;
+        for (int i = 0; i < n; i++) {
+            if (gpif_state_is_streaming_active(S[i].st) != S[i].active) {
+                printf("#   gpif_state_is_streaming_active(%s) wrong\n", S[i].name);
+                active_ok = 0;
+            }
+            if (gpif_state_is_busy_wait(S[i].st) != S[i].busy_wait) {
+                printf("#   gpif_state_is_busy_wait(%s) wrong\n", S[i].name);
+                bw_ok = 0;
+            }
+        }
+        CHECK(active_ok, "classifier: gpif_state_is_streaming_active matches all 10 states");
+        CHECK(bw_ok,     "classifier: gpif_state_is_busy_wait matches all 10 states");
+        /* The two invalid/sentinel reads must classify as neither. */
+        CHECK(!gpif_state_is_streaming_active(0xFF) && !gpif_state_is_busy_wait(0xFF),
+              "classifier: 0xFF (GetSMState failure sentinel) is neither");
+    }
+
     /* ================= #137: cold-start detection ================= */
 
     /* C1: DMA==0 but SM IDLE (not streaming) -> never wedges. */
