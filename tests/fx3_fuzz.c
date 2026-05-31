@@ -198,22 +198,20 @@ static void fuzz_coverage_report(const struct fuzz_log *log)
 /* ------------------------------------------------------------------ */
 #define FUZZ_HWCONFIG_BAD (-1000)   /* sentinel: device alive but hwconfig wrong */
 
-/* Returns 0 healthy, a negative libusb code, or FUZZ_HWCONFIG_BAD. Records a
- * reset when boot_count moves between probes. */
-static int fuzz_health(libusb_device_handle *h, struct fuzz_log *log,
-                       uint32_t *boot_seen)
+/* Raw health probe: TESTFX3 (alive, hwconfig) + GETSTATS (records a reset
+ * when boot_count moves).  No retry, no gate counters — see fuzz_gate. */
+static int fuzz_probe(libusb_device_handle *h, struct fuzz_log *log,
+                      uint32_t *boot_seen)
 {
-    log->health_checks++;
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
-    if (r < 0) { log->health_fails++; return r; }
-    if (r >= 1 && info[0] != 0x04) {   /* hwconfig: RX888r2 (matches soak_health_check) */
-        log->health_fails++; return FUZZ_HWCONFIG_BAD;
-    }
+    if (r < 0) return r;
+    if (r >= 1 && info[0] != 0x04)   /* hwconfig: RX888r2 (matches soak_health_check) */
+        return FUZZ_HWCONFIG_BAD;
 
     struct fx3_stats s;
     r = read_stats(h, &s);
-    if (r < 0) { log->health_fails++; return r; }
+    if (r < 0) return r;
     if (*boot_seen && s.boot_count != *boot_seen) log->resets++;
     *boot_seen = s.boot_count;
     return 0;
@@ -229,6 +227,45 @@ static int fuzz_reacquire(libusb_device_handle **h)
     libusb_device_handle *fresh = open_rx888(g_ctx);
     if (fresh) { *h = fresh; return 0; }
     return -1;
+}
+
+/* Health gate — mirrors soak_health_check's proven recovery handling.
+ *
+ * A fuzzed STARTFX3 can leave the device streaming with no EP1 consumer; the
+ * firmware's streaming watchdog then churns through its recovery cap, during
+ * which EP0 control transfers transiently return EIO/timeout.  A single-shot
+ * probe races that recovery (the device is alive, just busy), so on a
+ * transient failure we STOP, give the watchdog the established ~2 s window,
+ * and probe once more before declaring failure.  Only a definitive NO_DEVICE
+ * (re-enumeration) triggers a re-acquire — and only outside quiet/burst mode,
+ * where the soak's own safety net owns recovery.
+ *
+ * Returns 0 healthy, else the last probe's status.  Counts one health check
+ * per gate; a fail is counted only when the gate ultimately fails. */
+static int fuzz_gate(libusb_device_handle **h, struct fuzz_log *log,
+                     uint32_t *boot, int quiet)
+{
+    log->health_checks++;
+    cmd_u32(*h, STOPFX3, 0);          /* halt any abandoned stream */
+    usleep(100000);                   /* 100 ms — let GPIF/DMA quiesce */
+    int hc = fuzz_probe(*h, log, boot);
+    if (hc == 0) return 0;
+
+    if (hc != LIBUSB_ERROR_NO_DEVICE) {
+        usleep(2000000);              /* 2 s watchdog recovery window */
+        cmd_u32(*h, STOPFX3, 0);
+        hc = fuzz_probe(*h, log, boot);
+        if (hc == 0) return 0;
+    }
+
+    if (hc == LIBUSB_ERROR_NO_DEVICE && !quiet && fuzz_reacquire(h) == 0) {
+        log->resets++;
+        hc = fuzz_probe(*h, log, boot);
+        if (hc == 0) return 0;
+    }
+
+    log->health_fails++;
+    return hc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -312,7 +349,7 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
     }
 
     uint32_t boot = 0;
-    if (fuzz_health(h, &log, &boot) != 0) {
+    if (fuzz_gate(&h, &log, &boot, quiet) != 0) {
         printf("FAIL protocol_fuzz: device unhealthy before start\n");
         *h_inout = h;
         return 1;
@@ -323,17 +360,8 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
         protocol_fuzz_step(h, &rng, &log, /*streaming=*/0);
 
         if ((i + 1) % 64 == 0) {
-            /* Stop any streaming a fuzzed STARTFX3 may have begun, then probe. */
-            cmd_u32(h, STOPFX3, 0);
-            int hc = fuzz_health(h, &log, &boot);
+            int hc = fuzz_gate(&h, &log, &boot, quiet);
             if (hc != 0) {
-                if (!quiet && hc == LIBUSB_ERROR_NO_DEVICE &&
-                    fuzz_reacquire(&h) == 0) {
-                    printf("# protocol_fuzz: device re-enumerated (reset) "
-                           "at op %ld — recorded, continuing\n", i + 1);
-                    fuzz_health(h, &log, &boot);
-                    continue;
-                }
                 printf("FAIL protocol_fuzz: health gate failed at op %ld (%s)\n",
                        i + 1, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
                                                       : libusb_strerror(hc));
@@ -460,7 +488,7 @@ static int stream_fuzz_core(libusb_device_handle **h_inout, double seconds,
     }
 
     uint32_t boot = 0;
-    if (fuzz_health(h, &log, &boot) != 0) {
+    if (fuzz_gate(&h, &log, &boot, quiet) != 0) {
         printf("FAIL stream_fuzz: device unhealthy before start\n");
         *h_inout = h;
         return 1;
@@ -554,18 +582,10 @@ static int stream_fuzz_core(libusb_device_handle **h_inout, double seconds,
         /* Periodic health gate. */
         if (elapsed >= next_gate) {
             next_gate = elapsed + 1.0;
-            cmd_u32(h, STOPFX3, 0);
             sf_drain(pool);
             streaming = 0;
-            int hc = fuzz_health(h, &log, &boot);
+            int hc = fuzz_gate(&h, &log, &boot, quiet);
             if (hc != 0) {
-                if (!quiet && hc == LIBUSB_ERROR_NO_DEVICE &&
-                    fuzz_reacquire(&h) == 0) {
-                    printf("# stream_fuzz: device re-enumerated (reset) "
-                           "at %.1fs — recorded, continuing\n", elapsed);
-                    fuzz_health(h, &log, &boot);
-                    continue;
-                }
                 printf("FAIL stream_fuzz: health gate failed at %.1fs (%s)\n",
                        elapsed, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
                                                         : libusb_strerror(hc));
