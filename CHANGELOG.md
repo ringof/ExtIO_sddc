@@ -15,14 +15,35 @@ below where it changes.
 
 ## [Unreleased]
 
+Firmware version **2.4** (`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=4`),
+identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
+
 ### Changed
 
+- **Firmware-reported version bumped 2.3 → 2.4** (`FIRMWARE_VER_MINOR` in
+  `SDDC_FX3/protocol.h`) to mark the 0.1.1 firmware. Wire format unchanged
+  (`TESTFX3` still returns `major.minor`).
+- **Streaming watchdog moved into the health module.** The Level-1
+  DMA-stall watchdog was migrated out of `RunApplication.c`'s main loop
+  into `SDDC_FX3/health.c`, behind the `health_evaluate()` /
+  `health_recover(HEALTH_WEDGED_STREAMING)` cascade interface; the
+  recovery cap moved with it (`health_set_max_recovery()` /
+  `health_reset_recovery_count()`). Behaviour-preserving; validated by a
+  3-hour soak. (#115)
 - **GPIF state checks now use named constants.** The streaming watchdog
-  (`RunApplication.c`) and the `STOPFX3` / `STARTADC` stop paths
-  (`USBHandler.c`) previously compared the `CyU3PGpifGetSMState()` result
-  against raw numeric literals (`5`, `7`, `8`, `9`, `1`, `0`). These now
-  use named macros from a new `SDDC_FX3/gpif_states.h` that mirrors the
-  state indices generated into `SDDC_GPIF.h`. No behavior change. (#116)
+  and the `STOPFX3` / `STARTADC` stop paths (`USBHandler.c`) previously
+  compared the `CyU3PGpifGetSMState()` result against raw numeric literals
+  (`5`, `7`, `8`, `9`, `1`, `0`). These now use named macros from a new
+  `SDDC_FX3/gpif_states.h` that mirrors the state indices generated into
+  `SDDC_GPIF.h`. No behavior change. (#116)
+
+### Fixed
+
+- **`INT32_MIN` undefined behaviour in the debug `%d` formatter.**
+  `MyDebugSNPrint` negated a negative `int32_t` in place to get its
+  magnitude — signed-overflow UB for `INT32_MIN`. It now computes the
+  magnitude in unsigned space; output is byte-identical for all inputs.
+  Debug-console path only. (#117)
 
 ### Added
 
