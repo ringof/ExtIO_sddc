@@ -189,18 +189,24 @@ static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
  * next SETUP packet, but the FX3 occasionally races that clear, so the
  * immediately-following control transfer can return LIBUSB_ERROR_PIPE
  * even though the device is alive and answers the very next request
- * (~0.1% of cycles — issue #135).  These scenarios verify device
- * *survival*, not EP0 stall timing, so tolerate a single transient PIPE:
- * retry once (the retry's own SETUP clears the stale stall).  A
- * genuinely wedged EP0 stays stalled and fails both attempts, so this
- * does not mask a real hang.  Returns the libusb rc of a TESTFX3 read
- * (>= 0 means the device is alive). */
+ * (issue #135).  These scenarios verify device *survival*, not EP0 stall
+ * timing, so tolerate a transient PIPE and retry — each retry's own SETUP
+ * clears the stale stall.
+ *
+ * A single 2 ms retry cleared oob_setarg, but a 3-hour soak still caught
+ * i2c_write_bad_addr once: its stall comes via isHandled=CyFalse (SDK
+ * auto-stall *after* the handler returns) plus the failed I2cTransfer's
+ * bus latency, a longer/later stall window than oob_setarg's explicit
+ * CyU3PUsbStall.  So retry up to 3 times with escalating backoff
+ * (2/4/8 ms).  A genuinely wedged EP0 stays stalled and fails every
+ * attempt, so this still does not mask a real hang.  Returns the libusb
+ * rc of a TESTFX3 read (>= 0 means the device is alive). */
 static int ep0_alive_after_stall(libusb_device_handle *h)
 {
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
-    if (r == LIBUSB_ERROR_PIPE) {
-        usleep(2000);  /* let the controller settle the stall-clear */
+    for (int i = 0; r == LIBUSB_ERROR_PIPE && i < 3; i++) {
+        usleep(2000 << i);  /* 2, 4, 8 ms — let the controller settle the stall-clear */
         r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     }
     return r;
