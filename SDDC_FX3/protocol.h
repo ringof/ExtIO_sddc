@@ -8,7 +8,7 @@
 #pragma once
 
 #define FIRMWARE_VER_MAJOR 2
-#define FIRMWARE_VER_MINOR 4
+#define FIRMWARE_VER_MINOR 5
 
 /* USB vendor request command codes (bRequest field in SETUP packet) */
 enum FX3Command {
