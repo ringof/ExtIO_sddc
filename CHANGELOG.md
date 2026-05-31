@@ -54,8 +54,10 @@ identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
   random read sizes/timeouts, cancellation, EP0 ops while reads pending,
   close/reopen, abandon). Both add a reproducible PRNG, an operation
   ring-buffer **failure log** (seed + last 32 ops + failure-time GETSTATS +
-  visible PID) and a per-command **coverage report**, and run in the `soak`
-  rotation as bounded low-weight bursts. A first step on modularizing the
+  visible PID) and a per-command **coverage report**. They run standalone
+  (kept out of the unattended `soak` rotation: on hardware `protocol_fuzz`
+  found that malformed/wrong-direction vendor EP0 requests can corrupt the
+  device into needing a re-flash — issue #142). A first step on modularizing the
   host harness landed alongside: the shared USB/stats/bulk layers moved out
   of `fx3_cmd.c` into `fx3_proto.h` / `fx3_usb` / `fx3_stats` / `fx3_bulk`,
   and the fuzzer into `fx3_fuzz`, behind a multi-object build. Host-side test

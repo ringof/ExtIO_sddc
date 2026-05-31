@@ -4513,14 +4513,17 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * subsequent scenarios, so it stays fw_test.sh-only. */
         {"gpif_soft_stop",      do_test_gpif_soft_stop,       3, 0, 0, 0},
         {"stop_under_backpressure", do_test_stop_under_backpressure, 3, 0, 0, 0},
-        /* Seeded fuzzers (issue #139) as bounded bursts.  Low weight (3) and
-         * non-destructive by construction (protocol_fuzz remaps RESETFX3/
-         * HANGFX3/HANGMAIN away; stream_fuzz never re-enumerates), so they
-         * add input-fuzz coverage to the rotation without destabilizing it.
-         * The burst seed derives from the soak's rand(), so a soak seed still
-         * reproduces the run. */
-        {"protocol_fuzz_burst", do_test_protocol_fuzz_burst,   3, 0, 0, 0},
-        {"stream_fuzz_burst",   do_test_stream_fuzz_burst,     3, 0, 0, 0},
+        /* NOTE: the seeded fuzzers (protocol_fuzz_burst / stream_fuzz_burst,
+         * issue #139) are deliberately NOT in this rotation.  Hardware soak
+         * (seed 42) showed protocol_fuzz can drive the device into an
+         * EP0-corrupted state (hwconfig reads 0xF0, GETSTATS garbage) that
+         * needs a firmware re-upload to clear — see issue #142 — which then
+         * contaminates the following scenarios (wedge_recovery STOPFX3
+         * timeout, abandoned_stream cap miss).  A test that can require a
+         * re-flash does not belong in the unattended soak; the fuzzers run
+         * standalone (`fx3_cmd protocol_fuzz` / `stream_fuzz`, and the `!`
+         * local commands) and will move into the destructive target.  Same
+         * escape hatch as gpio_extremes. */
         {"hw_smoke",            do_test_hw_smoke,             3, 0, 0, 0},
         {"stop_gpif_state",     do_test_stop_gpif_state,      3, 0, 0, 0},
         {"vendor_rqt_wrap",     do_test_vendor_rqt_wrap,      3, 0, 0, 0},

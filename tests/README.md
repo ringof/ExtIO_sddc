@@ -265,8 +265,13 @@ random sizes (1 B … 1 MiB) and timeouts, random cancellation, `STOPFX3`/EP0
 ops while reads are in flight, release/re-claim and close/reopen cycles, and
 abandon windows — then checks the device returns to a healthy, bounded state.
 
-Both are also wired into the `soak` rotation as bounded, low-weight bursts
-(`protocol_fuzz_burst`, `stream_fuzz_burst`) seeded from the soak seed.
+Both are exposed as standalone subcommands (and as `!protocol_fuzz_burst` /
+`!stream_fuzz_burst` in the debug console).  They are **not** in the
+unattended `soak` rotation: on hardware, `protocol_fuzz` can drive the device
+into an EP0-corrupted state that needs a firmware re-upload to clear (see
+issue #142), which would contaminate following soak scenarios — so a test
+that can require a re-flash stays out of the soak, the same way
+`gpio_extremes` does.
 
 ### Soak test (multi-hour stress)
 

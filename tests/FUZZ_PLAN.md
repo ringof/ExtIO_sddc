@@ -171,6 +171,13 @@ Periodic health gate: device must return to answering TESTFX3+GETSTATS;
 `streaming_faults` may rise but must stay **bounded** (the watchdog cap).
 Unrecoverable wedge ⇒ FAIL + `fuzz_dump()`.
 
+> **Update (hardware result):** the soak integration below was implemented,
+> but the first hardware soak (seed 42) showed `protocol_fuzz` can drive the
+> device into an EP0-corrupted state needing a re-flash (issue #142), which
+> contaminates neighbouring scenarios. Per the §7 escape hatch the bursts
+> were **pulled from the `soak` rotation** and remain standalone subcommands;
+> they will move into the deferred `destructive_test.sh` target.
+
 ## 4. Soak integration (low weight, bounded)
 
 Two thin wrappers reusing the engines with a small budget, seeded from the
