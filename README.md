@@ -191,7 +191,7 @@ a new evaluation branch — not writing a new watchdog.
   at 0 for ~500 ms).  `health_evaluate()` detects it; light recovery is
   tried, and if it can't clear it the cap exhausts and
   `health_recover()` escalates to `CyU3PDeviceReset` — gated on a healthy
-  ADC clock, once per session, and disable-able via the
+  ADC clock, once per streaming session, and disable-able via the
   `WDG_RESET_ESCALATE` arg.  Post-stream backpressure / abandoned streams
   are unaffected (they cap-and-wait).  Validated by the
   `test_coldstart_recovery` host scenario (firmware-side `HANGCOLDSTART`)

@@ -157,7 +157,7 @@ trigger condition.  Two cases are distinguished:
   arrived.  The longer grace window avoids flagging a healthy bring-up
   before its first buffer.  Light recovery is tried first; if the cap
   exhausts, `health_recover()` escalates to `CyU3PDeviceReset` (clock-
-  health-gated, once per session, disable-able via `WDG_RESET_ESCALATE`).
+  health-gated, once per streaming session, disable-able via `WDG_RESET_ESCALATE`).
 
 An idle device (SM in IDLE/RESET, `glDMACount == 0`) is **not** flagged.
 

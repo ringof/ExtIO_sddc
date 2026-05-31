@@ -223,7 +223,17 @@ void health_reset_recovery_count(void)
 {
     /* Reset all streaming-session health state for a fresh STARTFX3/STOPFX3:
      * recovery cap, both sampler counters, the fault classification, the
-     * once-per-session escalation flag, and the DMA-progress baseline. */
+     * per-session escalation flag, and the DMA-progress baseline.
+     *
+     * Clearing glWdgEscalated here makes escalation "once per STREAMING
+     * SESSION" (STARTFX3/STOPFX3 boundary), not "once per boot".  In normal
+     * operation that distinction is moot: CyU3PDeviceReset() does not return,
+     * so a fired escalation re-enumerates to a fresh boot anyway.  The flag
+     * only bounds a defensive within-session re-call if the reset ever
+     * returns.  The cross-boot reset loop (a healthy-clock cold-start a reset
+     * can't clear) is *not* bounded by this flag — every reset is a fresh
+     * boot — but by the clock-health gate + the WDG_RESET_ESCALATE disable
+     * knob + host-visible re-enumeration (see #137). */
     glWdgRecoveryCount = 0;
     glStallCount = 0;
     glColdStartCount = 0;
@@ -386,7 +396,9 @@ void health_recover(health_status_t status)
                  * survives many STOP+START cycles), so escalate to a full
                  * device reset — but only: for COLD_START (post-stream stalls
                  * / abandoned streams still cap-and-wait, unchanged), if
-                 * enabled, once per session, and only with a healthy ADC clock
+                 * enabled, once per streaming session (glWdgEscalated, cleared
+                 * on STARTFX3/STOPFX3 — see health_reset_recovery_count), and
+                 * only with a healthy ADC clock
                  * (a dead clock isn't fixed by reset, so don't loop on it;
                  * si5351_* fail closed on I2C error).  Reset doesn't return. */
                 if (glWdgFaultKind == STREAM_FAULT_COLD_START &&
