@@ -17,6 +17,12 @@
  * handle it.  Do not pet HWDT from anywhere outside health_pet().
  */
 
+#ifdef HEALTH_HOST_TEST
+/* Host unit-test build (tests/host/): stub the FX3 SDK / DebugPrint
+ * surface so the real health.c logic can be exercised on a workstation
+ * with no SDK or hardware.  See tests/host/health_eval_test.c (#117). */
+#include "health_host_shim.h"
+#else
 #include "health.h"
 #include "cyu3os.h"
 #include "cyu3system.h"
@@ -24,6 +30,7 @@
 #include "protocol.h"      /* WDG_MAX_RECOVERY_DEFAULT */
 #include "Si5351.h"        /* si5351_clk0_enabled / si5351_pll_locked (recovery gate) */
 #include "gpif_states.h"   /* GPIF_TH0_BUSY etc. */
+#endif
 
 /* Streaming-pipeline globals owned elsewhere, inspected and driven by the
  * Level-1 streaming watchdog migrated into health_recover() (issue #115). */
