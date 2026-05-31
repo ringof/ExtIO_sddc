@@ -24,10 +24,9 @@ vendor-handler hangs (Level 4 device reset) and main-thread death
 (Level 5 FX3 HWDT) — see
 [README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness)
 for the canonical cross-layer view.  The GPIF streaming watchdog
-described below is currently independent of `SDDC_FX3/health.c` and
-lives in `SDDC_FX3/RunApplication.c`; migrating it behind
-`health_evaluate()` / `health_recover(WEDGED_STREAMING)` is tracked
-as issue #115.
+described below now lives in `SDDC_FX3/health.c`, behind the
+`health_evaluate()` / `health_recover(HEALTH_WEDGED_STREAMING)`
+cascade interface (migrated out of `RunApplication.c` in #115).
 
 ---
 
@@ -144,9 +143,10 @@ detects:
 At 100 ms polling interval, even the slowest rate produces ~48 buffers
 per interval.  A zero-delta is an unambiguous stall indicator.
 
-**Implementation:** The GPIF watchdog in
-`SDDC_FX3/RunApplication.c`'s `ApplicationThread()` main loop uses
-`glDMACount` delta == 0 as the first trigger condition.  The count
+**Implementation:** The GPIF watchdog in `SDDC_FX3/health.c`
+(`health_evaluate()`'s `streaming_wedge_detected()`, sampled once per
+~100 ms main-loop tick) uses `glDMACount` delta == 0 as the first
+trigger condition.  The count
 must also be > 0 (streaming has started) to avoid false triggers
 on idle devices.
 
@@ -198,7 +198,7 @@ symptom (DMA stall).
    locked (`si5351_pll_locked()`).  If either fails, `STARTFX3` is
    rejected with an EP0 STALL.
 
-2. **Watchdog recovery** (in `RunApplication.c`'s watchdog block):
+2. **Watchdog recovery** (in `health_recover(HEALTH_WEDGED_STREAMING)`):
    after tearing down the pipeline, the watchdog reads PLL lock
    status.  If locked, it auto-restarts streaming.  If unlocked, it
    leaves the pipeline stopped and waits for the host to reconfigure.
@@ -252,10 +252,11 @@ device crashes with this architecture.
 
 ## Implemented recovery
 
-### GPIF watchdog (in `SDDC_FX3/RunApplication.c`)
+### GPIF watchdog (in `SDDC_FX3/health.c`)
 
-The application thread runs a watchdog inside the existing 100 ms
-polling loop.  The detection and recovery sequence is:
+`health_evaluate()` runs the watchdog sampler once per ~100 ms
+main-loop tick, and `health_recover(HEALTH_WEDGED_STREAMING)` applies
+the remedy.  The detection and recovery sequence is:
 
 ```mermaid
 graph TD
@@ -324,11 +325,11 @@ The host is informed of watchdog recovery events through:
 | Priority | Change | Lives in | Detection latency |
 |----------|--------|----------|-------------------|
 | **1** | PIB error callback: log + post event to app thread | `SDDC_FX3/StartStopApplication.c` (`PibErrorCallback`) | ~ms (interrupt-driven) |
-| **2** | `glDMACount` delta check in watchdog | `SDDC_FX3/RunApplication.c` (watchdog block) | 100-300 ms (polling) |
+| **2** | `glDMACount` delta check in watchdog | `SDDC_FX3/health.c` (`streaming_wedge_detected`) | 100-300 ms (polling) |
 | **3** | Si5351 PLL lock check before STARTFX3 (preflight) | `SDDC_FX3/StartStopApplication.c` (`GpifPreflightCheck`) | N/A (pre-flight) |
-| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | `SDDC_FX3/RunApplication.c` (watchdog block) | 100-300 ms (polling) |
-| **5** | Si5351 PLL lock check during recovery | `SDDC_FX3/RunApplication.c` (watchdog recovery) | 300 ms (after 3 stall polls) |
-| **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | `SDDC_FX3/RunApplication.c` (watchdog cap counter) | N/A (limit, not detection) |
+| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | `SDDC_FX3/health.c` (`streaming_wedge_detected`) | 100-300 ms (polling) |
+| **5** | Si5351 PLL lock check during recovery | `SDDC_FX3/health.c` (`health_recover`) | 300 ms (after 3 stall polls) |
+| **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | `SDDC_FX3/health.c` (`health_recover` / `health_set_max_recovery`) | N/A (limit, not detection) |
 | **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | `SDDC_FX3/SDDC_GPIF.h`; see [gpif-and-recovery.md](gpif-and-recovery.md) | <1 clock (~16 ns) |
 
 All priorities are implemented.  The silent wedge is now a
@@ -350,7 +351,7 @@ classes the GPIF watchdog cannot see.  See
 [README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness)
 for the cross-layer view.
 
-Today the GPIF watchdog is **independent** of `health.c` — it lives
-in `RunApplication.c`'s main loop and owns its own state.  Migrating
-it behind the `health_evaluate` / `health_recover(WEDGED_STREAMING)`
-interface is tracked as issue #115.
+The GPIF watchdog now lives in `health.c`, behind the
+`health_evaluate()` / `health_recover(HEALTH_WEDGED_STREAMING)`
+interface — so all recovery decisions, streaming included, route
+through the health module (migrated from `RunApplication.c` in #115).

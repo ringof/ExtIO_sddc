@@ -247,8 +247,9 @@ UART/debug subsystem is initialized.
 
 ## 5. GPIF Watchdog Recovery
 
-The application thread (`RunApplication.c:216-295`) runs a watchdog
-that detects and recovers from DMA stalls caused by host-side
+The health module (`health.c` — `health_evaluate()` / `health_recover()`,
+driven each ~100 ms `health_tick()` from `RunApplication.c`) runs a
+watchdog that detects and recovers from DMA stalls caused by host-side
 backpressure.  All watchdog activity is logged to the debug console
 with a `WDG:` prefix.
 
@@ -593,7 +594,8 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
-| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery with recovery cap |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, `health_tick()` cascade driver |
+| `health.c` | Recovery cascade — EP0-wedge (L4), HWDT (L5), and the GPIF streaming watchdog detection + recovery with recovery cap (`health_evaluate` / `health_recover`) |
 | `tests/fx3_cmd.c` | Host-side vendor command tool, interactive debug console, soak test harness |
 | `tests/fw_test.sh` | Automated TAP test suite (36 tests + 3 streaming) |
 

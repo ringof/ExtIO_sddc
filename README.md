@@ -172,7 +172,7 @@ a new evaluation branch — not writing a new watchdog.
 
 | Level | Remedy | Appropriate for | Latency | Status |
 |---|---|---|---|---|
-| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` — issue #115) |
+| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** in `health_recover(HEALTH_WEDGED_STREAMING)` (migrated from `RunApplication.c` into the health module — #115). |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
 | 4 | `CyU3PDeviceReset(CyFalse)` | Vendor-handler hang (EP0 thread deadlocked in an SDK call) | full re-enumeration (~1-2 s) | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` (#104, #105).  Validated end-to-end by `test_health_recovery` (HANGFX3). |
@@ -182,9 +182,10 @@ a new evaluation branch — not writing a new watchdog.
 
 - **Streaming wedges** — DMA producer stuck waiting for the host to
   drain, GPIF state machine in `TH0_WAIT`/`TH1_WAIT`/`TH0_RD` for
-  >300 ms.  The existing watchdog in `SDDC_FX3/RunApplication.c`
-  detects and recovers; observed reliable across `wedge_recovery`
-  scenarios in `fw_test.sh` and the soak rotation.
+  >300 ms.  The watchdog in `SDDC_FX3/health.c`
+  (`health_evaluate` / `health_recover`) detects and recovers; observed
+  reliable across `wedge_recovery` scenarios in `fw_test.sh` and the
+  soak rotation.
 - **EP0 vendor-handler hangs** — a vendor request callback wedged
   inside an SDK call for >2 s.  `health_evaluate()` detects via the
   EP0 enter/exit timestamp; `health_recover(HEALTH_WEDGED_EP0)` fires

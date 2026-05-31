@@ -308,7 +308,7 @@ fixed-layout buffer of 30 bytes total.
 | 5–8    | u32   | `glCounter[0]`    | PIB error count — incremented in `PibErrorCallback` (`StartStopApplication.c`) on each `CYU3P_PIB_INTR_ERROR`. |
 | 9–10   | u16   | `glLastPibArg`    | Last argument captured from the PIB error path (see `gpif-and-recovery.md`). |
 | 11–14  | u32   | `glCounter[1]`    | I2C failure count — incremented in `I2cTransfer` (`i2cmodule.c`) on each failed transfer. |
-| 15–18  | u32   | `glCounter[2]`    | Streaming fault count — incremented by the GPIF watchdog on each recovery (`RunApplication.c`) and on EP underrun events (`USBHandler.c`). |
+| 15–18  | u32   | `glCounter[2]`    | Streaming fault count — incremented by the GPIF watchdog on each recovery (`health.c`, `health_recover`) and on EP underrun events (`USBHandler.c`). |
 | 19     | u8    | Si5351 reg 0      | Live read of Si5351 status register (PLL lock bits).  Useful for confirming the ADC clock health without separately issuing `I2CRFX3`. (`USBHandler.c:271`.) |
 | 20–23  | u32   | `boot_count`      | Increments once per firmware `health_init()` call.  Use to detect mid-test resets: snapshot before, compare after; mismatch means the device reset.  (`USBHandler.c:275`, `SDDC_FX3/health.c:health_boot_count`.) |
 | 24     | u8    | Si5351 CLK0_CONTROL (reg 16) | Live I2C read of the Si5351 CLK0 output-driver control register.  Bit 7 is `CLK0_PDN` — set means CLK0 powered down, clear means CLK0 enabled.  Returns `0xFF` if the I2C read fails.  (`USBHandler.c:283-285`.) |
