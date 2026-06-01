@@ -527,6 +527,7 @@ exclude them.
 | `fx3_stats.{c,h}` | `GETSTATS` decoding (`struct fx3_stats`, `read_stats`) |
 | `fx3_bulk.{c,h}` | Bulk (EP1-IN) read helpers (primed async start-and-read) |
 | `fx3_fuzz.{c,h}` | Seeded `protocol_fuzz` / `stream_fuzz` + coverage/failure log (#139) |
+| `fx3_lifecycle.{c,h}` | Host enumeration-race tests: `reopen_race_storm`, `two_actor_open` (#143) |
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
