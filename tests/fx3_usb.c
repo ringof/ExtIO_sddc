@@ -138,14 +138,58 @@ int ep0_alive_after_stall(libusb_device_handle *h)
 /* Device open / close                                                */
 /* ------------------------------------------------------------------ */
 
+/* Is an RX888 currently enumerated?  Returns 1 and sets *pid_out if a device
+ * is present at either the app or bootloader PID.  Used to distinguish a
+ * udev/permission-settle race (device present but libusb_open fails with
+ * EACCES) from a genuinely absent device, so open_rx888() only pays retry
+ * latency when the device is actually there. */
+static int rx888_present(libusb_context *ctx, uint16_t *pid_out)
+{
+    libusb_device **list;
+    ssize_t n = libusb_get_device_list(ctx, &list);
+    if (n < 0) return 0;
+    int found = 0;
+    uint16_t pid = 0;
+    for (ssize_t i = 0; i < n; i++) {
+        struct libusb_device_descriptor d;
+        if (libusb_get_device_descriptor(list[i], &d) != 0)
+            continue;
+        if (d.idVendor == RX888_VID &&
+            (d.idProduct == RX888_PID_APP || d.idProduct == RX888_PID_BOOT)) {
+            found = 1; pid = d.idProduct; break;
+        }
+    }
+    libusb_free_device_list(list, 1);
+    if (found && pid_out) *pid_out = pid;
+    return found;
+}
+
 libusb_device_handle *open_rx888(libusb_context *ctx)
 {
-    libusb_device_handle *h = libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
-    if (!h) {
-        /* Check if device is in bootloader mode */
-        libusb_device_handle *boot = libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_BOOT);
-        if (boot) {
-            libusb_close(boot);
+    /* Bounded retry to absorb a udev/libusb enumeration race (#143): right
+     * after the device (re-)enumerates, the node can exist before udev has
+     * applied the access rule, so libusb_open fails with EACCES for a short
+     * window.  Retry only while the device is actually present at the APP PID
+     * (present-but-unopenable = the permission-settle race); fail fast when it
+     * is absent or in the bootloader.  ~2 s budget by default; override with
+     * RX888_OPEN_RETRY_MS=0 to restore the old fail-fast behaviour. */
+    int budget_ms = 2000;
+    const char *env = getenv("RX888_OPEN_RETRY_MS");
+    if (env) { int v = atoi(env); if (v >= 0) budget_ms = v; }
+
+    libusb_device_handle *h = NULL;
+    for (int waited = 0; ; waited += 200) {
+        h = libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
+        if (h) break;
+
+        uint16_t pid = 0;
+        int present = rx888_present(ctx, &pid);
+        if (present && pid == RX888_PID_APP && waited < budget_ms) {
+            usleep(200000);   /* 200 ms — permission rule still settling */
+            continue;
+        }
+        /* Absent, in bootloader, or budget exhausted — report and give up. */
+        if (present && pid == RX888_PID_BOOT) {
             fprintf(stderr, "error: device found in bootloader mode (PID 0x%04X) — flash firmware first\n",
                     RX888_PID_BOOT);
         } else {
@@ -155,12 +199,19 @@ libusb_device_handle *open_rx888(libusb_context *ctx)
         return NULL;
     }
 
-    /* Detach kernel driver if attached */
-    if (libusb_kernel_driver_active(h, 0) == 1)
-        libusb_detach_kernel_driver(h, 0);
-
-    int r = libusb_claim_interface(h, 0);
-    if (r < 0) {
+    /* Claim interface 0, retrying briefly on BUSY/ACCESS: a second host actor
+     * (a udev-spawned prober, a stale process, or another tool) may hold the
+     * interface for a moment during the same enumeration window (#143). */
+    int r = 0;
+    for (int attempt = 0; ; attempt++) {
+        if (libusb_kernel_driver_active(h, 0) == 1)
+            libusb_detach_kernel_driver(h, 0);
+        r = libusb_claim_interface(h, 0);
+        if (r == 0) break;
+        if ((r == LIBUSB_ERROR_BUSY || r == LIBUSB_ERROR_ACCESS) && attempt < 10) {
+            usleep(200000);   /* 200 ms — let the other actor release */
+            continue;
+        }
         fprintf(stderr, "error: claim interface: %s\n", libusb_strerror(r));
         libusb_close(h);
         return NULL;

@@ -42,6 +42,7 @@
 #include "fx3_stats.h"
 #include "fx3_bulk.h"
 #include "fx3_fuzz.h"
+#include "fx3_lifecycle.h"
 
 
 /* ------------------------------------------------------------------ */
@@ -571,6 +572,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"test_health_recovery", do_test_health_recovery},
     {"test_main_recovery", do_test_main_recovery},
     {"test_coldstart_recovery", do_test_coldstart_recovery},
+    {"two_actor_open",   do_test_two_actor_open},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -626,6 +628,7 @@ static void print_local_help(void)
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
            "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
            "  test_coldstart_recovery       HANGCOLDSTART + cold-start reset escalation round-trip (#137)\n"
+           "  two_actor_open                2nd process hammers EP0 while streaming (#143)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -5355,6 +5358,8 @@ static void usage(const char *prog)
         "  protocol_fuzz [ops] [seed]   Seeded EP0 control-transfer fuzzer (#139;\n"
         "                               default 5000 ops; prints coverage + reproduce seed)\n"
         "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
+        "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
+        "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
         "                               Multi-hour randomized stress test\n"
         "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
@@ -5653,6 +5658,14 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "test_main_recovery") == 0) {
         rc = do_test_main_recovery(h);
+
+    } else if (strcmp(cmd, "two_actor_open") == 0) {
+        rc = do_test_two_actor_open(h);
+
+    } else if (strcmp(cmd, "reopen_race_storm") == 0) {
+        /* Pass &h: each close/reopen replaces the handle, so the final live
+         * handle must propagate back for the out: cleanup (like soak). */
+        rc = do_test_reopen_race_storm(&h);
 
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);

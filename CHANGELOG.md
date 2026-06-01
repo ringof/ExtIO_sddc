@@ -48,6 +48,17 @@ queryable via the `TESTFX3` vendor command.
 
 ### Added
 
+- **Host enumeration-race test coverage + open backoff.** `open_rx888()`
+  now absorbs a udev/libusb permission-settle race: it distinguishes a
+  present-but-unopenable device (retries with bounded backoff, ~2 s, env
+  `RX888_OPEN_RETRY_MS`) from an absent one (fail-fast as before), and
+  retries `claim_interface` briefly on `BUSY`/`ACCESS`. Two new standalone
+  tests model the firmware side of the "device mysteriously disappears"
+  failure mode: `reopen_race_storm` (tight close/reopen churn — kernel
+  URB-dequeue + XHCI ring restart + firmware `CLEAR_FEATURE`) and
+  `two_actor_open` (a second process hammers EP0 while the first streams).
+  Both assert the firmware never resets (`boot_count` steady) and keeps
+  streaming. Host-side test tooling only. (#143)
 - **Cold-start wedge detection + autonomous reset recovery.** The
   streaming watchdog now also detects a *cold-start* wedge — the GPIF SM
   left IDLE (a stream was commanded) but the first DMA buffer never

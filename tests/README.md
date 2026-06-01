@@ -120,6 +120,24 @@ the same list interactively.
 > run standalone or in the `soak` rotation but are **not** part of
 > `fw_test.sh`'s quick TAP pass.
 
+**Host enumeration-race tests (#143):**
+
+```
+./fx3_cmd reopen_race_storm             # tight close/reopen storm; device stays healthy
+./fx3_cmd two_actor_open                # 2nd process hammers EP0 while this one streams
+```
+
+These model the host-side "device mysteriously disappears" failure mode —
+udev/libusb enumeration and multi-actor races — by exercising the firmware
+side of it: rapid close/reopen churn (kernel URB-dequeue + XHCI ring restart
++ firmware `CLEAR_FEATURE`) and concurrent EP0 access from a second process.
+PASS requires the firmware never resets (`boot_count` steady), stays
+RX888r2, and keeps streaming.  The host *permission-settle* window itself
+(EACCES right after enumeration) is absorbed by `open_rx888()`'s bounded
+retry — it now distinguishes a present-but-unopenable device (retry ~2 s;
+override with `RX888_OPEN_RETRY_MS`) from an absent one (fail fast).  These
+are destructive/standalone, not part of the `soak` rotation.
+
 **Si5351 / ADC clock:**
 
 ```
@@ -509,6 +527,7 @@ exclude them.
 | `fx3_stats.{c,h}` | `GETSTATS` decoding (`struct fx3_stats`, `read_stats`) |
 | `fx3_bulk.{c,h}` | Bulk (EP1-IN) read helpers (primed async start-and-read) |
 | `fx3_fuzz.{c,h}` | Seeded `protocol_fuzz` / `stream_fuzz` + coverage/failure log (#139) |
+| `fx3_lifecycle.{c,h}` | Host enumeration-race tests: `reopen_race_storm`, `two_actor_open` (#143) |
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |
