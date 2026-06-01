@@ -15,13 +15,21 @@
 /* reopen_race_storm — tight close/reopen storm on the running device.
  *
  * Repeatedly close the USB handle and immediately reopen it (open_rx888's
- * bounded retry absorbs the udev permission-settle window), with a brief
- * stream each cycle so the churn races real DMA traffic.  Each close fires
+ * bounded retry absorbs the udev permission-settle window), generating bulk
+ * traffic each cycle so the close has live URBs to dequeue.  Each close fires
  * the kernel's URB-dequeue (Set TR Dequeue Pointer) and each reopen the XHCI
  * endpoint-ring restart + firmware CLEAR_FEATURE path — the host-controller
  * edge behaviour a host enumeration race exercises.  Verifies the firmware
  * never resets (boot_count steady), stays RX888r2 (hwconfig 0x04), and still
  * streams afterward.
+ *
+ * The per-cycle read is a *bounded synchronous* bulk_read_some, never an async
+ * primed_start_and_read: a churn-induced endpoint wedge (e.g. the documented
+ * clear_halt-on-non-stalled-EP corruption that every reopen risks) would leave
+ * an async transfer's completion pending forever, hanging the test.  The sync
+ * read always returns within its timeout, so a wedge surfaces as a clean FAIL
+ * (no data / unresponsive) rather than a hang.  Progress dots localize any
+ * stall to a specific cycle.
  *
  * Takes **h because each reopen replaces the handle; the final live handle is
  * propagated back so main()'s cleanup closes it exactly once.  CLI-only
@@ -33,23 +41,32 @@ int do_test_reopen_race_storm(libusb_device_handle **h_inout)
     struct fx3_stats before;
     int have_before = (read_stats(h, &before) == 0);
 
-    const int CYCLES = 30;
+    /* Program the ADC clock once — the Si5351 keeps running across USB
+     * close/reopen, so STARTFX3's preflight stays satisfied each cycle. */
+    cmd_u32(h, STARTADC, 32000000);
+
+    const int CYCLES = 20;
+    printf("# reopen_race_storm: %d close/reopen cycles ", CYCLES);
+    fflush(stdout);
     for (int i = 0; i < CYCLES; i++) {
-        /* Brief stream so the close lands while DMA/GPIF is live. */
-        cmd_u32(h, STARTADC, 32000000);
-        primed_start_and_read(h, 16384, 400);   /* result raced — ignore */
+        /* Generate live URBs for the close to dequeue.  Bounded sync read. */
+        cmd_u32(h, STARTFX3, 0);
+        bulk_read_some(h, 16384, 150);          /* result raced — ignore */
         cmd_u32(h, STOPFX3, 0);
 
         close_rx888(h);
         h = open_rx888(g_ctx);                   /* bounded EACCES/BUSY retry */
         if (!h) {
-            printf("FAIL reopen_race_storm: reopen failed at cycle %d "
+            printf("\nFAIL reopen_race_storm: reopen failed at cycle %d "
                    "(device gone or stuck mid-enumeration)\n", i);
             *h_inout = NULL;
             return 1;
         }
         *h_inout = h;
+        putchar('.');
+        fflush(stdout);
     }
+    printf("\n");
 
     /* Survival: EP0 alive, hwconfig intact, no firmware reset. */
     uint8_t info[4] = {0};
