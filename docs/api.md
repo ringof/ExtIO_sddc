@@ -54,6 +54,15 @@ EP0 vendor requests are limited to **64 bytes of data-phase payload**
 `wLength > 64` are rejected with a STALL on EP0 before any data phase
 runs (`USBHandler.c:187-193`).
 
+> **Known limitation — direction is not validated.** Each command's
+> data-stage direction (the IN/OUT column below) is the *expected*
+> direction, but the handler dispatches purely on `bRequest` and does
+> not check the `bmRequestType` direction bit.  A host that sends a
+> command with the wrong direction (IN to an OUT-only command, or vice
+> versa) mismatches the EP0 data phase; a stream of such malformed
+> requests can wedge EP0 until a firmware re-upload. Tracked as
+> [#142](https://github.com/ringof/rx888-firmware/issues/142).
+
 The streaming IQ pipeline uses 4 DMA buffers of 16 KB each
 (`Application.h:41-44`), assembled in a multi-channel ping-pong from
 two PIB sockets to USB socket 1.  The IQ data is **16-bit signed,

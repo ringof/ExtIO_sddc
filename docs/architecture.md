@@ -549,7 +549,7 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 0 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
-| 0xB3 | GETSTATS | IN | 0 | 0 | 26 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1).  See [api.md §GETSTATS](api.md) for the canonical layout. |
+| 0xB3 | GETSTATS | IN | 0 | 0 | 30 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1), GPIO state (4).  See [api.md §GETSTATS](api.md) for the canonical layout. |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | N B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255), arg_id 14 = `WDG_MAX_RECOV` watchdog recovery cap |
 | 0xBA | READINFODEBUG | IN | char | -- | ≤ 64 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 | 0xCE | HANGFX3 | OUT | sleep ms | -- | 0 B | **Test-only.** Sleeps `wValue` ms inside the EP0 handler to deterministically wedge the vendor callback; used by `test_health_recovery` to validate the Level-4 EP0 watchdog. |
@@ -572,6 +572,24 @@ The `SETARGFX3` handler calls `CyU3PUsbGetEP0Data()` unconditionally
 valid argument.  For unknown argument IDs, the handler explicitly stalls
 EP0 via `CyU3PUsbStall()` and sets `isHandled = CyTrue`, producing a
 single clean STALL that the host sees as a rejected command.
+
+### Known limitation: vendor-request direction is not validated
+
+The vendor-request handler dispatches purely on `bRequest`; it does not
+check the **direction** bit of `bmRequestType` against the command's
+expected data-stage direction.  Each handler unconditionally calls
+`CyU3PUsbGetEP0Data()` (OUT) or `CyU3PUsbSendEP0Data()` (IN) based only
+on the command.  When a (buggy or malicious) host issues a request with
+the wrong direction — an IN transfer to an OUT-only command such as
+`GPIOFX3`/`STARTFX3`, or an OUT transfer to an IN-only command such as
+`TESTFX3`/`GETSTATS` — the EP0 data phase is mismatched.  A seeded
+control-transfer fuzzer (`tests/fx3_cmd protocol_fuzz`) found that a
+stream of such malformed requests can drive EP0 into a wedged state
+(control transfers return EIO / garbage, `boot_count` unchanged, device
+still enumerated) that requires a firmware re-upload to clear.  Tracked
+as [#142](https://github.com/ringof/rx888-firmware/issues/142); a host
+can legally send these requests, so it is an unauthenticated DoS surface
+pending a direction check in the handler.
 
 ---
 
