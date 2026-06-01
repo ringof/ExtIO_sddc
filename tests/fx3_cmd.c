@@ -509,6 +509,7 @@ static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
 static int do_test_main_recovery(libusb_device_handle *h);
+static int do_test_coldstart_recovery(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -569,6 +570,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stream_fuzz_burst", do_test_stream_fuzz_burst},
     {"test_health_recovery", do_test_health_recovery},
     {"test_main_recovery", do_test_main_recovery},
+    {"test_coldstart_recovery", do_test_coldstart_recovery},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -623,6 +625,7 @@ static void print_local_help(void)
            "  stream_fuzz_burst             3s of random bulk/host-lifecycle fuzzing (#139)\n"
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
            "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
+           "  test_coldstart_recovery       HANGCOLDSTART + cold-start reset escalation round-trip (#137)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -4534,6 +4537,7 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * per 1 hour soak (well above the 10-per-hour coverage floor). */
         {"test_health_recovery",do_test_health_recovery,      3, 0, 0, 0},
         {"test_main_recovery",  do_test_main_recovery,        3, 0, 0, 0},
+        {"test_coldstart_recovery", do_test_coldstart_recovery, 3, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
@@ -4973,6 +4977,126 @@ static int do_test_health_recovery(libusb_device_handle *h)
 
     printf("PASS test_health_recovery: HANGFX3 -> watchdog reset -> bootloader "
            "-> firmware re-uploaded -> device alive (hwconfig=0x%02X fw=%d.%d)\n",
+           buf[0], buf[1], buf[2]);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* test_coldstart_recovery — end-to-end validation of the #137 cold-  */
+/* start detection + autonomous reset escalation.                      */
+/*                                                                     */
+/* HANGCOLDSTART makes the DMA producer callback stop incrementing     */
+/* glDMACount, so after STARTADC+STARTFX3 the GPIF SM is active but no  */
+/* buffer progress is recorded — a cold-start wedge.  With WDG_MAX_RECOV*/
+/* = 1 the streaming watchdog detects it, one light recovery fails to   */
+/* clear it (DMA still suppressed), the cap exhausts, and (clock        */
+/* healthy) health_recover escalates to CyU3PDeviceReset.  Verifies the */
+/* device re-enumerates to bootloader, re-uploads, and resumes.         */
+/*                                                                     */
+/* Requires -F <firmware.img> (or the ../SDDC_FX3 fallback).  #137.     */
+/* ------------------------------------------------------------------ */
+static int do_test_coldstart_recovery(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[4];
+
+    r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: precheck TESTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Resolve firmware path before tripping the reset (same as
+     * test_health_recovery) so a missing path fails cleanly. */
+    const char *fw = g_firmware_path;
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
+        if (access(fallback, R_OK) == 0) {
+            if (fw) printf("# firmware path '%s' not readable; using fallback '%s'\n", fw, fallback);
+            fw = fallback;
+        } else {
+            printf("FAIL test_coldstart_recovery: no readable firmware (tried '%s' and '%s'). "
+                   "Use -F <firmware.img>.\n", fw ? fw : "(none)", fallback);
+            return 1;
+        }
+    }
+
+    /* Ensure escalation enabled + make the cap small so the round-trip is
+     * quick (one light recovery, then escalate). */
+    if (set_arg(h, WDG_RESET_ESCALATE, 1) < 0 || set_arg(h, WDG_MAX_RECOV, 1) < 0) {
+        printf("FAIL test_coldstart_recovery: SETARGFX3 (escalation/cap) failed\n");
+        return 1;
+    }
+
+    printf("# test_coldstart_recovery: HANGCOLDSTART, then STARTADC+STARTFX3\n");
+    printf("#   expected: SM active + DMA frozen at 0 -> cold-start wedge ->\n");
+    printf("#   cap exhausts -> health_recover escalates CyU3PDeviceReset ->\n");
+    printf("#   device re-enumerates to bootloader PID 0x%04X.\n", RX888_PID_BOOT);
+
+    /* Suppress DMA progress, then bring the SM up. */
+    r = libusb_control_transfer(
+        h, LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        HANGCOLDSTART, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: HANGCOLDSTART: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    if (cmd_u32(h, STARTADC, 64000000) < 0) {
+        printf("FAIL test_coldstart_recovery: STARTADC failed\n");
+        return 1;
+    }
+    /* STARTFX3 should succeed (SM starts); the wedge develops afterward as
+     * glDMACount never advances. */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0 && r != LIBUSB_ERROR_PIPE) {
+        printf("FAIL test_coldstart_recovery: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("# SM started with DMA suppressed; waiting for cold-start detection + escalation...\n");
+
+    /* Cold-start grace (~500 ms) + one light recovery + cap + reset +
+     * re-enumeration.  A few seconds worst-case; wait 6 s. */
+    sleep(6);
+
+    /* Verify the device dropped to bootloader (escalation reset fired). */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (!bl) {
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            libusb_close(app);
+            printf("FAIL test_coldstart_recovery: device at APP PID, not bootloader — "
+                   "escalation did not fire (detection / cap / clock-gate?).\n");
+        } else {
+            printf("FAIL test_coldstart_recovery: device not visible at either PID after 6 s.\n");
+        }
+        return 1;
+    }
+    libusb_close(bl);
+    printf("# device at bootloader PID — cold-start reset escalation fired\n");
+
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_coldstart_recovery: firmware re-upload failed.\n"
+               "#   Recover with: ./fx3_cmd load <path-to-SDDC_FX3.img>\n");
+        return 1;
+    }
+
+    libusb_device_handle *running =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (!running) {
+        printf("FAIL test_coldstart_recovery: device not at APP PID after re-upload\n");
+        return 1;
+    }
+    r = ctrl_read(running, TESTFX3, 0, 0, buf, 4);
+    libusb_close(running);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: post-recovery TESTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    printf("PASS test_coldstart_recovery: HANGCOLDSTART -> cold-start wedge -> reset escalation "
+           "-> bootloader -> firmware re-uploaded -> device alive (hwconfig=0x%02X fw=%d.%d)\n",
            buf[0], buf[1], buf[2]);
     return 0;
 }

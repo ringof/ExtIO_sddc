@@ -111,6 +111,32 @@ static uint8_t glWdgRecoveryCount = 0;
 static uint32_t glPrevDMACount = 0;
 static uint8_t  glStallCount = 0;
 
+#define STREAMING_STALL_TICKS   3   /* ~300 ms: post-stream DMA stall in BUSY/WAIT */
+#define COLD_START_WEDGE_TICKS  5   /* ~500 ms: SM active but first DMA buffer never arrives (#119) */
+
+/* Cold-start sampler: counts consecutive ticks with glDMACount frozen at 0
+ * while the GPIF SM is in an active streaming state (#137). */
+static uint8_t glColdStartCount = 0;
+
+/* Streaming-wedge fault classification, set by streaming_wedge_detected()
+ * and read by health_recover() to decide whether reset escalation applies. */
+typedef enum {
+    STREAM_FAULT_NONE = 0,
+    STREAM_FAULT_PROGRESS_STALL,  /* dma>0 frozen in BUSY/WAIT — light recovery clears it */
+    STREAM_FAULT_COLD_START,      /* dma==0, SM active — first buffer never arrived */
+} stream_fault_t;
+static stream_fault_t glWdgFaultKind = STREAM_FAULT_NONE;
+
+/* Reset escalation (#137): a COLD_START wedge that survives the recovery
+ * cap escalates to CyU3PDeviceReset.  On by default; gated by clock health
+ * and once-per-session; runtime-disable via the WDG_RESET_ESCALATE arg. */
+static uint8_t glWdgResetEscalationEn = 1;
+static uint8_t glWdgEscalated = 0;
+
+/* TEST-ONLY (HANGCOLDSTART): when set, the DMA producer callback suppresses
+ * glDMACount increments, reproducing a cold-start wedge.  See health.h. */
+volatile uint8_t glHealthForceColdStart = 0;
+
 /* ThreadX timer used to pet the HWDT.  Per KB223337 the pet must
  * happen from a timer callback context, not from the main thread. */
 #if HEALTH_HWDT_ENABLED
@@ -195,7 +221,50 @@ void health_set_max_recovery(uint8_t max)
 
 void health_reset_recovery_count(void)
 {
+    /* Reset all streaming-session health state for a fresh STARTFX3/STOPFX3:
+     * recovery cap, both sampler counters, the fault classification, the
+     * per-session escalation flag, and the DMA-progress baseline.
+     *
+     * Clearing glWdgEscalated here makes escalation "once per STREAMING
+     * SESSION" (STARTFX3/STOPFX3 boundary), not "once per boot".  In normal
+     * operation that distinction is moot: CyU3PDeviceReset() does not return,
+     * so a fired escalation re-enumerates to a fresh boot anyway.  The flag
+     * only bounds a defensive within-session re-call if the reset ever
+     * returns.  The cross-boot reset loop (a healthy-clock cold-start a reset
+     * can't clear) is *not* bounded by this flag — every reset is a fresh
+     * boot — but by the clock-health gate + the WDG_RESET_ESCALATE disable
+     * knob + host-visible re-enumeration (see #137). */
     glWdgRecoveryCount = 0;
+    glStallCount = 0;
+    glColdStartCount = 0;
+    glWdgFaultKind = STREAM_FAULT_NONE;
+    glWdgEscalated = 0;
+    glPrevDMACount = 0;
+}
+
+void health_set_reset_escalation(CyBool_t enabled)
+{
+    glWdgResetEscalationEn = enabled ? 1 : 0;
+}
+
+/* GPIF state classification helpers.  These depend on the gpif_states.h
+ * index ordering, which mirrors the generated SDDC_GPIF.h — keep in sync
+ * (gpif_states.h carries the cross-check note). */
+static CyBool_t gpif_state_is_busy_wait(uint8_t state)
+{
+    return state == GPIF_TH0_BUSY || state == GPIF_TH1_BUSY ||
+           state == GPIF_TH1_WAIT || state == GPIF_TH0_WAIT;
+}
+
+/* Active streaming state = the SM has left RESET/IDLE and is reading/waiting
+ * (STARTFX3 has run).  Used to tell a cold-start wedge from a quiescent
+ * idle device when glDMACount is 0. */
+static CyBool_t gpif_state_is_streaming_active(uint8_t state)
+{
+    return state == GPIF_TH0_RD    || state == GPIF_TH1_RD_LD ||
+           state == GPIF_TH0_RD_LD || state == GPIF_TH0_BUSY  ||
+           state == GPIF_TH1_RD    || state == GPIF_TH1_BUSY  ||
+           state == GPIF_TH1_WAIT  || state == GPIF_TH0_WAIT;
 }
 
 /* Level-1 streaming-stall detector.  Runs once per health_evaluate() tick
@@ -210,37 +279,57 @@ static CyBool_t streaming_wedge_detected(void)
 {
     uint32_t curDMA = glDMACount;
 
-    if (curDMA == glPrevDMACount && curDMA > 0)
+    if (curDMA == glPrevDMACount)
     {
         uint8_t gpifState = 0xFF;
         CyU3PGpifGetSMState(&gpifState);
 
-        if (gpifState == GPIF_TH0_BUSY || gpifState == GPIF_TH1_BUSY ||
-            gpifState == GPIF_TH1_WAIT || gpifState == GPIF_TH0_WAIT)
+        if (curDMA > 0 && gpif_state_is_busy_wait(gpifState))
         {
+            /* Post-stream stall: pipeline froze mid-stream in BUSY/WAIT.
+             * Light recovery clears this (host back-pressure etc.). */
+            glColdStartCount = 0;
             glStallCount++;
-            DebugPrint(4, "\r\nWDG: stall %d/3 SM=%d DMA=%u",
-                glStallCount, gpifState, curDMA);
-            if (glStallCount >= 3)  /* 300ms in BUSY/WAIT */
+            DebugPrint(4, "\r\nWDG: stall %d/%d SM=%d DMA=%u",
+                glStallCount, STREAMING_STALL_TICKS, gpifState, curDMA);
+            if (glStallCount >= STREAMING_STALL_TICKS)
             {
                 glStallCount = 0;
+                glWdgFaultKind = STREAM_FAULT_PROGRESS_STALL;
+                return CyTrue;
+            }
+        }
+        else if (curDMA == 0 && gpif_state_is_streaming_active(gpifState))
+        {
+            /* Cold-start wedge: the SM left IDLE but the first DMA buffer
+             * never arrived (#119).  Longer grace window so a healthy
+             * just-started stream isn't flagged before its first buffer. */
+            glStallCount = 0;
+            glColdStartCount++;
+            DebugPrint(4, "\r\nWDG: cold-start %d/%d SM=%d DMA=0",
+                glColdStartCount, COLD_START_WEDGE_TICKS, gpifState);
+            if (glColdStartCount >= COLD_START_WEDGE_TICKS)
+            {
+                glColdStartCount = 0;
+                glWdgFaultKind = STREAM_FAULT_COLD_START;
                 return CyTrue;
             }
         }
         else
         {
-            if (glStallCount > 0)
-                DebugPrint(4, "\r\nWDG: stall cleared SM=%d (was %d/3)",
-                    gpifState, glStallCount);
+            if (glStallCount > 0 || glColdStartCount > 0)
+                DebugPrint(4, "\r\nWDG: stall cleared SM=%d", gpifState);
             glStallCount = 0;
+            glColdStartCount = 0;
         }
     }
     else
     {
-        if (glStallCount > 0)
+        if (glStallCount > 0 || glColdStartCount > 0)
             DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
                 glPrevDMACount, curDMA);
         glStallCount = 0;
+        glColdStartCount = 0;
         glPrevDMACount = curDMA;
     }
     return CyFalse;
@@ -302,6 +391,27 @@ void health_recover(health_status_t status)
              * is healthy.  Migrated verbatim from RunApplication.c (#115). */
             if (glWdgMaxRecovery > 0 && glWdgRecoveryCount >= glWdgMaxRecovery)
             {
+                /* Light recovery exhausted.  A COLD_START wedge (#137) is the
+                 * one class light recovery can't clear (the soak showed it
+                 * survives many STOP+START cycles), so escalate to a full
+                 * device reset — but only: for COLD_START (post-stream stalls
+                 * / abandoned streams still cap-and-wait, unchanged), if
+                 * enabled, once per streaming session (glWdgEscalated, cleared
+                 * on STARTFX3/STOPFX3 — see health_reset_recovery_count), and
+                 * only with a healthy ADC clock
+                 * (a dead clock isn't fixed by reset, so don't loop on it;
+                 * si5351_* fail closed on I2C error).  Reset doesn't return. */
+                if (glWdgFaultKind == STREAM_FAULT_COLD_START &&
+                    glWdgResetEscalationEn && !glWdgEscalated &&
+                    si5351_clk0_enabled() && si5351_pll_locked())
+                {
+                    glWdgEscalated = 1;
+                    glCounter[2]++;  /* streaming fault counter — GETSTATS [15..18] */
+                    DebugPrint(4, "\r\nWDG: cold-start unrecovered after %d tries — device reset (#137)",
+                        glWdgMaxRecovery);
+                    CyU3PDeviceReset(CyFalse);
+                    /* Should not return. */
+                }
                 DebugPrint(4, "\r\nWDG: recovery limit (%d), waiting for STARTFX3",
                     glWdgMaxRecovery);
                 return;

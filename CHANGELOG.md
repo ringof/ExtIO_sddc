@@ -15,14 +15,15 @@ below where it changes.
 
 ## [Unreleased]
 
-Firmware version **2.4** (`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=4`),
-identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
+Firmware version **2.5** (`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=5`);
+queryable via the `TESTFX3` vendor command.
 
 ### Changed
 
-- **Firmware-reported version bumped 2.3 → 2.4** (`FIRMWARE_VER_MINOR` in
-  `SDDC_FX3/protocol.h`) to mark the 0.1.1 firmware. Wire format unchanged
-  (`TESTFX3` still returns `major.minor`).
+- **Firmware-reported version bumped to 2.5** (`FIRMWARE_VER_MINOR` in
+  `SDDC_FX3/protocol.h`): 2.3 → 2.4 marked the 0.1.1 cleanup/bugfix pass,
+  2.4 → 2.5 the cold-start detection + reset-escalation work (#137). Wire
+  format unchanged (`TESTFX3` still returns `major.minor`).
 - **Streaming watchdog moved into the health module.** The Level-1
   DMA-stall watchdog was migrated out of `RunApplication.c`'s main loop
   into `SDDC_FX3/health.c`, behind the `health_evaluate()` /
@@ -47,6 +48,18 @@ identifying the 0.1.1 firmware; queryable via the `TESTFX3` vendor command.
 
 ### Added
 
+- **Cold-start wedge detection + autonomous reset recovery.** The
+  streaming watchdog now also detects a *cold-start* wedge — the GPIF SM
+  left IDLE (a stream was commanded) but the first DMA buffer never
+  arrives (`glDMACount` frozen at 0 for ~500 ms) — which the previous
+  `curDMA > 0` guard could not see (#119). Light recovery is tried first;
+  if it can't clear it (the cap exhausts), `health_recover` escalates to
+  `CyU3PDeviceReset`, gated on a healthy ADC clock and limited to once per
+  session. Post-stream backpressure stalls and abandoned streams are
+  unaffected — they still cap-and-wait (escalation is cold-start-only). On
+  by default; disable at runtime via the new `WDG_RESET_ESCALATE`
+  SETARGFX3 arg (15). Adds a test-only `HANGCOLDSTART` (0xD0) command for
+  deterministic bench validation. (#137, #119)
 - **Seeded USB/vendor-command fuzzing for the host test suite.** New
   `tests/fx3_cmd protocol_fuzz` (seeded EP0 control-transfer fuzzer:
   `bmRequestType` direction/recipient, `bRequest`, `wValue`/`wIndex`,

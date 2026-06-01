@@ -37,6 +37,10 @@
                               * forever on next iteration; used by
                               * test_main_recovery to trip the FX3
                               * hardware watchdog (Level 5). */
+#define HANGCOLDSTART 0xD0   /* TEST-ONLY: suppress DMA-progress accounting
+                              * so the SM runs but glDMACount stays 0; used
+                              * by test_coldstart_recovery to trip the #137
+                              * cold-start detection + reset escalation. */
 
 /* GPIOFX3 control-word bit positions (subset — mirrors enum GPIOPin in
  * SDDC_FX3/protocol.h). GETSTATS gpio_state field [26..29] uses the same
@@ -46,9 +50,10 @@
 #define LED_BLUE      (1U << 11)
 
 /* SETARGFX3 argument IDs */
-#define DAT31_ATT     10
-#define AD8370_VGA    11
-#define WDG_MAX_RECOV 14
+#define DAT31_ATT          10
+#define AD8370_VGA         11
+#define WDG_MAX_RECOV      14
+#define WDG_RESET_ESCALATE 15   /* enable(!=0)/disable(0) cold-start reset escalation (#137) */
 
 /* Timeouts */
 #define CTRL_TIMEOUT_MS  1000

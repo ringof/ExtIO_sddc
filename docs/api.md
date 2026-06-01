@@ -13,8 +13,8 @@ image.  Every claim on this page cites a source file and line in the
 firmware tree; if behavior differs between this page and the source, the
 source is authoritative — please open an issue.
 
-Reference firmware version: **2.3**
-(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=3` —
+Reference firmware version: **2.5**
+(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=5` —
 `SDDC_FX3/protocol.h:10-11`).
 
 1. TOC
@@ -92,6 +92,7 @@ All vendor commands target `bmRequestType` with `Type=Vendor`,
 | `0xBA`     | [`READINFODEBUG`](#readinfodebug) | IN/OUT | ≤64 | Debug console RX (wValue=ASCII) / TX. |
 | `0xCE`     | [`HANGFX3`](#hangfx3)   | —   | 0 | **Test-only.** Sleep `wValue` ms in EP0 handler. |
 | `0xCF`     | [`HANGMAIN`](#hangmain) | —   | 0 | **Test-only.** Arm main-thread infinite spin. |
+| `0xD0`     | `HANGCOLDSTART`         | —   | 0 | **Test-only.** Suppress DMA-progress accounting (`glDMACount` frozen at 0) to reproduce a cold-start wedge (#137). |
 
 > **Direction is from the host's perspective.** `OUT` = data flows
 > host → device; `IN` = device → host; `—` = no data phase (status only).
@@ -353,7 +354,8 @@ Defined parameter selectors (`enum ArgumentList` in
 |----------|----------------|---------------------------|--------|--------|
 | 10       | `DAT31_ATT`    | 0 – 63 (6-bit, 0.5 dB)    | Sets the DAT-31 step attenuator.  6 bits shifted to `ATT_LE`. | `rx888r2_SetAttenuator()`, `radio/rx888r2.c:78-82` |
 | 11       | `AD8370_VGA`   | 0 – 255 (raw 8-bit register) | Sets the AD8370 VGA gain register.  See AD8370 datasheet for the gain-code mapping. | `rx888r2_SetGain()`, `radio/rx888r2.c:84-89` |
-| 14       | `WDG_MAX_RECOV` | 0 (unlimited) – 255      | Caps consecutive watchdog recoveries.  Default `WDG_MAX_RECOVERY_DEFAULT = 5` (`protocol.h:86`).  After the cap, the firmware reboots instead of attempting another recovery — used by host-side tests to bound flakiness. | `protocol.h:83`, `USBHandler.c:318-322` |
+| 14       | `WDG_MAX_RECOV` | 0 (unlimited) – 255      | Caps consecutive streaming-watchdog light recoveries.  Default `WDG_MAX_RECOVERY_DEFAULT = 5` (`protocol.h:86`).  After the cap the firmware stops attempting light recovery; for a **cold-start** wedge it then escalates to a device reset (see `WDG_RESET_ESCALATE`), otherwise it waits for the host to restart. | `protocol.h`, `health.c` |
+| 15       | `WDG_RESET_ESCALATE` | 0 (off) / non-zero (on) | Enable/disable autonomous `CyU3PDeviceReset` escalation for an unrecoverable **cold-start** streaming wedge (#137).  **On by default.**  When on, a cold-start wedge that survives the recovery cap triggers a device reset — gated on a healthy ADC clock and limited to once per streaming session (STARTFX3/STOPFX3 boundary).  Post-stream stalls / abandoned streams never escalate. | `protocol.h`, `health.c` |
 
 Unrecognized `wIndex` values are signaled by STALLing the status phase
 (`USBHandler.c:323-328`).  Recognized calls bump `glVendorRqtCnt`.
