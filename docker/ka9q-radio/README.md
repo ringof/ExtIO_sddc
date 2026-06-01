@@ -237,7 +237,7 @@ up (`./ka9q.sh start`), run the whole-band smoke test from the repo root:
 tests/ka9q_smoke.sh
 ```
 
-It sweeps `0 .. fs/2` via the patched `powers`, renders a PNG, and PASS/FAILs
+It sweeps `0 .. fs/2` via `powers`, renders a PNG, and PASS/FAILs
 on whether the floor is a live, textured thermal spectrum (~-130 dB with
 natural variance, the ADC DC spike, and the fs/2 alias) versus the
 featureless flat line a frozen / shut-down ADC would produce.  See
@@ -262,12 +262,15 @@ featureless flat line a frozen / shut-down ADC would produce.  See
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **`STARTADC` before `STARTFX3`** — earlier SDDC builds needed it for
-  the GPIF preflight check (handled by container patch 03); the firmware
-  now reports Si5351 CLK0 state truthfully, so the preflight passes with no
-  host workaround and patch 03 is retired (see `patches/README.md`).  The
-  only active container patches are the two `powers` float/double fixes
-  (`01`, `02`).
+- **ka9q-radio pin** — the container builds ka9q-radio `21d51fac` (main),
+  whose `rx888.c` does host-side Si5351 clock synthesis (new `si5351.c`
+  module), paired with ka9q-web `91cbfca`.  See `docs/ka9q-compat-audit.md`
+  §12 for the full driver-eval analysis.
+- **Active container patch is now just `04-no-tuner-stdby`.**  The two
+  `powers` float/double fixes (`01`, `02`) are **upstream** at this SHA and
+  retired to `*.disabled`; patch `03` (`STARTADC` before `STARTFX3`) remains
+  retired (the firmware reports Si5351 CLK0 state truthfully, so the GPIF
+  preflight passes with no host workaround).  See `patches/README.md`.
 - **`/run/udev` bind-mount required** at `docker run` time — libusb
   inside the container needs host udev events to see the FX3
   re-enumerate after firmware upload.  Container-side workaround,
@@ -275,8 +278,9 @@ full analysis.  Summary:
 - `sleep(1)` after firmware upload (`rx888.c:700`) — fragile in
   principle, sufficient on observed hardware with the udev mount.
   Documented in audit §1, no patch.
-- `TUNERSTDBY` (0xB8) calls produce harmless STALLs.  Cosmetic
-  noise, no functional impact.  Documented in audit §2, no patch.
+- `TUNERSTDBY` (0xB8) calls STALL on this firmware (no tuner) and could
+  intermittently wedge radiod's restart bring-up — removed on the HF path by
+  active patch `04-no-tuner-stdby` (audit §2, `patches/README.md`).
 - GPIO LED bit-mapping differences (cosmetic).
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 

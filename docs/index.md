@@ -33,6 +33,9 @@ documentation.  For source and issue tracking, see the
   [diagnostics side-channel]({{ '/diagnostics_side_channel/' | relative_url }}),
   [wedge detection]({{ '/wedge_detection/' | relative_url }}),
   [license analysis]({{ '/LICENSE_ANALYSIS/' | relative_url }}).
+- **[ka9q-radio health & subsystem inspection]({{ '/ka9q-health-inspection/' | relative_url }})**
+  — direct, per-subsystem health checks for ka9q-radio and the systems the test
+  harness depends on (USB/FX3, radiod, rx888.so, Si5351, avahi, multicast, ka9q-web).
 
 ## If you're about to write FX3 firmware for an SDR
 

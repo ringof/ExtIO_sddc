@@ -275,12 +275,17 @@ at `04b4:00f1` — so it is **not** the firmware-upload path and **not**
 fixable by pre-loading firmware. It is an unconditional crash in
 `6a5094ac`'s rx888 init.
 
-Status: **reverted to `42273761` + `hack_no_usb_reset = yes`** (the
-proven pair with ka9q-web `b63c991`). This is a candidate upstream
-report to KA9Q; the backtrace above is the concrete evidence. Until
-it (or a later SHA) is verified crash-free, the container stays on
-`42273761`, and the reset workaround remains required (see §1 and the
-`rx888-test.conf` comment).
+Status: was **reverted to `42273761` + `hack_no_usb_reset = yes`** (the
+proven pair with ka9q-web `b63c991`). This was a candidate upstream
+report to KA9Q; the backtrace above is the concrete evidence.
+
+**Update (driver-eval bump to `21d51fac`, see §12):** a later SHA is now
+under evaluation. At `21d51fac`, `rx888_usb_init()` acquires and NULL-checks
+the device handle *before* any control transfer, and the init-time USB reset
+defaults OFF — the structural conditions that produced this crash at
+`6a5094ac` are addressed. Whether the crash is gone in practice is a bench
+question (the build/run is decisive); if `radiod` segfaults in `rx888_setup`
+again, revert to `42273761`.
 
 ### 11. radiod restart stall *(ka9q-side; firmware exonerated)*
 
@@ -310,6 +315,47 @@ upstream with the `resetup_cycle` evidence. Note also that #131's actual claim
 — device returns to a usable, ADC-parked idle between sessions — is covered
 without ka9q-radio at all by `fw_test`/`soak` (fx3_cmd-side) and the green
 `ka9q_smoke` real-output gate.
+
+### 12. Driver-eval bump to `21d51fac` — host-side Si5351 synthesis *(under bench evaluation)*
+
+KA9Q asked us to bench the new `rx888.c` revision on ka9q-radio `main`. The
+container's `KA9Q_RADIO_SHA` was bumped `42273761` → `21d51fac` (and ka9q-web
+`b63c991` → `91cbfca`, newest-with-newest) on branch `Claude/ka9q-driver-eval`.
+
+**What the new driver changes.** The headline is that Si5351 clock synthesis
+moves **host-side**: `rx888.c` now `#include`s a new `si5351.{c,h}` module and
+calls a pure-integer PLL solver (`si5351_solve`, `si5351_get_pll_pvals`,
+`si5351_get_ms_pvals`), then writes the PLL / MultiSynth registers itself over
+`I2CWFX3`. Previously the firmware owned more of that. (`si5351.c` is
+self-contained — libc + its own header — and compiles clean standalone.)
+
+**Compatibility analysis (static, pre-build):**
+
+- *Not a file-swap onto the old pin.* `42273761` has no `si5351.{c,h}`, so the
+  new `rx888.c` only builds inside its own tree — hence the whole-SHA bump
+  rather than a graft. The `SI5351_*` register macros were already in
+  `rx888.h` (unchanged); `rx888.h`'s only delta (`DEFAULT_IMAGE_FILE`) is
+  unreferenced by `rx888.c`.
+- *Plugin ABI.* The exported interface is a **superset** of the old one (adds
+  `rx888_shutdown`), so it stays loadable by the same `radiod` model.
+- *Patches.* `04-no-tuner-stdby` still applies clean (both `TUNERSTDBY` sends
+  remain, identical context). `01`/`02` (powers float/double) are **upstreamed**
+  at this SHA and retired to `*.disabled`.
+- *Config.* `hack_no_usb_reset` is gone, replaced by `reset` (default false);
+  `rx888-test.conf` now sets `reset = no` explicitly.
+- *ka9q-web.* Its linked headers barely moved (`multicast.h` unchanged,
+  `status.h` +1 appended enum, `misc.h` minor); rebuilt against the same tree.
+
+**Watch-items on the bench (decisive over the static analysis above):**
+
+1. The §10 `command_send` segfault — must reach `rx888 running` without
+   crashing in `rx888_setup`.
+2. The §11 restart stall — re-run the `ka9q_test.sh` soak; the host-side
+   Si5351 reprogramming on each restart is new code on that path.
+3. Si5351 host synthesis is correct — `radiod -v` should log sane
+   `RX888 Si5351 PLL` / `output divider` lines for 64.8 Msps @ 27 MHz, and the
+   spectrum should show the fs/2 alias (proof the ADC samples at fs). See the
+   per-subsystem checks in `docs/ka9q-health-inspection.md`.
 
 ## Container-side requirements (no patches needed)
 

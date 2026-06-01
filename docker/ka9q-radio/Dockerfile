@@ -41,12 +41,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Pinned to 42273761 to pair with ka9q-web b63c991 below (the known-good
-# pair from the W1EUJ / palomar-sdr.com deployment). NOTE: this driver
-# does an init-time USB reset that this firmware answers by going to DFU;
-# in-container that reset/re-acquire is under investigation (see
-# tests/usb_trace.sh). f78cff9 is the no-init-reset fallback.
-ARG KA9Q_RADIO_SHA=42273761ba5b96b243317592a6b8964ab99a9794
+#
+# Pinned to 21d51fac (main, 2026-06) to evaluate the new rx888 driver that
+# moves Si5351 clock synthesis HOST-side: the driver now computes the PLL /
+# MultiSynth solution (si5351.c: si5351_solve) and writes the registers over
+# I2CWFX3, instead of leaving it to the firmware. Paired with ka9q-web
+# 91cbfca below (newest-with-newest). See docs/ka9q-compat-audit.md and
+# docker/ka9q-radio/patches/README.md for the full compatibility analysis.
+#
+# Two things this SHA changes vs the previous pin (42273761):
+#  - The init-time USB reset now defaults OFF (config key `reset`, default
+#    false) — so the driver no longer knocks this firmware to DFU, and the
+#    old `hack_no_usb_reset` workaround is retired (see rx888-test.conf).
+#  - It is a month newer than 6a5094ac, whose rx888 init segfaulted in
+#    command_send (compat-audit §10). At this SHA rx888_usb_init() acquires
+#    and NULL-checks the device handle before any control transfer, which
+#    structurally addresses that crash — but the bench build/run is the
+#    decisive check. If radiod segfaults in rx888_setup, revert to 42273761.
+ARG KA9Q_RADIO_SHA=21d51facd8c1f0e1a70a8e12c03307218f88ae53
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
@@ -101,11 +113,14 @@ RUN git clone --depth 1 https://github.com/davidmoreno/onion.git /build/onion \
 
 # Build ka9q-web as a sibling of the ka9q-radio tree (its Makefile uses
 # KA9Q_RADIO_DIR=../ka9q-radio/src and links that tree's multicast.o/
-# status.o/misc.o/decode_status.o/rtp.o). Pinned to b63c991d to match the
-# ka9q-radio SHA above (proven pair from W1EUJ / palomar-sdr.com).
+# status.o/misc.o/decode_status.o/rtp.o). Pinned to 91cbfca (HEAD, 2026-06)
+# to pair newest-with-newest against the ka9q-radio SHA above. ka9q-web is an
+# independent moving part: this link step is the decisive compatibility check.
+# If it fails to build, the firmware smoke test does NOT need ka9q-web — pin a
+# ka9q-web commit known to pair with this ka9q-radio SHA, or drop this step.
 ENV LIBRARY_PATH=/usr/local/lib C_INCLUDE_PATH=/usr/local/include
 RUN git clone https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
-    && git -C /build/ka9q-web checkout b63c991d6b4639d2e30429e70200dfe2f1c1f394 \
+    && git -C /build/ka9q-web checkout 91cbfca25eef7b60923eebec120595dbbba5053d \
     && make -C /build/ka9q-web -j"$(nproc)"
 
 # ---- Runtime image ----

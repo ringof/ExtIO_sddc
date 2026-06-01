@@ -2,7 +2,7 @@
 #
 # ka9q_smoke.sh — one-shot "is the firmware really running the radio?" check,
 # using the whole-band noise-floor spectrum as the proof. No receiver UI, no
-# listening: sweep 0 .. fs/2 from radiod via the patched `powers` (through
+# listening: sweep 0 .. fs/2 from radiod via `powers` (through
 # hf_sweep.sh, so it's calibrated and edge-artifact-free) and assert it looks
 # like a LIVE, textured thermal floor. A dead / frozen / shut-down ADC FFTs to
 # a featureless flat line; a genuinely streaming one shows a ~-130 dB floor

@@ -24,6 +24,22 @@ below where it changes.
   heat whenever a stream is not running. Manual `GPIOFX3` SHDWN control is
   unchanged. (#131)
 
+### Testing / tooling
+
+- **ka9q-radio test container bumped to evaluate the host-side-Si5351
+  `rx888.c` driver** (ka9q-radio `42273761` → `21d51fac`; ka9q-web
+  `b63c991` → `91cbfca`). The new driver synthesizes the Si5351 clock on the
+  host (new `si5351.c` PLL solver) and writes the registers over `I2CWFX3`.
+  The two `powers` float/double patches are now upstream and retired; only
+  `04-no-tuner-stdby` remains active. `rx888-test.conf` drops the retired
+  `hack_no_usb_reset` key for the new `reset = no` (default-off) key. See
+  `docs/ka9q-compat-audit.md` §12. *(Test-environment change; not a firmware
+  change. Under bench evaluation.)*
+- **New `docs/ka9q-health-inspection.md`** — a per-subsystem health/diagnostics
+  runbook for inspecting ka9q-radio and the systems the harness depends on
+  (USB/FX3, radiod, rx888.so/GPIF, Si5351, dbus/avahi, multicast/RTP, ka9q-web,
+  FFTW), going deeper than the `ka9q_smoke.sh` / `ka9q_test.sh` pass/fail gates.
+
 ## [0.1.0] — 2026-05-14
 
 First named release.  Firmware version **2.3** (`FIRMWARE_VER_MAJOR=2`,
