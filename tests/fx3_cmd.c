@@ -510,6 +510,7 @@ static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
 static int do_test_main_recovery(libusb_device_handle *h);
 static int do_test_coldstart_recovery(libusb_device_handle *h);
+static int do_test_two_actor_open(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -571,6 +572,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"test_health_recovery", do_test_health_recovery},
     {"test_main_recovery", do_test_main_recovery},
     {"test_coldstart_recovery", do_test_coldstart_recovery},
+    {"two_actor_open",   do_test_two_actor_open},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -626,6 +628,7 @@ static void print_local_help(void)
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
            "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
            "  test_coldstart_recovery       HANGCOLDSTART + cold-start reset escalation round-trip (#137)\n"
+           "  two_actor_open                2nd process hammers EP0 while streaming (#143)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -5277,6 +5280,179 @@ static int do_test_main_recovery(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* Host-side enumeration-race tests (#143)                            */
+/* ------------------------------------------------------------------ */
+
+/* reopen_race_storm — tight close/reopen storm on the running device.
+ *
+ * Repeatedly close the USB handle and immediately reopen it (open_rx888's
+ * bounded retry absorbs the udev permission-settle window), with a brief
+ * stream each cycle so the churn races real DMA traffic.  Each close fires
+ * the kernel's URB-dequeue (Set TR Dequeue Pointer) and each reopen the XHCI
+ * endpoint-ring restart + firmware CLEAR_FEATURE path — the host-controller
+ * edge behaviour a host enumeration race exercises.  Verifies the firmware
+ * never resets (boot_count steady), stays RX888r2 (hwconfig 0x04), and still
+ * streams afterward.
+ *
+ * Takes **h because each reopen replaces the handle; the final live handle is
+ * propagated back so main()'s cleanup closes it exactly once.  CLI-only
+ * (handle churn makes it unsafe inside the `!` console or the soak rotation). */
+static int do_test_reopen_race_storm(libusb_device_handle **h_inout)
+{
+    libusb_device_handle *h = *h_inout;
+
+    struct fx3_stats before;
+    int have_before = (read_stats(h, &before) == 0);
+
+    const int CYCLES = 30;
+    for (int i = 0; i < CYCLES; i++) {
+        /* Brief stream so the close lands while DMA/GPIF is live. */
+        cmd_u32(h, STARTADC, 32000000);
+        primed_start_and_read(h, 16384, 400);   /* result raced — ignore */
+        cmd_u32(h, STOPFX3, 0);
+
+        close_rx888(h);
+        h = open_rx888(g_ctx);                   /* bounded EACCES/BUSY retry */
+        if (!h) {
+            printf("FAIL reopen_race_storm: reopen failed at cycle %d "
+                   "(device gone or stuck mid-enumeration)\n", i);
+            *h_inout = NULL;
+            return 1;
+        }
+        *h_inout = h;
+    }
+
+    /* Survival: EP0 alive, hwconfig intact, no firmware reset. */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL reopen_race_storm: device unresponsive after %d cycles: %s\n",
+               CYCLES, libusb_strerror(r));
+        return 1;
+    }
+    if (info[0] != 0x04) {
+        printf("FAIL reopen_race_storm: hwconfig=0x%02X (expected 0x04)\n", info[0]);
+        return 1;
+    }
+    struct fx3_stats after;
+    if (read_stats(h, &after) < 0) {
+        printf("FAIL reopen_race_storm: GETSTATS failed after churn\n");
+        return 1;
+    }
+    if (have_before && after.boot_count != before.boot_count) {
+        printf("FAIL reopen_race_storm: boot_count %u->%u (device reset during churn)\n",
+               before.boot_count, after.boot_count);
+        return 1;
+    }
+
+    /* Streaming still flows? */
+    cmd_u32(h, STARTADC, 32000000);
+    int got = primed_start_and_read_retry(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+    if (got <= 0) {
+        printf("FAIL reopen_race_storm: no data after churn (got=%d)\n", got);
+        return 1;
+    }
+
+    printf("PASS reopen_race_storm: %d close/reopen cycles, device healthy, "
+           "%d bytes flowed (boot=%u steady)\n", CYCLES, got, after.boot_count);
+    return 0;
+}
+
+/* two_actor_open — a second process opens the device and hammers EP0 while
+ * this process streams, modeling a udev-spawned prober / second daemon racing
+ * the streamer.  The child uses its OWN libusb context (never share one across
+ * fork) and does not claim interface 0 (the parent holds it — a claim would
+ * get BUSY); it issues EP0 control reads, which the kernel routes without an
+ * interface claim.  Verifies the firmware survives concurrent host access:
+ * the parent's stream/EP0 stay alive and the device does not reset. */
+static int do_test_two_actor_open(libusb_device_handle *h)
+{
+    struct fx3_stats before;
+    int have_before = (read_stats(h, &before) == 0);
+
+    /* Parent brings up the stream and keeps GPIF running. */
+    cmd_u32(h, STARTADC, 32000000);
+    int got0 = primed_start_and_read_retry(h, 16384, 2000);
+    if (got0 <= 0) {
+        printf("FAIL two_actor_open: parent stream did not start (got=%d)\n", got0);
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    if (pid == 0) {
+        /* Child: fresh context, second handle, hammer EP0, then exit. */
+        libusb_context *cctx = NULL;
+        if (libusb_init(&cctx) != 0) _exit(2);
+        libusb_device_handle *ch =
+            libusb_open_device_with_vid_pid(cctx, RX888_VID, RX888_PID_APP);
+        if (!ch) { libusb_exit(cctx); _exit(3); }
+        int fails = 0;
+        for (int i = 0; i < 150; i++) {
+            uint8_t b[GETSTATS_LEN];
+            int got = (i & 1) ? GETSTATS_LEN : 4;
+            int r = libusb_control_transfer(ch,
+                LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+                (i & 1) ? GETSTATS : TESTFX3, 0, 0, b, got, 500);
+            if (r < 0) fails++;
+        }
+        /* Claim attempt: expected BUSY while the parent holds interface 0. */
+        if (libusb_claim_interface(ch, 0) == 0)
+            libusb_release_interface(ch, 0);
+        libusb_close(ch);
+        libusb_exit(cctx);
+        _exit(fails > 120 ? 4 : 0);   /* mostly-failing 2nd-actor EP0 = problem */
+    }
+
+    /* Parent: keep reading the live stream + polling EP0 while the child runs. */
+    int parent_misses = 0;
+    for (int i = 0; i < 30; i++) {
+        if (bulk_read_some(h, 16384, 500) <= 0) parent_misses++;
+        struct fx3_stats s;
+        if (read_stats(h, &s) < 0) parent_misses++;
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    cmd_u32(h, STOPFX3, 0);
+
+    /* Verify the parent + device survived the concurrent access. */
+    int r = ep0_alive_after_stall(h);
+    if (r < 0) {
+        printf("FAIL two_actor_open: parent EP0 dead after concurrent access: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    struct fx3_stats after;
+    if (read_stats(h, &after) < 0) {
+        printf("FAIL two_actor_open: GETSTATS failed after concurrent access\n");
+        return 1;
+    }
+    if (have_before && after.boot_count != before.boot_count) {
+        printf("FAIL two_actor_open: boot_count %u->%u (device reset under contention)\n",
+               before.boot_count, after.boot_count);
+        return 1;
+    }
+    int child_rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (child_rc == 4) {
+        printf("FAIL two_actor_open: 2nd-actor EP0 access mostly failed "
+               "(child rc=4) — concurrent open not survivable\n");
+        return 1;
+    }
+
+    printf("PASS two_actor_open: survived concurrent 2nd-actor EP0 access "
+           "(child rc=%d, parent_stream_misses=%d/30, boot=%u steady)\n",
+           child_rc, parent_misses, after.boot_count);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -5355,6 +5531,8 @@ static void usage(const char *prog)
         "  protocol_fuzz [ops] [seed]   Seeded EP0 control-transfer fuzzer (#139;\n"
         "                               default 5000 ops; prints coverage + reproduce seed)\n"
         "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
+        "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
+        "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
         "                               Multi-hour randomized stress test\n"
         "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
@@ -5653,6 +5831,14 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "test_main_recovery") == 0) {
         rc = do_test_main_recovery(h);
+
+    } else if (strcmp(cmd, "two_actor_open") == 0) {
+        rc = do_test_two_actor_open(h);
+
+    } else if (strcmp(cmd, "reopen_race_storm") == 0) {
+        /* Pass &h: each close/reopen replaces the handle, so the final live
+         * handle must propagate back for the out: cleanup (like soak). */
+        rc = do_test_reopen_race_storm(&h);
 
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);
