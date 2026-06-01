@@ -204,6 +204,39 @@ CyFxSlFifoApplnUSBSetupCB (
     		return CyTrue;
     	}
 
+    	/* Validate the data-phase direction before touching it (issue #142).
+    	 * The cases below call CyU3PUsbGetEP0Data() (OUT) or
+    	 * CyU3PUsbSendEP0Data() (IN) based purely on bRequest, never on the
+    	 * host's bmRequestType direction bit.  If the host's direction
+    	 * disagrees, that Get/Send mismatches the EP0 data phase and desyncs
+    	 * the FX3 EP0 block — repeated mismatches corrupt subsequent IN
+    	 * responses (hwconfig/GETSTATS read back garbage) and eventually wedge
+    	 * EP0 hard enough to need a re-flash.  Confirmed in isolation by the
+    	 * host-side dir_mismatch test (well-formed requests, wrong direction
+    	 * only, wedge EP0 -> bootloader).  STALL the mismatch here, before any
+    	 * data-phase call.  Status-only commands (HANG*) and unknown bRequests
+    	 * are exempt — the former never touch the data phase, the latter STALL
+    	 * via the switch default below. */
+    	{
+    		/* bmRequestType bit 7 (USB 2.0 sec 9.3): 1 = device->host (IN). */
+    		CyBool_t hostIn = ((bReqType & 0x80u) != 0) ? CyTrue : CyFalse;
+    		int expectIn = -1;   /* -1 = exempt / unknown */
+    		switch (bRequest) {
+    			case TESTFX3: case GETSTATS: case I2CRFX3: case READINFODEBUG:
+    				expectIn = 1; break;
+    			case GPIOFX3: case STARTADC: case I2CWFX3: case SETARGFX3:
+    			case STARTFX3: case STOPFX3: case RESETFX3:
+    				expectIn = 0; break;
+    			default:
+    				expectIn = -1; break;
+    		}
+    		if (expectIn >= 0 && (int)hostIn != expectIn) {
+    			CyU3PUsbStall(0, CyTrue, CyFalse);
+    			health_record_event(HEALTH_EVENT_EP0_HANDLER_EXIT);
+    			return CyTrue;
+    		}
+    	}
+
     	switch (bRequest)
     	 {
 			case GPIOFX3:

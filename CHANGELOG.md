@@ -15,15 +15,16 @@ below where it changes.
 
 ## [Unreleased]
 
-Firmware version **2.5** (`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=5`);
+Firmware version **2.6** (`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=6`);
 queryable via the `TESTFX3` vendor command.
 
 ### Changed
 
-- **Firmware-reported version bumped to 2.5** (`FIRMWARE_VER_MINOR` in
+- **Firmware-reported version bumped to 2.6** (`FIRMWARE_VER_MINOR` in
   `SDDC_FX3/protocol.h`): 2.3 → 2.4 marked the 0.1.1 cleanup/bugfix pass,
-  2.4 → 2.5 the cold-start detection + reset-escalation work (#137). Wire
-  format unchanged (`TESTFX3` still returns `major.minor`).
+  2.4 → 2.5 the cold-start detection + reset-escalation work (#137), 2.5 →
+  2.6 the EP0 direction-validation fix (#142). Wire format unchanged
+  (`TESTFX3` still returns `major.minor`).
 - **Streaming watchdog moved into the health module.** The Level-1
   DMA-stall watchdog was migrated out of `RunApplication.c`'s main loop
   into `SDDC_FX3/health.c`, behind the `health_evaluate()` /
@@ -40,6 +41,18 @@ queryable via the `TESTFX3` vendor command.
 
 ### Fixed
 
+- **EP0 vendor-request direction is now validated (unauthenticated DoS).**
+  The vendor handler dispatched `CyU3PUsbGetEP0Data()` (OUT) /
+  `CyU3PUsbSendEP0Data()` (IN) purely on `bRequest`, never checking the
+  `bmRequestType` direction bit. A host sending a command with the wrong
+  direction (IN to an OUT-only command, or vice-versa) mismatched the EP0
+  data phase and desynced the FX3 EP0 block; a stream of such requests
+  corrupted subsequent IN responses (`hwconfig`/`GETSTATS` returned garbage)
+  and eventually wedged EP0 until a re-flash — reachable by any host. The
+  handler now checks direction against the command and STALLs a mismatch
+  before touching the data phase (status-only `HANG*` exempt; unknown codes
+  STALL regardless). Isolated by the new host-side `dir_mismatch` test and
+  validated on hardware. (#142)
 - **`INT32_MIN` undefined behaviour in the debug `%d` formatter.**
   `MyDebugSNPrint` negated a negative `int32_t` in place to get its
   magnitude — signed-overflow UB for `INT32_MIN`. It now computes the

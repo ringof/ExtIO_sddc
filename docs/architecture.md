@@ -573,23 +573,27 @@ valid argument.  For unknown argument IDs, the handler explicitly stalls
 EP0 via `CyU3PUsbStall()` and sets `isHandled = CyTrue`, producing a
 single clean STALL that the host sees as a rejected command.
 
-### Known limitation: vendor-request direction is not validated
+### Vendor-request direction validation
 
-The vendor-request handler dispatches purely on `bRequest`; it does not
-check the **direction** bit of `bmRequestType` against the command's
-expected data-stage direction.  Each handler unconditionally calls
-`CyU3PUsbGetEP0Data()` (OUT) or `CyU3PUsbSendEP0Data()` (IN) based only
-on the command.  When a (buggy or malicious) host issues a request with
-the wrong direction — an IN transfer to an OUT-only command such as
-`GPIOFX3`/`STARTFX3`, or an OUT transfer to an IN-only command such as
-`TESTFX3`/`GETSTATS` — the EP0 data phase is mismatched.  A seeded
-control-transfer fuzzer (`tests/fx3_cmd protocol_fuzz`) found that a
-stream of such malformed requests can drive EP0 into a wedged state
-(control transfers return EIO / garbage, `boot_count` unchanged, device
-still enumerated) that requires a firmware re-upload to clear.  Tracked
-as [#142](https://github.com/ringof/rx888-firmware/issues/142); a host
-can legally send these requests, so it is an unauthenticated DoS surface
-pending a direction check in the handler.
+Each handler calls `CyU3PUsbGetEP0Data()` (OUT) or `CyU3PUsbSendEP0Data()`
+(IN) based on `bRequest`, so the request's actual data-stage direction must
+match.  Before dispatch the handler checks the **direction** bit of
+`bmRequestType` against the command's expected direction and **STALLs on a
+mismatch** — an IN transfer to an OUT-only command (`GPIOFX3`, `STARTADC`,
+`I2CWFX3`, `SETARGFX3`, `STARTFX3`, `STOPFX3`, `RESETFX3`) or an OUT transfer
+to an IN-only command (`TESTFX3`, `GETSTATS`, `I2CRFX3`, `READINFODEBUG`).
+Status-only test commands (`HANGFX3`/`HANGMAIN`/`HANGCOLDSTART`) never touch
+the data phase and are exempt; unknown `bRequest` values STALL via the
+default path.
+
+Without this check, a wrong-direction request mismatches the EP0 data phase
+and desyncs the FX3 EP0 block; a stream of them corrupts subsequent IN
+responses (`hwconfig`/`GETSTATS` read back garbage) and eventually wedges EP0
+hard enough to need a re-flash.  This was an unauthenticated DoS surface — a
+host can legally send such requests — isolated by the host-side
+`tests/fx3_cmd dir_mismatch` test (well-formed requests, wrong direction
+only) and fixed by the direction guard
+([#142](https://github.com/ringof/rx888-firmware/issues/142)).
 
 ---
 
