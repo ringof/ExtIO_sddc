@@ -372,7 +372,11 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
         }
     }
 
-    cmd_u32(h, STOPFX3, 0);   /* leave the device idle */
+    /* Leave the device idle.  h may be NULL here: a failed gate re-acquire
+     * (e.g. the wedge tripped the #137 escalation and the device dropped to
+     * the bootloader) closes the handle and clears it.  Guard against it —
+     * libusb_control_transfer(NULL, ...) dereferences NULL. */
+    if (h) cmd_u32(h, STOPFX3, 0);
     if (!quiet) {
         signal(SIGINT, SIG_DFL);
         fuzz_coverage_report(&log);
