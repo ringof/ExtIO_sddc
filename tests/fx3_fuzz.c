@@ -1,6 +1,6 @@
 /*
  * fx3_fuzz.c — seeded USB/vendor-command fuzzers for the SDDC_FX3 firmware.
- * See fx3_fuzz.h and tests/FUZZ_PLAN.md (issue #139).
+ * See fx3_fuzz.h and the tests/README.md fuzzing section (issue #139).
  */
 #include "fx3_fuzz.h"
 #include "fx3_proto.h"
@@ -299,7 +299,7 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
      * the Cypress SDK fast-enumeration layer, NOT the firmware logic under
      * test; fuzzing them mostly exercises the host/kernel and can deconfigure
      * the device (host-side false positives).  Full type fuzzing is a
-     * documented follow-up (see FUZZ_PLAN.md). */
+     * possible follow-up. */
     uint8_t dir   = fuzz_below(rng, 2) ? LIBUSB_ENDPOINT_IN : LIBUSB_ENDPOINT_OUT;
     uint8_t recip = fuzz_below(rng, 100) < 70 ? LIBUSB_RECIPIENT_DEVICE
                                               : (uint8_t)fuzz_below(rng, 4);
