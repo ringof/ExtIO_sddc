@@ -5358,6 +5358,7 @@ static void usage(const char *prog)
         "  protocol_fuzz [ops] [seed]   Seeded EP0 control-transfer fuzzer (#139;\n"
         "                               default 5000 ops; prints coverage + reproduce seed)\n"
         "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
+        "  dir_mismatch [ops] [seed]    Well-formed EP0 requests, wrong direction only (#142 isolation)\n"
         "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
         "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
@@ -5732,6 +5733,11 @@ int main(int argc, char **argv)
         double secs = (argc >= 3) ? atof(argv[2]) : 60.0;
         uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
         rc = fuzz_stream(&h, secs, seed);
+
+    } else if (strcmp(cmd, "dir_mismatch") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 2000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_dir_mismatch(&h, n, seed);
 
     } else if (strcmp(cmd, "soak") == 0) {
         /* Pass &h so soak_try_reacquire() (which closes and replaces
