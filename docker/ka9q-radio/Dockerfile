@@ -1,17 +1,18 @@
 # ka9q-radio test environment for RX888mk2 firmware validation
 #
 # Build:   docker build -t ka9q-radio docker/ka9q-radio/
-# Run:     docker run --rm -it --privileged -v /dev/bus/usb:/dev/bus/usb \
-#            -p 127.0.0.1:8081:8081 ka9q-radio
+# Run:     docker run --rm -it --privileged --network host \
+#            -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro ka9q-radio
 #
-# The --privileged flag is needed because the FX3 changes USB PID during
-# firmware upload (0x00F3 -> 0x00F1), which changes the device path.
-# A plain bridge network (NOT --network host) is used: radiod, powers and
-# ka9q-web all run inside this one container, so ka9q's multicast stays on the
-# container's own lo/eth0 and is deterministic. --network host exposes every
-# host interface, and since `powers` has no --iface flag it picks one by
-# routing — on a multi-homed host radiod and powers can land on different
-# interfaces and never see each other. Publish ka9q-web's port to reach it.
+# --privileged: the FX3 changes USB PID during firmware upload (0x00F3 ->
+# 0x00F1), which changes the device path.
+# --network host: REQUIRED for radiod's in-container cold start. The post-upload
+# re-enumeration (00f3->00f1) is a USB hotplug event, delivered over a
+# netns-scoped netlink socket a bridge container can't hear, so libusb never
+# sees the re-acquired device (docs/ka9q-compat-audit.md §1). Host netns fixes
+# it. Multicast stays deterministic by keeping everything on loopback (radiod
+# defaults to lo; consumers pin -I lo). Under host net ka9q-web binds host :8081
+# directly — no -p publish needed.
 
 FROM debian:bookworm-slim AS builder
 
@@ -162,7 +163,7 @@ COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
 #   docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
-# then browse http://localhost:8081 (container publishes -p 127.0.0.1:8081:8081).
+# then browse http://localhost:8081 (under --network host ka9q-web binds host :8081 directly).
 COPY --from=builder /usr/local/lib/libonion*.so* /usr/local/lib/
 COPY --from=builder /build/ka9q-web/ka9q-web /usr/local/sbin/ka9q-web
 COPY --from=builder /build/ka9q-web/html /usr/local/share/ka9q-web/html

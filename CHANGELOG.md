@@ -41,6 +41,16 @@ below where it changes.
   parametrized — bind-mount any directory containing `SDDC_FX3.img` onto
   `/firmware` (or `FIRMWARE_DIR=… ./ka9q.sh start`), since the built `.img`
   normally lives outside the repo.
+- **ka9q test harness moved to `--network host`.** radiod's cold-start path
+  (upload firmware → FX3 re-enumerates `00f3`→`00f1` → re-acquire) depends on a
+  USB hotplug event, and hotplug is delivered over a network-namespace-scoped
+  netlink socket a bridge container can't hear — so cold start failed under
+  bridge despite the `/run/udev` mount, and works under host networking.
+  `ka9q.sh`, `ka9q_test.sh`, and the run examples now use `--network host`
+  (one model); multicast determinism is preserved by keeping everything on
+  loopback (radiod defaults to `lo`, consumers pin `-I lo`). Mechanism written
+  up in `docs/ka9q-compat-audit.md` §1, networking details in `docs/docker.md`
+  §2.
 - **New `docs/ka9q-health-inspection.md`** — a per-subsystem health/diagnostics
   runbook for inspecting ka9q-radio and the systems the harness depends on
   (USB/FX3, radiod, rx888.so/GPIF, Si5351, dbus/avahi, multicast/RTP, ka9q-web,

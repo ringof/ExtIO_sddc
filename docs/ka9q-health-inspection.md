@@ -280,8 +280,9 @@ avahi-browse -atr                                # list ALL advertised services
 
 **What it is.** radiod publishes its status stream and RTP audio on IPv4
 multicast (239.x). `control`/`tune` speak the status protocol; `monitor` plays
-RTP; `powers` requests spectra. On the container's bridge network this all
-stays on `lo`/`eth0`.
+RTP; `powers` requests spectra. The container runs `--network host` (required
+for USB hotplug / cold start — §2 and compat-audit §1), and multicast is kept
+deterministic by pinning everything to loopback (`lo`).
 
 **Direct checks:**
 
@@ -292,11 +293,13 @@ tcpdump -ni lo 'udp and multicast' -c 20   # are status/RTP datagrams flowing?
 monitor wwv-pcm.local            # audio (needs /dev/snd passthrough for sound)
 ```
 
-**The interface-pinning trap ([docker.md §2](docker.md)).** On bridge
-networking the kernel can join the multicast group on `eth0` while radiod sends
-on `lo` (or vice-versa) and they never meet — you get silence with everything
-"up." `powers`/`hf_sweep.sh`/`ka9q_smoke.sh` take `-I lo` for exactly this; if a
-manual `control`/`powers` sees nothing, suspect interface selection first.
+**The interface-pinning trap ([docker.md §2](docker.md)).** Under host
+networking an un-pinned consumer joins the group on the kernel's default-route
+interface while radiod sends on `lo` — they never meet, and you get silence
+with everything "up." `powers`/`hf_sweep.sh`/`ka9q_smoke.sh` default to `-I lo`
+for exactly this; if a manual `control`/`powers` sees nothing, suspect
+interface selection first — and if radiod logged an interface other than `lo`,
+pin the consumer to match it.
 
 **Failure signature:** `control` shows no channels / `powers` returns nothing,
 but radiod is alive and advertising → data-plane join mismatch (pin the iface),

@@ -155,9 +155,11 @@ Practical consequences:
 - This is not a `sleep(1)` problem and not fixable by more polling — the
   list never refreshes without events.  It is also not an
   rx888-driver/firmware issue: it is a libusb-in-a-namespaced-container
-  property.  The bridge-vs-host networking decision for the test harness
-  is tracked separately (see §2 and the driver-eval branch); this entry
-  documents the mechanism so the trade-off is made with eyes open.
+  property.  **Decision (driver-eval branch): the harness moved to
+  `--network host` uniformly** so cold start works everywhere; multicast
+  determinism is preserved by pinning everything to loopback (radiod
+  defaults to `lo`, consumers pin `-I lo`/`,lo`).  See §2 for the
+  interface-pinning details.
 
 ### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, cosmetic; no patch)*
 

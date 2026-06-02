@@ -49,37 +49,45 @@ Concrete things that bit us:
   `timeout` kills it. Wrap with `stdbuf -oL TOOL ...` (or have the tool
   flush) when capturing.
 
-## 2. Multicast on bridge networking — interface selection matters
+## 2. Host networking + pin multicast to loopback — interface selection matters
 
-The container uses **bridge networking** (`docker run --network bridge`,
-not `--host`) deliberately: it keeps multicast on the container's own
-interfaces and avoids the multi-homed-host hazard where `--host` lands
-producer and consumer on different host interfaces.
+The container uses **`--network host`** (not bridge). This reverses an
+earlier decision; the reason is §1: radiod's cold-start re-acquire after a
+firmware upload is a USB **hotplug** event, hotplug arrives over a
+**network-namespace-scoped** netlink socket, and a bridge container has its
+own netns and never hears it. Host netns is the only way libusb sees the
+`00f3`→`00f1` re-enumeration, so any harness that exercises cold start needs
+it. (Bridge *would* work for a flow that only ever hot-starts — e.g. one that
+pre-loads firmware host-side — but we run host net uniformly for one model.)
 
-But bridge networking introduces its own variable: the container has
-**two interfaces, `lo` and `eth0`**. radiod logs which one it picked at
-startup:
+Bridge networking was originally chosen to avoid the multi-homed-host hazard
+(producer and consumer landing on different host interfaces). Under host net
+that hazard is real again, so we neutralize it the same way ka9q itself does —
+**keep everything on loopback (`lo`)**:
 
-```
-Multicast enabled on loopback interface lo
-```
+- **radiod sends status/data on `lo`** — it logs the choice at startup:
 
-What this means:
+  ```
+  Multicast enabled on loopback interface lo
+  ```
+- **A consumer (`powers`, `monitor`, `control`) without an explicit interface
+  joins on whatever interface the kernel's routing picks** — typically the
+  default-route NIC, *not* `lo`. Send-side on `lo`, recv-side elsewhere → they
+  never meet. So consumers must be pinned.
+- ka9q's `resolve_mcast` (`src/multicast.c`) parses a `,iface` suffix on group
+  names: `hf.local,lo` pins the join to `lo`. The harness sets `SPEC_IFACE=lo`
+  by default and appends `,lo` to the group name passed to `powers`; the
+  `-I lo` defaults in `ka9q_smoke.sh`/`hf_sweep.sh` do the same.
 
-- **radiod by default sends status/data on `lo`** in this setup.
-- **A consumer (`powers`, `monitor`, `control`) without an explicit
-  interface joins the multicast group on whatever interface the kernel's
-  routing picks for the multicast destination** — typically `eth0`
-  (the default route). Result: send-side on `lo`, recv-side on `eth0`,
-  they never see each other.
-- ka9q's `resolve_mcast` (`src/multicast.c`) parses a `,iface` suffix on
-  group names: `hf.local,lo` pins the consumer's join to `lo`. In an
-  interactive shell that flips powers from 5–7s of `Invalid response,
-  length 0` retries to **instant** CSV. The harness sets `SPEC_IFACE=lo`
-  by default and appends `,lo` to the group name passed to `powers`.
+So the determinism is unchanged in practice — everything stays on `lo` — but
+it's now a property of **pinning** (radiod's default + the consumer `,lo`
+hint), not of network-namespace isolation. The multi-homed hazard only bites
+an **un-pinned** consumer; the harness pins. If you add a new consumer of a
+status group, pin its iface explicitly — don't assume routing picks `lo`.
 
-If you're adding a new consumer of a status group inside this container,
-think about the iface explicitly — don't assume routing will pick `lo`.
+> If radiod ever logs an interface other than `lo` on your host, pin the
+> consumers to match it (`SPEC_IFACE=<iface>` / `-I <iface>`). The `,lo`
+> default assumes radiod's loopback default holds; confirm with the smoke test.
 
 ## 3. avahi-daemon in this image — do not bounce it
 

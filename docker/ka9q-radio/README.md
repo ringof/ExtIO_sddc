@@ -48,10 +48,9 @@ container is Linux-only.
 ### With firmware already loaded on the device
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
 
@@ -63,12 +62,11 @@ your firmware actually lives; the in-repo `SDDC_FX3/` source tree only has an
 `.img` after you build it.
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
-  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
 
@@ -77,12 +75,16 @@ If your firmware file has a different name, mount the file directly instead:
 set `FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start` (defaults to the
 in-repo `SDDC_FX3/`).
 
-> A plain bridge network is used (not `--network host`): radiod, `powers` and
-> ka9q-web all run inside the one container, so ka9q's multicast stays on the
-> container's own `lo`/`eth0` and is deterministic. `--network host` exposes
-> every host interface and `powers` (no `--iface` flag) can pick a different
-> one than radiod on a multi-homed host. ka9q-web is published on localhost
-> (`-p 127.0.0.1:8081:8081`); NAT still provides apt egress for debugging.
+> **`--network host` is required** (not bridge). radiod's cold-start path —
+> upload firmware, FX3 re-enumerates `00f3`→`00f1`, re-acquire — depends on a
+> USB **hotplug** event, and hotplug is delivered over a **network-namespace-
+> scoped** netlink socket that a bridge container never receives, so libusb
+> fails with "device could not be found" (see `docs/ka9q-compat-audit.md` §1).
+> Host netns is the only way libusb sees the re-enumeration. Multicast stays
+> deterministic because everything is kept on **loopback**: radiod defaults to
+> `lo` and the harness consumers pin `-I lo` / `,lo` — the multi-homed hazard
+> only affects *un-pinned* consumers. Under host networking ka9q-web binds host
+> `:8081` directly, so no `-p` publish is needed.
 
 The `/run/udev` bind mount is **required** when radiod uploads the
 firmware: after the FX3 re-enumerates from `04b4:00f3` (DFU) to
@@ -209,12 +211,11 @@ documented above.  This section is for debugging the image itself
 binaries, etc.) — it deliberately omits audio passthrough.
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
-  -p 127.0.0.1:8081:8081 \
   ka9q-radio bash
 ```
 

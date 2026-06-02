@@ -69,20 +69,23 @@ cmd_start() {
     if [ -e /dev/snd ]; then
         snd_args+=(--device /dev/snd --group-add audio)
     fi
-    # Bridge network (NOT --network host): radiod, powers and ka9q-web all run
-    # in this one container, so ka9q's multicast stays on the container's own
-    # lo/eth0 and is deterministic. --network host exposes every host interface
-    # (wifi + docker0 + virbr0 + ...), and since `powers` has no --iface flag it
-    # picks one by routing — on a multi-homed host radiod and powers can land on
-    # different interfaces and never see each other. ka9q-web is reached via the
-    # published localhost port; NAT still gives apt egress for debugging.
+    # --network host is REQUIRED for radiod's in-container cold start. After it
+    # uploads firmware the FX3 re-enumerates (00f3->00f1); that re-acquire is a
+    # USB *hotplug* event, and hotplug is delivered over a netlink socket that is
+    # network-namespace-scoped — a bridge container never hears it, so libusb's
+    # device list stays stale and radiod fails with "device could not be found"
+    # (docs/ka9q-compat-audit.md §1). Host netns is the only way libusb sees the
+    # re-enumeration. Multicast stays deterministic by keeping everything on
+    # loopback: radiod defaults to lo and the harness consumers pin `,lo`/`-I lo`.
+    # The multi-homed hazard only bites UN-pinned consumers; ours pin. Under host
+    # net ka9q-web binds host :8081 directly (no -p publish).
     docker run --rm -d --name "$CONTAINER_NAME" --privileged \
+        --network host \
         -v /dev/bus/usb:/dev/bus/usb \
         -v /run/udev:/run/udev:ro \
         -v "$FIRMWARE_DIR:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
-        -p 127.0.0.1:8081:8081 \
         -e FFTW_RIGOR="$FFTW_RIGOR" \
         "$IMAGE_NAME" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
