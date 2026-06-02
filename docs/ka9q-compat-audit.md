@@ -87,18 +87,77 @@ devices, never observing the re-enumerated `04b4:00f1`, even though
 the host kernel had it fully enumerated (per `usbmon` and host-side
 `lsusb`).
 
-Fix: at `docker run` time, bind-mount `/run/udev:/run/udev:ro` so
-libusb's udev backend can see host udev events.  With that mount in
-place, the kernel finishes SuperSpeed enumeration ~430 ms after the
-last firmware byte is acked (per `usbmon`), and the upstream
-`sleep(1)` + single rescan succeeds reliably.  Verified working on
-the project's reference hardware.
+Fix (as understood then): at `docker run` time, bind-mount
+`/run/udev:/run/udev:ro` so libusb's udev backend can see host udev
+events.  With that mount in place, the kernel finishes SuperSpeed
+enumeration ~430 ms after the last firmware byte is acked (per
+`usbmon`), and the upstream `sleep(1)` + single rescan succeeds
+reliably.  Verified working on the project's reference hardware.
 
 A polling-with-timeout pattern in place of the fixed `sleep(1)`
 would be more robust on pathologically slow hosts, but it is not
 required for SDDC streaming to work, so we do not patch it — the
 cost of a not-strictly-necessary upstream ask outweighs the benefit
-on hypothetical hardware.
+on hypothetical hardware.  (The audit's own polling experiment —
+50 iterations over a stale list — is itself evidence that *more
+polling is not the fix*; see the mechanism below.)
+
+#### Update (2026-06, driver-eval bench): the `/run/udev` mount is necessary but **not sufficient** — hotplug delivery is network-namespace-scoped
+
+Re-running cold start on a second host (`bunsen`, multi-homed, while
+evaluating the `21d51fac` driver) reproduced "Error or device could
+not be found" **with `/run/udev` correctly mounted and populated**
+(verified: host `systemd-udevd` running, container `/run/udev`
+mirroring the host's `data/`/`control`).  The same run under
+`--network host` succeeds.  Hot start (device already at `00f1` when
+radiod calls `libusb_init`) works in either case.  That isolates the
+variable to the **network namespace**, and the mechanism is:
+
+libusb's Linux backend needs **two distinct things, over two distinct
+paths**:
+
+1. **Device files** — `/dev/bus/usb`, `/sys`, and the udev database in
+   `/run/udev/data` — to *enumerate* and read attributes.  These are
+   filesystem objects; `--privileged` + the `/run/udev` bind-mount
+   satisfy this inside any container.
+2. **Hotplug events** — "a device just appeared / re-enumerated" —
+   delivered over a **netlink socket** (`NETLINK_KOBJECT_UEVENT`) that
+   the kernel and `systemd-udevd` broadcast on.  **Netlink delivery is
+   per-network-namespace.**  A bridge-networked container has its own
+   netns, so those uevents (broadcast in the host's netns) never reach
+   libusb's listener inside the container.  libusb's device list is
+   maintained by that event thread, so with no events it stays frozen —
+   exactly the "50 iterations, same 8 cached devices" symptom above.
+
+So the `/run/udev` mount fixes path (1), **not** path (2).  `--network
+host` puts libusb's netlink socket back in the namespace where the
+uevents are broadcast, which is why it — and only it — makes cold start
+work on `bunsen`.
+
+This **refines** (does not simply overturn) the reference-hardware
+result: the variable not controlled for in the original test was the
+container's netns.  The most likely reconciliation is that the
+reference run shared the host netns (or its kernel delivered uevents
+across netns); the open item is to confirm the reference container's
+networking.  Until then, treat the rule as: **the `/run/udev` mount is
+required for enumeration, and a shared (host) network namespace is
+required for hotplug-driven re-acquire after the firmware-upload
+re-enumeration.**
+
+Practical consequences:
+
+- **Hot start** (device present at `libusb_init`) needs neither host
+  netns nor hotplug — the one-time enumeration scan finds it.  This is
+  why pre-loading firmware sidesteps the whole problem.
+- **Cold start** (radiod uploads firmware → FX3 drops to `00f3` →
+  returns as `00f1`) *is* a hotplug event, so a harness that must
+  exercise it needs the container in the host network namespace.
+- This is not a `sleep(1)` problem and not fixable by more polling — the
+  list never refreshes without events.  It is also not an
+  rx888-driver/firmware issue: it is a libusb-in-a-namespaced-container
+  property.  The bridge-vs-host networking decision for the test harness
+  is tracked separately (see §2 and the driver-eval branch); this entry
+  documents the mechanism so the trade-off is made with eyes open.
 
 ### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, cosmetic; no patch)*
 
