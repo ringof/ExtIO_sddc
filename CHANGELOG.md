@@ -35,6 +35,12 @@ below where it changes.
   `hack_no_usb_reset` key for the new `reset = no` (default-off) key. See
   `docs/ka9q-compat-audit.md` §12. *(Test-environment change; not a firmware
   change. Under bench evaluation.)*
+- **ka9q test container cold-boot ergonomics.** The container now defaults
+  `FFTW_RIGOR=estimate` (instant cold boot for compatibility checks; set
+  `measure`/`patient` for long-term operation), and the firmware location is
+  parametrized — bind-mount any directory containing `SDDC_FX3.img` onto
+  `/firmware` (or `FIRMWARE_DIR=… ./ka9q.sh start`), since the built `.img`
+  normally lives outside the repo.
 - **New `docs/ka9q-health-inspection.md`** — a per-subsystem health/diagnostics
   runbook for inspecting ka9q-radio and the systems the harness depends on
   (USB/FX3, radiod, rx888.so/GPIF, Si5351, dbus/avahi, multicast/RTP, ka9q-web,

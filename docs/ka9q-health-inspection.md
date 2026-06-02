@@ -342,13 +342,14 @@ entrypoint generates it on first run and persists it (bind-mount
 
 ```sh
 ls -l /var/lib/ka9q-radio/wisdom        # present + non-empty?
-echo "$FFTW_RIGOR"                       # estimate|measure(default)|patient|exhaustive
+echo "$FFTW_RIGOR"                       # default estimate (instant); measure|patient|exhaustive
 ```
 
-**Signature:** a *slow first start* (minutes, or hours at `patient`) is wisdom
-generation, not a hang. Missing/!-matched wisdom → radiod falls back to
-`FFTW_ESTIMATE` (works, slower runtime) — never a hard failure. Sizes for the
-default config: `rof1620000 cob240` (see `entrypoint.sh`).
+**Signature:** with the default `FFTW_RIGOR=estimate` cold boot is instant; a
+*slow first start* (minutes, or hours at `patient`) means someone set a higher
+rigor — that's wisdom generation, not a hang. Missing/!-matched wisdom → radiod
+falls back to `FFTW_ESTIMATE` (works, slower runtime) — never a hard failure.
+Sizes for the default config: `rof1620000 cob240` (see `entrypoint.sh`).
 
 ---
 

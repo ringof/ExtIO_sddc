@@ -33,6 +33,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # This script lives in docker/ka9q-radio/; project root is two levels up.
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Directory bind-mounted to /firmware (must contain SDDC_FX3.img). Defaults to
+# the in-repo SDDC_FX3/ tree; override to point at firmware built/kept outside
+# the repo, e.g.  FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start
+FIRMWARE_DIR="${FIRMWARE_DIR:-$PROJECT_ROOT/SDDC_FX3}"
+
+# FFTW planning rigor. Default "estimate" for an instant cold boot on this
+# test/eval image; set FFTW_RIGOR=measure|patient for long-term operation.
+FFTW_RIGOR="${FFTW_RIGOR:-estimate}"
+
 usage() {
     sed -n '3,/^$/s/^# \?//p' "$0"
 }
@@ -46,9 +55,11 @@ cmd_start() {
         echo "Container '$CONTAINER_NAME' is already running."
         return 0
     fi
-    if [ ! -f "$PROJECT_ROOT/SDDC_FX3/SDDC_FX3.img" ]; then
-        echo "WARNING: $PROJECT_ROOT/SDDC_FX3/SDDC_FX3.img not found."
-        echo "         Firmware upload will fail unless the device is already loaded."
+    if [ ! -f "$FIRMWARE_DIR/SDDC_FX3.img" ]; then
+        echo "WARNING: $FIRMWARE_DIR/SDDC_FX3.img not found."
+        echo "         Set FIRMWARE_DIR=/abs/path/to/firmware-dir to point at"
+        echo "         external firmware. Upload will fail unless the device is"
+        echo "         already loaded (PID 0x00F1)."
     fi
     mkdir -p "$PROJECT_ROOT/wisdom"
     # /dev/snd + audio group give the in-container `monitor` access to host
@@ -68,11 +79,11 @@ cmd_start() {
     docker run --rm -d --name "$CONTAINER_NAME" --privileged \
         -v /dev/bus/usb:/dev/bus/usb \
         -v /run/udev:/run/udev:ro \
-        -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \
+        -v "$FIRMWARE_DIR:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
         -p 127.0.0.1:8081:8081 \
-        -e FFTW_RIGOR="${FFTW_RIGOR:-measure}" \
+        -e FFTW_RIGOR="$FFTW_RIGOR" \
         "$IMAGE_NAME" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
     echo "Follow logs:  docker logs -f $CONTAINER_NAME"

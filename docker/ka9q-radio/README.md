@@ -57,15 +57,25 @@ docker run --rm -it --privileged \
 
 ### With firmware upload (radiod handles it)
 
+Bind-mount the directory that contains your built `SDDC_FX3.img` onto
+`/firmware`. That directory is **external to the image** — point it wherever
+your firmware actually lives; the in-repo `SDDC_FX3/` source tree only has an
+`.img` after you build it.
+
 ```
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
+  -v /abs/path/to/firmware-dir:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
+
+If your firmware file has a different name, mount the file directly instead:
+`-v /abs/path/to/your.img:/firmware/SDDC_FX3.img`. With the `ka9q.sh` helper,
+set `FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start` (defaults to the
+in-repo `SDDC_FX3/`).
 
 > A plain bridge network is used (not `--network host`): radiod, `powers` and
 > ka9q-web all run inside the one container, so ka9q's multicast stays on the
@@ -93,15 +103,17 @@ Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
 
 | Value        | First-run time           | Runtime FFT performance |
 |--------------|--------------------------|-------------------------|
-| `estimate`   | instant                  | slowest                 |
-| `measure`    | minutes (default)        | near-optimal            |
+| `estimate`   | instant (default)        | slowest                 |
+| `measure`    | minutes                  | near-optimal            |
 | `patient`    | hours (1.62M-point FFT)  | optimal                 |
 | `exhaustive` | many hours to days       | marginally > patient    |
 
-Pass it with `-e FFTW_RIGOR=<value>` on `docker run`, e.g.
-`-e FFTW_RIGOR=estimate` for a quick firmware-validation session, or
-`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term
-and want the most efficient FFT plans.
+The default is **`estimate`** so a cold boot of this test/eval image is
+instant — appropriate for firmware-compatibility checks, where optimal
+runtime FFT plans don't matter. Override with `-e FFTW_RIGOR=<value>` on
+`docker run` (or `FFTW_RIGOR=measure ./ka9q.sh start`), e.g.
+`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term and
+want the most efficient FFT plans.
 
 ### Tuning and listening (helper script)
 
@@ -200,10 +212,16 @@ binaries, etc.) — it deliberately omits audio passthrough.
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
+  -v /abs/path/to/firmware-dir:/firmware \
+  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   -p 127.0.0.1:8081:8081 \
   ka9q-radio bash
 ```
+
+> The `wisdom` mount + the default `FFTW_RIGOR=estimate` keep this debug
+> shell's cold boot instant; without the wisdom mount you still pay only the
+> instant `estimate` plan. Point `/firmware` at wherever your built
+> `SDDC_FX3.img` lives (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
 
 Then inside the container:
 
