@@ -332,6 +332,19 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
     fuzz_record(log, &op, streaming);
 }
 
+/* #148: does the device still stream?  The EP0 health gate only checks
+ * TESTFX3 + GETSTATS, so a run that left the device unable to stream (e.g.
+ * protocol_fuzz reconfigured the Si5351 via I2CWFX3) could still report PASS.
+ * Probe streaming so the final verdict is honest.  Returns 1 if data flows. */
+static int fuzz_streams_ok(libusb_device_handle *h)
+{
+    if (!h) return 0;
+    cmd_u32(h, STARTADC, 32000000);
+    int got = primed_start_and_read_retry(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+    return got > 0;
+}
+
 static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
                               uint64_t seed, int quiet)
 {
@@ -380,10 +393,21 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
     if (!quiet) {
         signal(SIGINT, SIG_DFL);
         fuzz_coverage_report(&log);
-        if (rc == 0)
-            printf("PASS protocol_fuzz: %llu ops, %u resets, %u/%u health checks ok\n",
-                   (unsigned long long)log.seq, log.resets,
-                   log.health_checks - log.health_fails, log.health_checks);
+        if (rc == 0) {
+            /* #148: EP0 survived — confirm the device still streams. */
+            if (fuzz_streams_ok(h)) {
+                printf("PASS protocol_fuzz: %llu ops, %u resets, %u/%u health "
+                       "checks ok (device streams)\n",
+                       (unsigned long long)log.seq, log.resets,
+                       log.health_checks - log.health_fails, log.health_checks);
+            } else {
+                printf("WARN protocol_fuzz: %llu ops, EP0 healthy but NOT "
+                       "streaming — Si5351 likely reconfigured by I2CWFX3 fuzz; "
+                       "device needs a reload before streaming.\n",
+                       (unsigned long long)log.seq);
+                rc = 2;   /* caller reload-verifies if -F is available */
+            }
+        }
     } else if (rc != 0) {
         /* Burst mode still surfaces the seed so a soak failure reproduces. */
         printf(">>> protocol_fuzz_burst FAIL seed=0x%016llx\n",
@@ -485,10 +509,142 @@ int fuzz_dir_mismatch(libusb_device_handle **h_inout, long num_ops, uint64_t see
     if (h) cmd_u32(h, STOPFX3, 0);
     signal(SIGINT, SIG_DFL);
     fuzz_coverage_report(&log);
-    if (rc == 0)
-        printf("PASS dir_mismatch: %llu wrong-direction ops, device healthy "
-               "(direction mismatch did NOT wedge EP0)\n",
+    if (rc == 0) {
+        /* #148: dir_mismatch STALLs all wrong-direction I2CWFX3 (no Si5351
+         * write lands), so a healthy device should still stream — a strong
+         * signal here. */
+        if (fuzz_streams_ok(h)) {
+            printf("PASS dir_mismatch: %llu wrong-direction ops, device healthy "
+                   "and streaming (direction mismatch did NOT wedge EP0)\n",
+                   (unsigned long long)log.seq);
+        } else {
+            printf("WARN dir_mismatch: %llu ops, EP0 healthy but NOT streaming — "
+                   "unexpected (dir_mismatch shouldn't reconfigure the Si5351); "
+                   "needs reload-verify.\n", (unsigned long long)log.seq);
+            rc = 2;
+        }
+    }
+    *h_inout = h;
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* ep0_sweep — deterministic exhaustive bRequest x direction (#149)   */
+/* ------------------------------------------------------------------ */
+
+/* Correct data-phase direction for a known command: 1=IN, 0=OUT, -1=unknown.
+ * Reuses the DIR_TMPL classification. */
+static int known_dir(uint8_t code)
+{
+    for (int i = 0; i < NDIR_TMPL; i++)
+        if (DIR_TMPL[i].code == code) return DIR_TMPL[i].dir_in;
+    return -1;
+}
+
+/* Deterministically send every bRequest 0..255 in BOTH directions (IN/OUT)
+ * and assert the #142 invariant across the whole space: no wrong-direction or
+ * unknown request is accepted, and the device survives the entire sweep
+ * (no wedge, no reset).  Unlike the seed-sampled protocol_fuzz/dir_mismatch,
+ * this is a provable, repeatable pass over the full small space.
+ *
+ * Destructive: sending real OUT commands runs their side effects (STARTADC,
+ * GPIOFX3, ...), so it mutates clock/GPIO state — reload before streaming
+ * afterward.  Skips RESETFX3/HANG* (they reset/hang the device).  wLength=64
+ * (<= EP0 max, no oversize STALL) so IN handlers have room and OUT handlers
+ * get a full data phase. */
+int fuzz_ep0_sweep(libusb_device_handle **h_inout)
+{
+    libusb_device_handle *h = *h_inout;
+    struct fuzz_log log; fuzz_log_init(&log);
+    uint32_t boot = 0;
+
+    fuzz_stop = 0;
+    signal(SIGINT, fuzz_sigint);
+    printf("=== EP0_SWEEP === bRequest 0..255 x {OUT,IN}, wLength=64 "
+           "(deterministic; destructive — mutates clock/GPIO)\n");
+
+    if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+        printf("FAIL ep0_sweep: device unhealthy before start\n");
+        signal(SIGINT, SIG_DFL);
+        *h_inout = h;
+        return 1;
+    }
+
+    static uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+    int unexpected = 0;
+    int first_bad = -1;
+    int rc = 0;
+
+    for (int code = 0; code < 256 && !fuzz_stop; code++) {
+        if (code == RESETFX3 || code == HANGFX3 ||
+            code == HANGMAIN || code == HANGCOLDSTART)
+            continue;   /* destructive — would reset/hang the device */
+
+        for (int in = 0; in < 2; in++) {
+            uint8_t bmrt = (in ? LIBUSB_ENDPOINT_IN : LIBUSB_ENDPOINT_OUT)
+                         | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE;
+            int r = libusb_control_transfer(h, bmrt, (uint8_t)code, 0, 0,
+                                            buf, (uint16_t)sizeof(buf), 250);
+            struct fuzz_op op = { bmrt, (uint8_t)code, 0, 0,
+                                  (uint16_t)sizeof(buf), (uint16_t)sizeof(buf), r };
+            fuzz_record(&log, &op, 0);
+
+            /* #142 invariant: a wrong-direction or unknown request must NOT be
+             * accepted.  expected_accept = known command in its correct
+             * direction (it may still legitimately STALL on these zero args). */
+            int kd = known_dir((uint8_t)code);
+            int expected_accept = (kd >= 0 && in == kd);
+            if (r >= 0 && !expected_accept) {
+                unexpected++;
+                if (first_bad < 0) first_bad = (code << 1) | in;
+            }
+        }
+
+        if ((code & 0x1f) == 0x1f) {   /* health-gate (and STOP) every 32 codes */
+            cmd_u32(h, STOPFX3, 0);
+            if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+                printf("FAIL ep0_sweep: device wedged after bRequest 0x%02X\n", code);
+                fuzz_dump(&log, 0, "ep0_sweep", h);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (rc == 0) {
+        cmd_u32(h, STOPFX3, 0);
+        if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+            printf("FAIL ep0_sweep: device wedged after the sweep\n");
+            fuzz_dump(&log, 0, "ep0_sweep", h);
+            rc = 1;
+        }
+    }
+
+    signal(SIGINT, SIG_DFL);
+    fuzz_coverage_report(&log);
+
+    if (rc == 0 && unexpected > 0) {
+        printf("FAIL ep0_sweep: %d wrong-direction/unknown request(s) ACCEPTED "
+               "(first: bReq=0x%02X %s) — direction-guard gap (#142)\n",
+               unexpected, first_bad >> 1, (first_bad & 1) ? "IN" : "OUT");
+        rc = 1;
+    } else if (rc == 0 && log.resets > 0) {
+        /* fuzz_gate counts (and re-acquires through) re-enumerations — a
+         * boot_count change in fuzz_probe or a NO_DEVICE reacquire — without
+         * failing.  The sweep's invariant is that NO (bRequest,direction)
+         * resets the device, so enforce it explicitly here; otherwise a
+         * reset-inducing request could still print "boot steady". */
+        printf("FAIL ep0_sweep: device reset %u time(s) during the sweep — a "
+               "(bRequest,direction) request triggered a re-enumeration\n",
+               log.resets);
+        rc = 1;
+    } else if (rc == 0) {
+        printf("PASS ep0_sweep: %llu requests (all bRequest x IN/OUT), no "
+               "wrong-direction/unknown accepted, no resets, device healthy. "
+               "NOTE: clock/GPIO mutated — reload before streaming.\n",
                (unsigned long long)log.seq);
+    }
     *h_inout = h;
     return rc;
 }
@@ -704,9 +860,17 @@ static int stream_fuzz_core(libusb_device_handle **h_inout, double seconds,
         printf("  stream_fuzz: %llu bulk/EP0 ops, %u resets, %u/%u health ok\n",
                (unsigned long long)log.seq, log.resets,
                log.health_checks - log.health_fails, log.health_checks);
-        if (rc == 0)
-            printf("PASS stream_fuzz: device survived %.1fs of stream fuzzing\n",
-                   seconds);
+        if (rc == 0) {
+            /* #148: confirm the device still streams after the run. */
+            if (fuzz_streams_ok(h)) {
+                printf("PASS stream_fuzz: device survived %.1fs of stream fuzzing "
+                       "(still streams)\n", seconds);
+            } else {
+                printf("WARN stream_fuzz: survived %.1fs but EP0-healthy and NOT "
+                       "streaming — needs reload-verify.\n", seconds);
+                rc = 2;
+            }
+        }
     } else if (rc != 0) {
         printf(">>> stream_fuzz_burst FAIL seed=0x%016llx\n",
                (unsigned long long)seed);

@@ -28,6 +28,15 @@ int fuzz_stream(libusb_device_handle **h_inout, double seconds, uint64_t seed);
  * flipped — confirms wrong-direction alone wedges EP0 (build-free falsifier). */
 int fuzz_dir_mismatch(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
 
+/* #149: deterministic exhaustive sweep of every bRequest 0..255 x {IN,OUT};
+ * asserts no wrong-direction/unknown request is accepted and the device
+ * survives — the regression test for the #142 direction guard. */
+int fuzz_ep0_sweep(libusb_device_handle **h_inout);
+
+/* #148: the standalone fuzzers return 2 when the device is EP0-healthy but no
+ * longer streaming (Si5351 likely reconfigured by fuzz); main() maps that to a
+ * reload-and-re-verify recovery check. */
+
 /* Bounded soak bursts — seed derived from the soak's rand() so they stay
  * reproducible from the soak seed.  Obey soak conventions (STOPFX3 on exit,
  * no intentional re-enumeration). */

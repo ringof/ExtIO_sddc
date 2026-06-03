@@ -5283,6 +5283,49 @@ static int do_test_main_recovery(libusb_device_handle *h)
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
+/* #148: a fuzz run returned 2 — the device is EP0-healthy but no longer
+ * streaming, almost always because the fuzzer reconfigured the Si5351 via
+ * I2CWFX3 (a legal host op, not a firmware bug).  Confirm it's *recoverable*:
+ * reload firmware and re-verify streaming.  Needs a firmware image (-F or the
+ * ../SDDC_FX3 fallback); without one we can only WARN.  Returns 0 if the
+ * device streams again (or we couldn't verify), 1 if it cannot stream even
+ * after a reload (real firmware/clock damage). */
+static int fuzz_reload_verify(libusb_device_handle **h)
+{
+    const char *fw = g_firmware_path;
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0)
+        fw = (access(fallback, R_OK) == 0) ? fallback : NULL;
+
+    if (!fw) {
+        printf("# reload-verify: no firmware image (-F) — cannot confirm "
+               "recovery.  Reload before streaming.  Treating EP0 survival as PASS.\n");
+        return 0;
+    }
+    printf("# reload-verify: reloading firmware to confirm the device recovers...\n");
+    if (*h) { close_rx888(*h); *h = NULL; }
+    if (do_reload(g_ctx, fw) != 0) {
+        printf("FAIL: reload failed during recovery verify\n");
+        return 1;
+    }
+    *h = open_rx888(g_ctx);
+    if (!*h) {
+        printf("FAIL: reopen after reload failed\n");
+        return 1;
+    }
+    cmd_u32(*h, STARTADC, 32000000);
+    int got = primed_start_and_read_retry(*h, 16384, 2000);
+    cmd_u32(*h, STOPFX3, 0);
+    if (got > 0) {
+        printf("PASS: device recovered after reload — the fuzz run had "
+               "reconfigured the Si5351; firmware is fine.\n");
+        return 0;
+    }
+    printf("FAIL: device cannot stream even after reload — possible "
+           "firmware/clock damage.\n");
+    return 1;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -5359,6 +5402,7 @@ static void usage(const char *prog)
         "                               default 5000 ops; prints coverage + reproduce seed)\n"
         "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
         "  dir_mismatch [ops] [seed]    Well-formed EP0 requests, wrong direction only (#142 isolation)\n"
+        "  ep0_sweep                    Deterministic bRequest 0..255 x IN/OUT direction sweep (#149)\n"
         "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
         "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
@@ -5728,16 +5772,22 @@ int main(int argc, char **argv)
         long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
         uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
         rc = fuzz_protocol(&h, n, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
 
     } else if (strcmp(cmd, "stream_fuzz") == 0) {
         double secs = (argc >= 3) ? atof(argv[2]) : 60.0;
         uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
         rc = fuzz_stream(&h, secs, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
 
     } else if (strcmp(cmd, "dir_mismatch") == 0) {
         long n = (argc >= 3) ? (long)parse_num(argv[2]) : 2000;
         uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
         rc = fuzz_dir_mismatch(&h, n, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
+
+    } else if (strcmp(cmd, "ep0_sweep") == 0) {
+        rc = fuzz_ep0_sweep(&h);                    /* #149 */
 
     } else if (strcmp(cmd, "soak") == 0) {
         /* Pass &h so soak_try_reacquire() (which closes and replaces

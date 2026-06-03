@@ -263,8 +263,28 @@ is visible — enough to reproduce with the same seed.
 ```
 ./fx3_cmd protocol_fuzz [ops] [seed]     # default 5000 ops
 ./fx3_cmd stream_fuzz   [secs] [seed]    # default 60 s
+./fx3_cmd dir_mismatch  [ops] [seed]     # well-formed, wrong direction only (#142)
+./fx3_cmd ep0_sweep                      # deterministic 0..255 x IN/OUT (#149)
 ./fx3_cmd protocol_fuzz 5000 0x12345678  # reproducible run
 ```
+
+**Streaming/clock-health gate (#148).** The periodic gate only checks
+`TESTFX3` + `GETSTATS`, which a run can pass while having reconfigured the
+Si5351 via `I2CWFX3` and left the device unable to stream.  So at the end of
+a `protocol_fuzz`/`stream_fuzz`/`dir_mismatch` run the harness also **probes
+streaming**: if the device still streams it's a clean PASS; if EP0 is healthy
+but streaming is down (almost always the fuzz reconfigured the clock — a
+legal host op, not a firmware bug), it **reload-verifies** — with `-F` it
+reloads firmware and re-checks streaming (recovers ⇒ PASS-with-note, can't ⇒
+FAIL); without `-F` it WARNs.  A true EP0 wedge still FAILs immediately.
+
+**`ep0_sweep` (#149)** deterministically sends every `bRequest` 0–255 in both
+directions (skipping `RESETFX3`/`HANG*`) and asserts the #142 invariant across
+the whole space: no wrong-direction or unknown request is accepted, and the
+device survives the sweep (no wedge/reset).  It's the provable regression for
+the direction guard, complementing the seed-sampled `protocol_fuzz`.  It
+mutates clock/GPIO state (it runs real OUT commands), so reload before
+streaming afterward.
 
 **`protocol_fuzz`** generates random EP0 control transfers: `bRequest`
 (biased to the known command set, plus unknown codes), `bmRequestType`
