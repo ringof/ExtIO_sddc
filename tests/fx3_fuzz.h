@@ -24,6 +24,10 @@
 int fuzz_protocol(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
 int fuzz_stream(libusb_device_handle **h_inout, double seconds, uint64_t seed);
 
+/* #142 isolation: well-formed vendor requests with only the direction bit
+ * flipped — confirms wrong-direction alone wedges EP0 (build-free falsifier). */
+int fuzz_dir_mismatch(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
+
 /* Bounded soak bursts — seed derived from the soak's rand() so they stay
  * reproducible from the soak seed.  Obey soak conventions (STOPFX3 on exit,
  * no intentional re-enumeration). */

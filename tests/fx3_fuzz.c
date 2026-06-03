@@ -399,6 +399,101 @@ int fuzz_protocol(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
 }
 
 /* ------------------------------------------------------------------ */
+/* dir_mismatch — #142 isolation: well-formed vendor requests with ONLY*/
+/* the data-phase direction bit flipped.  Everything else (bRequest,   */
+/* wValue, wIndex, wLength, payload) is valid for the command, so if    */
+/* this alone wedges EP0 it isolates wrong-direction as the cause       */
+/* (independent of oversize / bad-I2C / unknown-code malformations).    */
+/* Build-free falsifier for the #142 hypothesis — run before flashing   */
+/* the firmware direction guard.                                        */
+/* ------------------------------------------------------------------ */
+
+/* Well-formed templates: correct direction + plausible args per command.
+ * dir_in = the command's CORRECT direction (we send the OPPOSITE). */
+struct dir_tmpl { uint8_t code; int dir_in; uint16_t wValue, wIndex, wLength; uint32_t payload; };
+static const struct dir_tmpl DIR_TMPL[] = {
+    { TESTFX3,       1, 0,    0,         4,            0 },
+    { GETSTATS,      1, 0,    0,         GETSTATS_LEN, 0 },
+    { I2CRFX3,       1, 0xC0, 0,         1,            0 },
+    { READINFODEBUG, 1, 0,    0,         64,           0 },
+    { GPIOFX3,       0, 0,    0,         4,            0x0820 },     /* LED_BLUE|SHDWN = idle */
+    { STARTADC,      0, 0,    0,         4,            32000000 },
+    { I2CWFX3,       0, 0xC0, 0,         1,            0 },
+    { SETARGFX3,     0, 0,    DAT31_ATT, 1,            0 },
+    { STARTFX3,      0, 0,    0,         4,            0 },
+    { STOPFX3,       0, 0,    0,         4,            0 },
+};
+#define NDIR_TMPL ((int)(sizeof(DIR_TMPL) / sizeof(DIR_TMPL[0])))
+
+static void dir_mismatch_step(libusb_device_handle *h, struct fuzz_rng *rng,
+                              struct fuzz_log *log)
+{
+    const struct dir_tmpl *t = &DIR_TMPL[fuzz_below(rng, NDIR_TMPL)];
+
+    /* Flip the direction: an IN command sent OUT, an OUT command sent IN. */
+    uint8_t flipped = t->dir_in ? LIBUSB_ENDPOINT_OUT : LIBUSB_ENDPOINT_IN;
+    uint8_t bmrt = flipped | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE;
+
+    static uint8_t buf[64];
+    uint16_t plen = t->wLength <= sizeof(buf) ? t->wLength : (uint16_t)sizeof(buf);
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, &t->payload, plen < 4 ? plen : 4);
+
+    int rc = libusb_control_transfer(h, bmrt, t->code, t->wValue, t->wIndex,
+                                     buf, plen, 250);
+    struct fuzz_op op = { bmrt, t->code, t->wValue, t->wIndex, t->wLength, plen, rc };
+    fuzz_record(log, &op, /*streaming=*/0);
+}
+
+int fuzz_dir_mismatch(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
+{
+    libusb_device_handle *h = *h_inout;
+    if (num_ops <= 0) num_ops = 2000;
+    seed = fuzz_seed_or_time(seed);
+    struct fuzz_rng rng = { seed };
+    struct fuzz_log log; fuzz_log_init(&log);
+
+    fuzz_stop = 0;
+    signal(SIGINT, fuzz_sigint);
+    printf("=== DIR_MISMATCH === ops=%ld seed=0x%016llx (well-formed, wrong direction only)\n",
+           num_ops, (unsigned long long)seed);
+
+    uint32_t boot = 0;
+    if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+        printf("FAIL dir_mismatch: device unhealthy before start\n");
+        *h_inout = h;
+        return 1;
+    }
+
+    int rc = 0;
+    for (long i = 0; i < num_ops && !fuzz_stop; i++) {
+        dir_mismatch_step(h, &rng, &log);
+        if ((i + 1) % 64 == 0) {
+            int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
+            if (hc != 0) {
+                printf("FAIL dir_mismatch: health gate failed at op %ld (%s) "
+                       "— wrong-direction requests alone wedged EP0 (#142 confirmed)\n",
+                       i + 1, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
+                                                      : libusb_strerror(hc));
+                fuzz_dump(&log, seed, "dir_mismatch", h);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (h) cmd_u32(h, STOPFX3, 0);
+    signal(SIGINT, SIG_DFL);
+    fuzz_coverage_report(&log);
+    if (rc == 0)
+        printf("PASS dir_mismatch: %llu wrong-direction ops, device healthy "
+               "(direction mismatch did NOT wedge EP0)\n",
+               (unsigned long long)log.seq);
+    *h_inout = h;
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
 /* stream_fuzz — async bulk + host-lifecycle fuzzer                   */
 /* ------------------------------------------------------------------ */
 #define SF_POOL 8

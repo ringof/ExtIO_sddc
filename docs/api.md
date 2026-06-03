@@ -13,8 +13,8 @@ image.  Every claim on this page cites a source file and line in the
 firmware tree; if behavior differs between this page and the source, the
 source is authoritative — please open an issue.
 
-Reference firmware version: **2.5**
-(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=5` —
+Reference firmware version: **2.6**
+(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=6` —
 `SDDC_FX3/protocol.h:10-11`).
 
 1. TOC
@@ -54,14 +54,14 @@ EP0 vendor requests are limited to **64 bytes of data-phase payload**
 `wLength > 64` are rejected with a STALL on EP0 before any data phase
 runs (`USBHandler.c:187-193`).
 
-> **Known limitation — direction is not validated.** Each command's
-> data-stage direction (the IN/OUT column below) is the *expected*
-> direction, but the handler dispatches purely on `bRequest` and does
-> not check the `bmRequestType` direction bit.  A host that sends a
-> command with the wrong direction (IN to an OUT-only command, or vice
-> versa) mismatches the EP0 data phase; a stream of such malformed
-> requests can wedge EP0 until a firmware re-upload. Tracked as
-> [#142](https://github.com/ringof/rx888-firmware/issues/142).
+> **Direction is validated.** The data-stage direction (the IN/OUT column
+> below) is enforced: the handler checks the `bmRequestType` direction bit
+> against the command and **STALLs a mismatch** (an IN transfer to an
+> OUT-only command, or vice-versa) before touching the data phase. This
+> closes [#142](https://github.com/ringof/rx888-firmware/issues/142), where a
+> stream of wrong-direction requests would desync and wedge EP0 until a
+> re-flash. Status-only test commands (`HANGFX3`/`HANGMAIN`/`HANGCOLDSTART`)
+> are exempt; unknown `bRequest` values STALL regardless.
 
 The streaming IQ pipeline uses 4 DMA buffers of 16 KB each
 (`Application.h:41-44`), assembled in a multi-channel ping-pong from
