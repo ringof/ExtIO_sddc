@@ -33,6 +33,10 @@ int fuzz_dir_mismatch(libusb_device_handle **h_inout, long num_ops, uint64_t see
  * survives — the regression test for the #142 direction guard. */
 int fuzz_ep0_sweep(libusb_device_handle **h_inout);
 
+/* #154 isolation: malformed I2CWFX3/I2CRFX3 only (correct direction, random
+ * addr/reg/len) — confirms whether the I2C path alone wedges EP0. */
+int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
+
 /* #148: the standalone fuzzers return 2 when the device is EP0-healthy but no
  * longer streaming (Si5351 likely reconfigured by fuzz); main() maps that to a
  * reload-and-re-verify recovery check. */
