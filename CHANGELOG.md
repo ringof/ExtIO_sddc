@@ -61,6 +61,18 @@ queryable via the `TESTFX3` vendor command.
 
 ### Added
 
+- **Post-fuzz streaming/clock-health gate + deterministic EP0 direction sweep.**
+  The fuzz health gate (`TESTFX3`+`GETSTATS`) couldn't see a device left unable
+  to stream after a run reconfigured the Si5351 via `I2CWFX3`, so a dead-clock
+  device reported PASS. `protocol_fuzz`/`stream_fuzz`/`dir_mismatch` now probe
+  streaming at the end: streams ⇒ PASS; EP0-healthy-but-not-streaming ⇒
+  reload-verify (with `-F`: reload + re-check — recovers ⇒ PASS-with-note,
+  can't ⇒ FAIL; without `-F`: WARN); EP0 wedged ⇒ FAIL (#148). New `ep0_sweep`
+  deterministically exercises every `bRequest` 0–255 × {IN,OUT} (skipping
+  `RESETFX3`/`HANG*`) and asserts no wrong-direction/unknown request is
+  accepted and the device survives — the provable regression for the #142
+  direction guard, complementing the seed-sampled fuzzers (#149). Host-side
+  test tooling only.
 - **Host enumeration-race test coverage + open backoff.** `open_rx888()`
   now absorbs a udev/libusb permission-settle race: it distinguishes a
   present-but-unopenable device (retries with bounded backoff, ~2 s, env
