@@ -629,9 +629,19 @@ int fuzz_ep0_sweep(libusb_device_handle **h_inout)
                "(first: bReq=0x%02X %s) — direction-guard gap (#142)\n",
                unexpected, first_bad >> 1, (first_bad & 1) ? "IN" : "OUT");
         rc = 1;
+    } else if (rc == 0 && log.resets > 0) {
+        /* fuzz_gate counts (and re-acquires through) re-enumerations — a
+         * boot_count change in fuzz_probe or a NO_DEVICE reacquire — without
+         * failing.  The sweep's invariant is that NO (bRequest,direction)
+         * resets the device, so enforce it explicitly here; otherwise a
+         * reset-inducing request could still print "boot steady". */
+        printf("FAIL ep0_sweep: device reset %u time(s) during the sweep — a "
+               "(bRequest,direction) request triggered a re-enumeration\n",
+               log.resets);
+        rc = 1;
     } else if (rc == 0) {
         printf("PASS ep0_sweep: %llu requests (all bRequest x IN/OUT), no "
-               "wrong-direction/unknown accepted, device healthy (boot steady). "
+               "wrong-direction/unknown accepted, no resets, device healthy. "
                "NOTE: clock/GPIO mutated — reload before streaming.\n",
                (unsigned long long)log.seq);
     }
