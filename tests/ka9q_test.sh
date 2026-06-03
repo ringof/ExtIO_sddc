@@ -346,6 +346,26 @@ fi
 if ! dev_present_app && ! dev_present_boot; then
     echo "Bail out! no RX888 on USB (VID $VID, PID $PID_APP/$PID_BOOT)"; exit 1
 fi
+# Refuse to start if the RX888 is loaded but already CLAIMED by something else.
+# A stale `./ka9q.sh start` container ("ka9q-radio") or a stray radiod owns the
+# USB interface; the soak's radiod then fails with "Error claiming USB
+# interface" — 60s readiness timeouts that look like a driver crash. dev_free
+# (fx3_cmd test) actually tries to claim, so a loaded-but-not-free device means
+# something holds it. Catch it here with the real symptom and name the holder.
+if dev_present_app && ! dev_free; then
+    holders=$(docker ps --format '{{.Names}}' | grep -E '^ka9q-radio' | grep -vx "$CONTAINER" | tr '\n' ' ')
+    pgrep -x radiod >/dev/null 2>&1 && holders+="host-radiod(pid $(pgrep -x radiod | tr '\n' ' '))"
+    echo "Bail out! RX888 is loaded (PID $PID_APP) but not claimable — something already holds it."
+    if [[ -n "${holders// }" ]]; then
+        echo "#   likely holder(s): $holders"
+        echo "#   stop it first:  ./docker/ka9q-radio/ka9q.sh stop"
+        echo "#   or force:       docker rm -f $holders"
+    else
+        echo "#   no ka9q-radio container or host radiod found — check for another"
+        echo "#   process holding the device, or a wedged FX3 ($FX3_CMD usbreset)"
+    fi
+    exit 1
+fi
 
 note "firmware:        $FIRMWARE"
 note "duration:        ${DURATION}s   reload every ${RELOAD_INTERVAL}s   stream ${STREAM_SECS}s/cycle"
