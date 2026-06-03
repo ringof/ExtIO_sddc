@@ -14,8 +14,12 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
-LDLIBS  := $(shell pkg-config --libs libusb-1.0)
-CFLAGS  += $(shell pkg-config --cflags libusb-1.0)
+
+# Keep libusb discovery lazy and scoped to fx3_cmd/rx888_stream builds so
+# host-only targets such as check-health remain usable without libusb-dev.
+LIBUSB_CFLAGS = $(shell pkg-config --cflags libusb-1.0)
+LIBUSB_LDLIBS = $(shell pkg-config --libs libusb-1.0)
+FX3_CFLAGS    = $(CFLAGS) $(LIBUSB_CFLAGS)
 
 # rx888_tools submodule paths
 RX888_TOOLS := rx888_tools
@@ -28,10 +32,10 @@ FX3_OBJS := fx3_cmd.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.
 FX3_HDRS := fx3_proto.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h
 
 fx3_cmd: $(FX3_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(FX3_OBJS) $(LDLIBS)
+	$(CC) $(FX3_CFLAGS) -o $@ $(FX3_OBJS) $(LIBUSB_LDLIBS) $(LDLIBS)
 
 %.o: %.c $(FX3_HDRS)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(FX3_CFLAGS) -c -o $@ $<
 
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
