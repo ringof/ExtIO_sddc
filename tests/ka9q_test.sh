@@ -85,8 +85,9 @@ SPEC_INTERVAL="${SPEC_INTERVAL:-2}"       # powers integration time (s)
 SPEC_SSRC="${SPEC_SSRC:-30303}"           # arbitrary SSRC for the temp channel
 SPEC_DYN_RANGE_DB="${SPEC_DYN_RANGE_DB:-60}"
 SPEC_MIN_FRAC="${SPEC_MIN_FRAC:-0.5}"
-# Pin powers' multicast join to the same interface radiod uses. See
-# docs/docker.md sec 2 — bridge networking + ka9q's `name,iface` suffix.
+# Pin powers' multicast join to the same interface radiod uses (lo by default).
+# See docs/docker.md sec 2 — host networking + ka9q's `name,iface` suffix. If
+# radiod logs an interface other than lo on your host, set SPEC_IFACE to match.
 SPEC_IFACE="${SPEC_IFACE:-lo}"
 SPEC_GROUP_FULL="${SPEC_GROUP}${SPEC_IFACE:+,$SPEC_IFACE}"
 # Headroom over SPEC_INTERVAL for powers' first handshake to settle.
@@ -345,6 +346,34 @@ fi
 if ! dev_present_app && ! dev_present_boot; then
     echo "Bail out! no RX888 on USB (VID $VID, PID $PID_APP/$PID_BOOT)"; exit 1
 fi
+# Refuse to start if the RX888 is loaded but already CLAIMED by something else.
+# A stale `./ka9q.sh start` container ("ka9q-radio") or a stray radiod owns the
+# USB interface; the soak's radiod then fails with "Error claiming USB
+# interface" — 60s readiness timeouts that look like a driver crash. dev_free
+# (fx3_cmd test) actually tries to claim, so a loaded-but-not-free device means
+# something holds it. Catch it here with the real symptom and name the holder.
+if dev_present_app && ! dev_free; then
+    # Keep container holders and host-process holders separate: only container
+    # names are valid `docker rm -f` operands; host radiods need `kill`.
+    container_holders=$(docker ps --format '{{.Names}}' | grep -E '^ka9q-radio' | grep -vx "$CONTAINER" | tr '\n' ' ')
+    host_pids=$(pgrep -x radiod | tr '\n' ' ')   # host PID ns only — not container radiods
+    echo "Bail out! RX888 is loaded (PID $PID_APP) but not claimable — something already holds it."
+    if [[ -z "${container_holders// }" && -z "${host_pids// }" ]]; then
+        echo "#   no ka9q-radio container or host radiod found — check for another"
+        echo "#   process holding the device, or a wedged FX3 ($FX3_CMD usbreset)"
+    else
+        if [[ -n "${container_holders// }" ]]; then
+            echo "#   container(s) holding it: $container_holders"
+            echo "#     stop:  ./docker/ka9q-radio/ka9q.sh stop"
+            echo "#     or:    docker rm -f $container_holders"
+        fi
+        if [[ -n "${host_pids// }" ]]; then
+            echo "#   host radiod process(es): $host_pids"
+            echo "#     stop:  kill $host_pids"
+        fi
+    fi
+    exit 1
+fi
 
 note "firmware:        $FIRMWARE"
 note "duration:        ${DURATION}s   reload every ${RELOAD_INTERVAL}s   stream ${STREAM_SECS}s/cycle"
@@ -356,12 +385,16 @@ if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
 else
     mkdir -p "$PROJECT_ROOT/wisdom"
     note "starting idle container"
-    # Bridge network (NOT --network host): keeps ka9q multicast on the
-    # container's own lo/eth0 so radiod and powers always agree on the
-    # interface (a multi-homed host with --network host can land them on
-    # different interfaces; powers has no --iface flag). estimate FFTW rigor
-    # keeps radiod's first start fast/deterministic for the soak.
+    # --network host (one model with ka9q.sh): radiod's cold-start re-acquire
+    # after a firmware upload is a USB hotplug event, and hotplug is delivered
+    # over a netns-scoped netlink socket a bridge container can't hear (see
+    # docs/ka9q-compat-audit.md §1). This soak pre-loads firmware host-side via
+    # fx3_cmd and hot-starts radiod, so it would survive on bridge — but we run
+    # host net uniformly so cold start works everywhere. Multicast stays
+    # deterministic on loopback: radiod defaults to lo and consumers pin lo
+    # (SPEC_IFACE below). estimate FFTW rigor keeps the first start fast.
     if ! docker run --rm -d --name "$CONTAINER" --privileged \
+            --network host \
             -v /dev/bus/usb:/dev/bus/usb \
             -v /run/udev:/run/udev:ro \
             -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \

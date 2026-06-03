@@ -31,8 +31,12 @@
 # the fs/2 (32.4 MHz) Nyquist alias spike. Sweep a sub-band (e.g. -a 2000000
 # -z 30000000) to exclude them.
 #
-# Requires the patched `powers` in the ka9q-radio container (RADIO_FREQUENCY
-# double / RESOLUTION_BW float — docker/ka9q-radio/patches/).
+# Requires a `powers` that encodes RADIO_FREQUENCY as a double and decodes
+# RESOLUTION_BW as a float. Both fixes are UPSTREAM as of the pinned
+# ka9q-radio SHA (21d51fac), so the container's stock `powers` works; the
+# former local patches (01/02) are now retired to *.disabled. (On older pins
+# predating the upstream fix, those patches were required — see
+# docker/ka9q-radio/patches/README.md.)
 #
 # Usage: hf_sweep.sh [options]
 #   -a START_HZ   band start            (default 0)

@@ -106,6 +106,41 @@ queryable via the `TESTFX3` vendor command.
   heat whenever a stream is not running. Manual `GPIOFX3` SHDWN control is
   unchanged. (#131)
 
+### Testing / tooling
+
+- **ka9q-radio test container tracks the host-side-Si5351 `rx888.c` driver,
+  now patch-free** (ka9q-radio `42273761` → `21d51fac` → `87567fa`; ka9q-web
+  `b63c991` → `91cbfca`). The driver synthesizes the Si5351 clock on the host
+  (new `si5351.c` PLL solver) and writes the registers over `I2CWFX3`; at
+  `87567fa` it also polls the Si5351 for lock, drops ~10 microsleeps, and logs
+  the rx888 firmware version via `TESTFX3`. **All local compatibility patches
+  are now upstream** — `01`/`02` (powers float/double) and `04` (no-tuner-stdby,
+  removed at `87567fa`) — so the container builds **vanilla ka9q-radio with zero
+  patches**. `rx888-test.conf` uses the new `reset = no` (default-off) key in
+  place of the retired `hack_no_usb_reset`. Validated on RX888mk2 hardware
+  (hot/cold start, restart soak, live spectrum); see `docs/ka9q-compat-audit.md`
+  §12. *(Test-environment change; not a firmware change.)*
+- **ka9q test container cold-boot ergonomics.** The container now defaults
+  `FFTW_RIGOR=estimate` (instant cold boot for compatibility checks; set
+  `measure`/`patient` for long-term operation), and the firmware location is
+  parametrized — bind-mount any directory containing `SDDC_FX3.img` onto
+  `/firmware` (or `FIRMWARE_DIR=… ./ka9q.sh start`), since the built `.img`
+  normally lives outside the repo.
+- **ka9q test harness moved to `--network host`.** radiod's cold-start path
+  (upload firmware → FX3 re-enumerates `00f3`→`00f1` → re-acquire) depends on a
+  USB hotplug event, and hotplug is delivered over a network-namespace-scoped
+  netlink socket a bridge container can't hear — so cold start failed under
+  bridge despite the `/run/udev` mount, and works under host networking.
+  `ka9q.sh`, `ka9q_test.sh`, and the run examples now use `--network host`
+  (one model); multicast determinism is preserved by keeping everything on
+  loopback (radiod defaults to `lo`, consumers pin `-I lo`). Mechanism written
+  up in `docs/ka9q-compat-audit.md` §1, networking details in `docs/docker.md`
+  §2.
+- **New `docs/ka9q-health-inspection.md`** — a per-subsystem health/diagnostics
+  runbook for inspecting ka9q-radio and the systems the harness depends on
+  (USB/FX3, radiod, rx888.so/GPIF, Si5351, dbus/avahi, multicast/RTP, ka9q-web,
+  FFTW), going deeper than the `ka9q_smoke.sh` / `ka9q_test.sh` pass/fail gates.
+
 ## [0.1.0] — 2026-05-14
 
 First named release.  Firmware version **2.3** (`FIRMWARE_VER_MAJOR=2`,
