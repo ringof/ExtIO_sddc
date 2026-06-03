@@ -353,16 +353,24 @@ fi
 # (fx3_cmd test) actually tries to claim, so a loaded-but-not-free device means
 # something holds it. Catch it here with the real symptom and name the holder.
 if dev_present_app && ! dev_free; then
-    holders=$(docker ps --format '{{.Names}}' | grep -E '^ka9q-radio' | grep -vx "$CONTAINER" | tr '\n' ' ')
-    pgrep -x radiod >/dev/null 2>&1 && holders+="host-radiod(pid $(pgrep -x radiod | tr '\n' ' '))"
+    # Keep container holders and host-process holders separate: only container
+    # names are valid `docker rm -f` operands; host radiods need `kill`.
+    container_holders=$(docker ps --format '{{.Names}}' | grep -E '^ka9q-radio' | grep -vx "$CONTAINER" | tr '\n' ' ')
+    host_pids=$(pgrep -x radiod | tr '\n' ' ')   # host PID ns only — not container radiods
     echo "Bail out! RX888 is loaded (PID $PID_APP) but not claimable — something already holds it."
-    if [[ -n "${holders// }" ]]; then
-        echo "#   likely holder(s): $holders"
-        echo "#   stop it first:  ./docker/ka9q-radio/ka9q.sh stop"
-        echo "#   or force:       docker rm -f $holders"
-    else
+    if [[ -z "${container_holders// }" && -z "${host_pids// }" ]]; then
         echo "#   no ka9q-radio container or host radiod found — check for another"
         echo "#   process holding the device, or a wedged FX3 ($FX3_CMD usbreset)"
+    else
+        if [[ -n "${container_holders// }" ]]; then
+            echo "#   container(s) holding it: $container_holders"
+            echo "#     stop:  ./docker/ka9q-radio/ka9q.sh stop"
+            echo "#     or:    docker rm -f $container_holders"
+        fi
+        if [[ -n "${host_pids// }" ]]; then
+            echo "#   host radiod process(es): $host_pids"
+            echo "#     stop:  kill $host_pids"
+        fi
     fi
     exit 1
 fi
