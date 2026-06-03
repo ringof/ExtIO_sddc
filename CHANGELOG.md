@@ -26,15 +26,18 @@ below where it changes.
 
 ### Testing / tooling
 
-- **ka9q-radio test container bumped to evaluate the host-side-Si5351
-  `rx888.c` driver** (ka9q-radio `42273761` → `21d51fac`; ka9q-web
-  `b63c991` → `91cbfca`). The new driver synthesizes the Si5351 clock on the
-  host (new `si5351.c` PLL solver) and writes the registers over `I2CWFX3`.
-  The two `powers` float/double patches are now upstream and retired; only
-  `04-no-tuner-stdby` remains active. `rx888-test.conf` drops the retired
-  `hack_no_usb_reset` key for the new `reset = no` (default-off) key. See
-  `docs/ka9q-compat-audit.md` §12. *(Test-environment change; not a firmware
-  change. Under bench evaluation.)*
+- **ka9q-radio test container tracks the host-side-Si5351 `rx888.c` driver,
+  now patch-free** (ka9q-radio `42273761` → `21d51fac` → `87567fa`; ka9q-web
+  `b63c991` → `91cbfca`). The driver synthesizes the Si5351 clock on the host
+  (new `si5351.c` PLL solver) and writes the registers over `I2CWFX3`; at
+  `87567fa` it also polls the Si5351 for lock, drops ~10 microsleeps, and logs
+  the rx888 firmware version via `TESTFX3`. **All local compatibility patches
+  are now upstream** — `01`/`02` (powers float/double) and `04` (no-tuner-stdby,
+  removed at `87567fa`) — so the container builds **vanilla ka9q-radio with zero
+  patches**. `rx888-test.conf` uses the new `reset = no` (default-off) key in
+  place of the retired `hack_no_usb_reset`. Validated on RX888mk2 hardware
+  (hot/cold start, restart soak, live spectrum); see `docs/ka9q-compat-audit.md`
+  §12. *(Test-environment change; not a firmware change.)*
 - **ka9q test container cold-boot ergonomics.** The container now defaults
   `FFTW_RIGOR=estimate` (instant cold boot for compatibility checks; set
   `measure`/`patient` for long-term operation), and the firmware location is

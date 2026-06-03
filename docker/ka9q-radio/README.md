@@ -281,15 +281,17 @@ featureless flat line a frozen / shut-down ADC would produce.  See
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **ka9q-radio pin** — the container builds ka9q-radio `21d51fac` (main),
+- **ka9q-radio pin** — the container builds ka9q-radio `87567fa` (main),
   whose `rx888.c` does host-side Si5351 clock synthesis (new `si5351.c`
-  module), paired with ka9q-web `91cbfca`.  See `docs/ka9q-compat-audit.md`
-  §12 for the full driver-eval analysis.
-- **Active container patch is now just `04-no-tuner-stdby`.**  The two
-  `powers` float/double fixes (`01`, `02`) are **upstream** at this SHA and
-  retired to `*.disabled`; patch `03` (`STARTADC` before `STARTFX3`) remains
-  retired (the firmware reports Si5351 CLK0 state truthfully, so the GPIF
-  preflight passes with no host workaround).  See `patches/README.md`.
+  module), polls the Si5351 for lock, and logs the rx888 firmware version
+  via `TESTFX3`.  Paired with ka9q-web `91cbfca`.  See
+  `docs/ka9q-compat-audit.md` §12 for the full driver-eval analysis.
+- **Zero active container patches — builds vanilla ka9q-radio.**  Every local
+  ask has been upstreamed: the `powers` float/double fixes (`01`, `02`) and
+  the no-tuner-stdby change (`04`, removed at `87567fa`).  Patch `03`
+  (`STARTADC` before `STARTFX3`) remains retired (the firmware reports Si5351
+  CLK0 state truthfully, so the GPIF preflight passes with no host workaround).
+  See `patches/README.md`.
 - **`/run/udev` bind-mount required** at `docker run` time — libusb
   inside the container needs host udev events to see the FX3
   re-enumerate after firmware upload.  Container-side workaround,

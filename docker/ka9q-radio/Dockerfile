@@ -43,23 +43,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
 #
-# Pinned to 21d51fac (main, 2026-06) to evaluate the new rx888 driver that
-# moves Si5351 clock synthesis HOST-side: the driver now computes the PLL /
-# MultiSynth solution (si5351.c: si5351_solve) and writes the registers over
-# I2CWFX3, instead of leaving it to the firmware. Paired with ka9q-web
-# 91cbfca below (newest-with-newest). See docs/ka9q-compat-audit.md and
-# docker/ka9q-radio/patches/README.md for the full compatibility analysis.
+# Pinned to 87567fa (main, 2026-06). This is the host-side-Si5351 rx888 driver
+# (si5351.c: si5351_solve computes the PLL/MultiSynth solution and writes it
+# over I2CWFX3), plus a round of fixes that landed after our first eval at
+# 21d51fac — and which retire the last local patch:
+#  - Both TUNERSTDBY sends removed/#if 0'd (no tuner on RX888mk2) — this is
+#    exactly what container patch 04 did, so 04 is now upstream and retired.
+#    With 01/02 (powers float/double) already upstream, ZERO local patches
+#    remain: this builds vanilla ka9q-radio.
+#  - ~10 microsleeps removed; the blind post-clock sleep replaced by a real
+#    Si5351 lock poll (reg0 LOL_A + reg16 CLK0_PDN, ~50 ms) — reads CLK0 state
+#    back, dovetailing with this firmware's GPIF preflight.
+#  - Reads + logs the rx888 firmware version via TESTFX3 at startup (first time
+#    ka9q actually sends TESTFX3 — see compat-audit §9).
+# Paired with ka9q-web 91cbfca below (newest-with-newest). See
+# docs/ka9q-compat-audit.md and docker/ka9q-radio/patches/README.md.
 #
-# Two things this SHA changes vs the previous pin (42273761):
-#  - The init-time USB reset now defaults OFF (config key `reset`, default
-#    false) — so the driver no longer knocks this firmware to DFU, and the
-#    old `hack_no_usb_reset` workaround is retired (see rx888-test.conf).
-#  - It is a month newer than 6a5094ac, whose rx888 init segfaulted in
-#    command_send (compat-audit §10). At this SHA rx888_usb_init() acquires
-#    and NULL-checks the device handle before any control transfer, which
-#    structurally addresses that crash — but the bench build/run is the
-#    decisive check. If radiod segfaults in rx888_setup, revert to 42273761.
-ARG KA9Q_RADIO_SHA=21d51facd8c1f0e1a70a8e12c03307218f88ae53
+# Carried over from the 21d51fac eval (still true here):
+#  - Init-time USB reset defaults OFF (config key `reset`) — no DFU flip, so the
+#    old `hack_no_usb_reset` workaround stays retired (see rx888-test.conf).
+#  - rx888_usb_init() acquires + NULL-checks the device handle before any
+#    control transfer (addresses the 6a5094ac command_send segfault, audit §10).
+#  - Cold start (radiod uploads firmware) requires --network host: the
+#    re-enumeration is a netns-scoped USB hotplug event a bridge container can't
+#    see (audit §1). Validated on the bench: hot start, cold start, restart
+#    soak, and the live spectrum all pass at 21d51fac.
+ARG KA9Q_RADIO_SHA=87567fa85fa508de813446613c176ed5bd34d601
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"

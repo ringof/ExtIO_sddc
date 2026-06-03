@@ -161,20 +161,22 @@ Practical consequences:
   defaults to `lo`, consumers pin `-I lo`/`,lo`).  See §2 for the
   interface-pinning details.
 
-### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, cosmetic; no patch)*
+### 2. TUNERSTDBY (0xB8) on the HF path *(RESOLVED upstream at `87567fa`)*
 
-ka9q's `rx888_set_hf_mode()` and `rx888_start_rx()` both fire
+ka9q's `rx888_set_hf_mode()` and `rx888_start_rx()` both fired
 `command_send(...,TUNERSTDBY,0)`.  SDDC firmware removed all R82xx
-commands (see `docs/LICENSE_ANALYSIS.md`), so 0xB8 returns a clean
-USB STALL via the firmware's default handler.  ka9q's `command_send`
-ignores the return value, so streaming is unaffected and init
-proceeds normally.  The only effect is bus-level noise: two STALLed
-control transfers per session.
+commands (see `docs/LICENSE_ANALYSIS.md`), so 0xB8 returned a clean
+USB STALL.  Initially judged cosmetic (two STALLed control transfers
+per session); the `ka9q_test.sh` restart soak later reclassified it as
+**blocking** — radiod intermittently wedged at the 0xB8 STALL on a
+restart (gdb: `main` in `rx888_setup`, no streaming threads).  That
+became container patch `04-no-tuner-stdby`.
 
-We do not patch this either — purely cosmetic, would not change
-observable behavior, and removing two unconditional command sends
-that "happen to harmlessly fail" is exactly the kind of upstream
-patch most maintainers will reject as not-their-bug.
+**Upstreamed at `87567fa`:** Phil removed the `rx888_start_rx` send
+outright and wrapped the `rx888_set_hf_mode` one in
+`#if 0 // not reimplemented yet in firmware`.  Patch `04` is therefore
+retired (`.disabled`) — with `01`/`02` already upstream, the container
+now builds **vanilla ka9q-radio with zero local patches**.
 
 ### 3. R82xx VHF path *(deferred, out of scope)*
 
@@ -281,20 +283,20 @@ The disabled patch file remains in-tree as
 `03-startadc-before-startfx3.patch.disabled` for archaeology; see
 `docker/ka9q-radio/patches/README.md`.
 
-### 9. TESTFX3 (0xAC) defined but not exercised *(no host coordination needed)*
+### 9. TESTFX3 (0xAC) — now exercised at `87567fa` *(firmware version logged)*
 
-ka9q's `rx888.h` defines `TESTFX3 = 0xAC` in the `FX3Command` enum,
-but `rx888.c` contains zero occurrences of `TESTFX3`, `0xAC`, or
-the word "version".  The plugin never issues the `TESTFX3` request,
-never reads the device's model/version word, and has no version
-comparison logic.
+Historically ka9q's `rx888.c` never issued `TESTFX3`: the plugin read
+no model/version word, so SDDC firmware's `FIRMWARE_VER_MAJOR` /
+`FIRMWARE_VER_MINOR` could change between releases (e.g. the v0.1.0 bump
+from 2.2 to 2.3) without any host-side coordination.
 
-Implication: SDDC firmware's `FIRMWARE_VER_MAJOR` /
-`FIRMWARE_VER_MINOR` can change between firmware releases (e.g. the
-v0.1.0 bump from 2.2 to 2.3) without any host-side coordination
-from ka9q.  The compatibility-matrix row for `TESTFX3` above
-reflects that it is *supported* by the firmware (returns a 4-byte
-response), not that it is *sent* by ka9q.
+**As of `87567fa`** the driver sends `TESTFX3` at startup and logs the
+reply (`control_recv(...,TESTFX3,...)` → 4 bytes `[hw model, fw major,
+fw minor, req count]`), printing `RX888 hardware 0x.., firmware u.u`.
+It's read-and-log only — there is still no version *comparison* or
+gating — so no host coordination is required, but it does mean radiod
+now surfaces the firmware version, which is a useful cross-check that
+the loaded `.img` is the one you expect.
 
 ### 10. `6a5094ac` rx888 driver segfaults in `command_send` *(ka9q-side regression; blocks the bump)*
 
@@ -377,11 +379,29 @@ upstream with the `resetup_cycle` evidence. Note also that #131's actual claim
 without ka9q-radio at all by `fw_test`/`soak` (fx3_cmd-side) and the green
 `ka9q_smoke` real-output gate.
 
-### 12. Driver-eval bump to `21d51fac` — host-side Si5351 synthesis *(under bench evaluation)*
+### 12. Driver-eval: host-side Si5351 synthesis — pinned `87567fa` *(validated on hardware; zero patches)*
 
 KA9Q asked us to bench the new `rx888.c` revision on ka9q-radio `main`. The
-container's `KA9Q_RADIO_SHA` was bumped `42273761` → `21d51fac` (and ka9q-web
-`b63c991` → `91cbfca`, newest-with-newest) on branch `Claude/ka9q-driver-eval`.
+container's `KA9Q_RADIO_SHA` was bumped `42273761` → `21d51fac` → **`87567fa`**
+(and ka9q-web `b63c991` → `91cbfca`, newest-with-newest) on branch
+`Claude/ka9q-driver-eval`.  `21d51fac` was the first host-side-Si5351 revision
+we validated; `87567fa` is the follow-up that landed after, incorporating the
+fixes below — including the upstreaming of our last local patch.
+
+**What `87567fa` adds over `21d51fac`** (all observed in the `rx888.c` diff):
+
+- **Both `TUNERSTDBY` sends removed** (one deleted, one `#if 0`'d) — this *is*
+  patch `04`, now upstream. With `01`/`02` already upstream, the container
+  builds **vanilla ka9q-radio, zero local patches**.
+- **~10 microsleeps removed** (the `usleep(5000)` inter-command delays, a
+  `usleep(100000)`, and a `usleep(1000000)`).
+- **Si5351 lock poll** replaces a blind post-clock sleep — polls reg 0 bit5
+  (LOL_A) and reg 16 bit7 (CLK0_PDN) for ~50 ms until locked + running, warns
+  `RX888 ADC clock not locked/running` otherwise. Reads CLK0 state back,
+  dovetailing with this firmware's GPIF preflight.
+- **Firmware version read + logged** via `TESTFX3` (see §9).
+- The post-upload `sleep(1); // how long should this be?` is **unchanged** —
+  the cold-start nit (audit §1) still stands.
 
 **What the new driver changes.** The headline is that Si5351 clock synthesis
 moves **host-side**: `rx888.c` now `#include`s a new `si5351.{c,h}` module and
@@ -399,24 +419,29 @@ self-contained — libc + its own header — and compiles clean standalone.)
   unreferenced by `rx888.c`.
 - *Plugin ABI.* The exported interface is a **superset** of the old one (adds
   `rx888_shutdown`), so it stays loadable by the same `radiod` model.
-- *Patches.* `04-no-tuner-stdby` still applies clean (both `TUNERSTDBY` sends
-  remain, identical context). `01`/`02` (powers float/double) are **upstreamed**
-  at this SHA and retired to `*.disabled`.
+- *Patches.* **None.** `01`/`02` (powers float/double) and `04` (no-tuner-stdby,
+  upstreamed at `87567fa`) are all retired to `*.disabled`; the container builds
+  vanilla ka9q-radio.
 - *Config.* `hack_no_usb_reset` is gone, replaced by `reset` (default false);
   `rx888-test.conf` now sets `reset = no` explicitly.
 - *ka9q-web.* Its linked headers barely moved (`multicast.h` unchanged,
   `status.h` +1 appended enum, `misc.h` minor); rebuilt against the same tree.
 
-**Watch-items on the bench (decisive over the static analysis above):**
+**Bench results (RX888mk2 + SDDC_FX3, `21d51fac`; re-confirm at `87567fa`):**
 
-1. The §10 `command_send` segfault — must reach `rx888 running` without
-   crashing in `rx888_setup`.
-2. The §11 restart stall — re-run the `ka9q_test.sh` soak; the host-side
-   Si5351 reprogramming on each restart is new code on that path.
-3. Si5351 host synthesis is correct — `radiod -v` should log sane
-   `RX888 Si5351 PLL` / `output divider` lines for 64.8 Msps @ 27 MHz, and the
-   spectrum should show the fs/2 alias (proof the ADC samples at fs). See the
-   per-subsystem checks in `docs/ka9q-health-inspection.md`.
+| Check | Result |
+|-------|--------|
+| §10 `command_send` segfault | **did not recur** — `radiod -v` reached `rx888 running` (hot start) |
+| Si5351 host synthesis | **correct** — `vco = 27 MHz·(28+4/5) = 777.6 MHz`, `÷12 = 64.8 Msps`, clean integer fractions |
+| Live spectrum | **PASS** — `ka9q_smoke.sh`: ~−132 dB textured floor, fs/2 alias +53 dB |
+| §11 restart stall | **did not recur** — `ka9q_test.sh` 15 cycles + 3 force-reloads, 18/18 pass, ADC parked (gpif idle, dma frozen) each stop |
+| Cold-start re-acquire | **works under `--network host`** (netns/hotplug — §1); fails under bridge |
+
+The `21d51fac` results stand; `87567fa` only *removes* code on these paths
+(tuner sends, microsleeps) and *adds* a clock-lock poll, so re-running the same
+`ka9q_smoke.sh` + short `ka9q_test.sh` on `87567fa` is the confirmation — watch
+for the new `RX888 ... firmware u.u` and (absence of) `ADC clock not locked`
+lines in `radiod -v`.
 
 ## Container-side requirements (no patches needed)
 
