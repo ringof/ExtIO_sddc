@@ -497,8 +497,10 @@ The analyzer the smoke test drives, usable on its own for a detailed look.
 Sweeps a band and emits `freq_hz,power_dB` CSV.  Auto-tiles (a single
 `powers` channel tops out ~16000 bins at the 64 KB datagram limit) with
 overlap+trim so per-tile channel-edge artifacts don't land in the output.
-Requires the patched `powers` in the image (see
-`docker/ka9q-radio/patches/`).
+Requires a `powers` with the RADIO_FREQUENCY-double / RESOLUTION_BW-float
+behavior — upstream as of the pinned ka9q-radio SHA, so the image's stock
+`powers` works (the former local patches 01/02 are retired; see
+`docker/ka9q-radio/patches/README.md`).
 
 ```
 tests/hf_sweep.sh -o hf100.csv -p             # 0-32.4 MHz @ 100 Hz, CSV + PNG

@@ -1,17 +1,18 @@
 # ka9q-radio test environment for RX888mk2 firmware validation
 #
 # Build:   docker build -t ka9q-radio docker/ka9q-radio/
-# Run:     docker run --rm -it --privileged -v /dev/bus/usb:/dev/bus/usb \
-#            -p 127.0.0.1:8081:8081 ka9q-radio
+# Run:     docker run --rm -it --privileged --network host \
+#            -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro ka9q-radio
 #
-# The --privileged flag is needed because the FX3 changes USB PID during
-# firmware upload (0x00F3 -> 0x00F1), which changes the device path.
-# A plain bridge network (NOT --network host) is used: radiod, powers and
-# ka9q-web all run inside this one container, so ka9q's multicast stays on the
-# container's own lo/eth0 and is deterministic. --network host exposes every
-# host interface, and since `powers` has no --iface flag it picks one by
-# routing — on a multi-homed host radiod and powers can land on different
-# interfaces and never see each other. Publish ka9q-web's port to reach it.
+# --privileged: the FX3 changes USB PID during firmware upload (0x00F3 ->
+# 0x00F1), which changes the device path.
+# --network host: REQUIRED for radiod's in-container cold start. The post-upload
+# re-enumeration (00f3->00f1) is a USB hotplug event, delivered over a
+# netns-scoped netlink socket a bridge container can't hear, so libusb never
+# sees the re-acquired device (docs/ka9q-compat-audit.md §1). Host netns fixes
+# it. Multicast stays deterministic by keeping everything on loopback (radiod
+# defaults to lo; consumers pin -I lo). Under host net ka9q-web binds host :8081
+# directly — no -p publish needed.
 
 FROM debian:bookworm-slim AS builder
 
@@ -41,12 +42,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Clone ka9q-radio — only need radiod + rx888 plugin.
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
-# Pinned to 42273761 to pair with ka9q-web b63c991 below (the known-good
-# pair from the W1EUJ / palomar-sdr.com deployment). NOTE: this driver
-# does an init-time USB reset that this firmware answers by going to DFU;
-# in-container that reset/re-acquire is under investigation (see
-# tests/usb_trace.sh). f78cff9 is the no-init-reset fallback.
-ARG KA9Q_RADIO_SHA=42273761ba5b96b243317592a6b8964ab99a9794
+#
+# Pinned to 87567fa (main, 2026-06). This is the host-side-Si5351 rx888 driver
+# (si5351.c: si5351_solve computes the PLL/MultiSynth solution and writes it
+# over I2CWFX3), plus a round of fixes that landed after our first eval at
+# 21d51fac — and which retire the last local patch:
+#  - Both TUNERSTDBY sends removed/#if 0'd (no tuner on RX888mk2) — this is
+#    exactly what container patch 04 did, so 04 is now upstream and retired.
+#    With 01/02 (powers float/double) already upstream, ZERO local patches
+#    remain: this builds vanilla ka9q-radio.
+#  - ~10 microsleeps removed; the blind post-clock sleep replaced by a real
+#    Si5351 lock poll (reg0 LOL_A + reg16 CLK0_PDN, ~50 ms) — reads CLK0 state
+#    back, dovetailing with this firmware's GPIF preflight.
+#  - Reads + logs the rx888 firmware version via TESTFX3 at startup (first time
+#    ka9q actually sends TESTFX3 — see compat-audit §9).
+# Paired with ka9q-web 91cbfca below (newest-with-newest). See
+# docs/ka9q-compat-audit.md and docker/ka9q-radio/patches/README.md.
+#
+# Carried over from the 21d51fac eval (still true here):
+#  - Init-time USB reset defaults OFF (config key `reset`) — no DFU flip, so the
+#    old `hack_no_usb_reset` workaround stays retired (see rx888-test.conf).
+#  - rx888_usb_init() acquires + NULL-checks the device handle before any
+#    control transfer (addresses the 6a5094ac command_send segfault, audit §10).
+#  - Cold start (radiod uploads firmware) requires --network host: the
+#    re-enumeration is a netns-scoped USB hotplug event a bridge container can't
+#    see (audit §1). Validated on the bench: hot start, cold start, restart
+#    soak, and the live spectrum all pass at 21d51fac.
+ARG KA9Q_RADIO_SHA=87567fa85fa508de813446613c176ed5bd34d601
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
@@ -101,11 +123,14 @@ RUN git clone --depth 1 https://github.com/davidmoreno/onion.git /build/onion \
 
 # Build ka9q-web as a sibling of the ka9q-radio tree (its Makefile uses
 # KA9Q_RADIO_DIR=../ka9q-radio/src and links that tree's multicast.o/
-# status.o/misc.o/decode_status.o/rtp.o). Pinned to b63c991d to match the
-# ka9q-radio SHA above (proven pair from W1EUJ / palomar-sdr.com).
+# status.o/misc.o/decode_status.o/rtp.o). Pinned to 91cbfca (HEAD, 2026-06)
+# to pair newest-with-newest against the ka9q-radio SHA above. ka9q-web is an
+# independent moving part: this link step is the decisive compatibility check.
+# If it fails to build, the firmware smoke test does NOT need ka9q-web — pin a
+# ka9q-web commit known to pair with this ka9q-radio SHA, or drop this step.
 ENV LIBRARY_PATH=/usr/local/lib C_INCLUDE_PATH=/usr/local/include
 RUN git clone https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
-    && git -C /build/ka9q-web checkout b63c991d6b4639d2e30429e70200dfe2f1c1f394 \
+    && git -C /build/ka9q-web checkout 91cbfca25eef7b60923eebec120595dbbba5053d \
     && make -C /build/ka9q-web -j"$(nproc)"
 
 # ---- Runtime image ----
@@ -147,7 +172,7 @@ COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
 #   docker exec -d ka9q-radio ka9q-web -m hf.local -p 8081 -n rx888-test
-# then browse http://localhost:8081 (container publishes -p 127.0.0.1:8081:8081).
+# then browse http://localhost:8081 (under --network host ka9q-web binds host :8081 directly).
 COPY --from=builder /usr/local/lib/libonion*.so* /usr/local/lib/
 COPY --from=builder /build/ka9q-web/ka9q-web /usr/local/sbin/ka9q-web
 COPY --from=builder /build/ka9q-web/html /usr/local/share/ka9q-web/html
