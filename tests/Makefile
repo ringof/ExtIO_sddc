@@ -32,7 +32,7 @@ FX3_OBJS := fx3_cmd.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.
 FX3_HDRS := fx3_proto.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h
 
 fx3_cmd: $(FX3_OBJS)
-	$(CC) $(FX3_CFLAGS) -o $@ $(FX3_OBJS) $(LIBUSB_LDLIBS)
+	$(CC) $(FX3_CFLAGS) -o $@ $(FX3_OBJS) $(LIBUSB_LDLIBS) $(LDLIBS)
 
 %.o: %.c $(FX3_HDRS)
 	$(CC) $(FX3_CFLAGS) -c -o $@ $<
