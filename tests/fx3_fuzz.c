@@ -275,6 +275,12 @@ static volatile sig_atomic_t fuzz_stop;
 static void fuzz_sigint(int sig) { (void)sig; fuzz_stop = 1; }
 
 /* Build and send one random EP0 control transfer, recording it. */
+/* #154 bisection knobs (env vars): subtract one command class / recipient
+ * fuzzing from protocol_fuzz to find which is necessary for the op-2432 wedge.
+ * Excluded classes are remapped to TESTFX3 so the RNG stream stays identical
+ * (a clean A/B against the unmodified run). */
+static int g_fuzz_no_stream, g_fuzz_no_i2c, g_fuzz_device_only;
+
 static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
                                struct fuzz_log *log, int streaming)
 {
@@ -286,6 +292,11 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
         br = (uint8_t)fuzz_below(rng, 256);
     /* Remap destructive codes away so the default run is non-destructive. */
     if (br == RESETFX3 || br == HANGFX3 || br == HANGMAIN)
+        br = TESTFX3;
+    /* Bisection knobs: remap the excluded class to a benign TESTFX3. */
+    if (g_fuzz_no_stream && (br == STARTFX3 || br == STARTADC || br == STOPFX3))
+        br = TESTFX3;
+    if (g_fuzz_no_i2c && (br == I2CWFX3 || br == I2CRFX3))
         br = TESTFX3;
 
     /* bmRequestType: fully fuzz the DIRECTION (IN/OUT) and RECIPIENT
@@ -303,6 +314,7 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
     uint8_t dir   = fuzz_below(rng, 2) ? LIBUSB_ENDPOINT_IN : LIBUSB_ENDPOINT_OUT;
     uint8_t recip = fuzz_below(rng, 100) < 70 ? LIBUSB_RECIPIENT_DEVICE
                                               : (uint8_t)fuzz_below(rng, 4);
+    if (g_fuzz_device_only) recip = LIBUSB_RECIPIENT_DEVICE;  /* bisection knob */
     uint8_t bmrt  = dir | LIBUSB_REQUEST_TYPE_VENDOR | recip;
 
     uint16_t wValue = (uint16_t)fuzz_below(rng, 0x10000);
@@ -354,11 +366,19 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
     struct fuzz_rng rng = { seed };
     struct fuzz_log log; fuzz_log_init(&log);
 
+    /* #154 bisection knobs (env). */
+    g_fuzz_no_stream   = getenv("RX888_FUZZ_NO_STREAM")   != NULL;
+    g_fuzz_no_i2c      = getenv("RX888_FUZZ_NO_I2C")      != NULL;
+    g_fuzz_device_only = getenv("RX888_FUZZ_DEVICE_ONLY") != NULL;
+
     if (!quiet) {
         fuzz_stop = 0;
         signal(SIGINT, fuzz_sigint);
-        printf("=== PROTOCOL_FUZZ === ops=%ld seed=0x%016llx\n",
-               num_ops, (unsigned long long)seed);
+        printf("=== PROTOCOL_FUZZ === ops=%ld seed=0x%016llx%s%s%s\n",
+               num_ops, (unsigned long long)seed,
+               g_fuzz_no_stream   ? " [NO_STREAM]"   : "",
+               g_fuzz_no_i2c      ? " [NO_I2C]"      : "",
+               g_fuzz_device_only ? " [DEVICE_ONLY]" : "");
     }
 
     uint32_t boot = 0;
