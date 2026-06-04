@@ -5403,6 +5403,8 @@ static void usage(const char *prog)
         "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
         "  dir_mismatch [ops] [seed]    Well-formed EP0 requests, wrong direction only (#142 isolation)\n"
         "  ep0_sweep                    Deterministic bRequest 0..255 x IN/OUT direction sweep (#149)\n"
+        "  i2c_fuzz [ops] [seed]        Malformed I2CWFX3/I2CRFX3 only (#154 isolation)\n"
+        "  oversend_fuzz [ops] [seed]   Short-wLength on fixed-size IN responders (#154 isolation)\n"
         "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
         "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
@@ -5788,6 +5790,16 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "ep0_sweep") == 0) {
         rc = fuzz_ep0_sweep(&h);                    /* #149 */
+
+    } else if (strcmp(cmd, "i2c_fuzz") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_i2c(&h, n, seed);                 /* #154 isolation */
+
+    } else if (strcmp(cmd, "oversend_fuzz") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_oversend(&h, n, seed);            /* #154 isolation */
 
     } else if (strcmp(cmd, "soak") == 0) {
         /* Pass &h so soak_try_reacquire() (which closes and replaces

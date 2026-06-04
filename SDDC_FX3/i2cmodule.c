@@ -29,7 +29,7 @@ I2cInit ()
      * The data transfer is done via DMA. */
     CyU3PMemSet ((uint8_t *)&i2cConfig, 0, sizeof(i2cConfig));
     i2cConfig.bitRate    = I2C_BITRATE;
-    i2cConfig.busTimeout = 0xFFFFFFFF;
+    i2cConfig.busTimeout = I2C_BUS_TIMEOUT;   /* finite; see i2cmodule.h (#154) */
     i2cConfig.dmaTimeout = 0xFFFF;
     i2cConfig.isDma      = CyFalse;
     status = CyU3PI2cSetConfig (&i2cConfig, NULL);

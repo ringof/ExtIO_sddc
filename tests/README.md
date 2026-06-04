@@ -265,6 +265,7 @@ is visible — enough to reproduce with the same seed.
 ./fx3_cmd stream_fuzz   [secs] [seed]    # default 60 s
 ./fx3_cmd dir_mismatch  [ops] [seed]     # well-formed, wrong direction only (#142)
 ./fx3_cmd ep0_sweep                      # deterministic 0..255 x IN/OUT (#149)
+./fx3_cmd i2c_fuzz      [ops] [seed]     # malformed I2CWFX3/I2CRFX3 only (#154 isolation)
 ./fx3_cmd protocol_fuzz 5000 0x12345678  # reproducible run
 ```
 

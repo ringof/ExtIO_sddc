@@ -275,6 +275,12 @@ static volatile sig_atomic_t fuzz_stop;
 static void fuzz_sigint(int sig) { (void)sig; fuzz_stop = 1; }
 
 /* Build and send one random EP0 control transfer, recording it. */
+/* #154 bisection knobs (env vars): subtract one command class / recipient
+ * fuzzing from protocol_fuzz to find which is necessary for the op-2432 wedge.
+ * Excluded classes are remapped to TESTFX3 so the RNG stream stays identical
+ * (a clean A/B against the unmodified run). */
+static int g_fuzz_no_stream, g_fuzz_no_i2c, g_fuzz_device_only;
+
 static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
                                struct fuzz_log *log, int streaming)
 {
@@ -286,6 +292,11 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
         br = (uint8_t)fuzz_below(rng, 256);
     /* Remap destructive codes away so the default run is non-destructive. */
     if (br == RESETFX3 || br == HANGFX3 || br == HANGMAIN)
+        br = TESTFX3;
+    /* Bisection knobs: remap the excluded class to a benign TESTFX3. */
+    if (g_fuzz_no_stream && (br == STARTFX3 || br == STARTADC || br == STOPFX3))
+        br = TESTFX3;
+    if (g_fuzz_no_i2c && (br == I2CWFX3 || br == I2CRFX3))
         br = TESTFX3;
 
     /* bmRequestType: fully fuzz the DIRECTION (IN/OUT) and RECIPIENT
@@ -303,6 +314,7 @@ static void protocol_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
     uint8_t dir   = fuzz_below(rng, 2) ? LIBUSB_ENDPOINT_IN : LIBUSB_ENDPOINT_OUT;
     uint8_t recip = fuzz_below(rng, 100) < 70 ? LIBUSB_RECIPIENT_DEVICE
                                               : (uint8_t)fuzz_below(rng, 4);
+    if (g_fuzz_device_only) recip = LIBUSB_RECIPIENT_DEVICE;  /* bisection knob */
     uint8_t bmrt  = dir | LIBUSB_REQUEST_TYPE_VENDOR | recip;
 
     uint16_t wValue = (uint16_t)fuzz_below(rng, 0x10000);
@@ -354,11 +366,19 @@ static int protocol_fuzz_core(libusb_device_handle **h_inout, long num_ops,
     struct fuzz_rng rng = { seed };
     struct fuzz_log log; fuzz_log_init(&log);
 
+    /* #154 bisection knobs (env). */
+    g_fuzz_no_stream   = getenv("RX888_FUZZ_NO_STREAM")   != NULL;
+    g_fuzz_no_i2c      = getenv("RX888_FUZZ_NO_I2C")      != NULL;
+    g_fuzz_device_only = getenv("RX888_FUZZ_DEVICE_ONLY") != NULL;
+
     if (!quiet) {
         fuzz_stop = 0;
         signal(SIGINT, fuzz_sigint);
-        printf("=== PROTOCOL_FUZZ === ops=%ld seed=0x%016llx\n",
-               num_ops, (unsigned long long)seed);
+        printf("=== PROTOCOL_FUZZ === ops=%ld seed=0x%016llx%s%s%s\n",
+               num_ops, (unsigned long long)seed,
+               g_fuzz_no_stream   ? " [NO_STREAM]"   : "",
+               g_fuzz_no_i2c      ? " [NO_I2C]"      : "",
+               g_fuzz_device_only ? " [DEVICE_ONLY]" : "");
     }
 
     uint32_t boot = 0;
@@ -645,6 +665,174 @@ int fuzz_ep0_sweep(libusb_device_handle **h_inout)
                "NOTE: clock/GPIO mutated — reload before streaming.\n",
                (unsigned long long)log.seq);
     }
+    *h_inout = h;
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* i2c_fuzz — #154 isolation: malformed I2C only (correct direction)  */
+/* ------------------------------------------------------------------ */
+
+/* Fire only I2CWFX3 (OUT) / I2CRFX3 (IN) with the CORRECT direction but a
+ * random I2C address (wValue), register (wIndex), length, and payload — the
+ * one thing protocol_fuzz does that dir_mismatch/ep0_sweep don't.  If this
+ * alone wedges EP0, it isolates the I2C path as the #154 vector (a malformed
+ * multi-byte transfer hanging I2cTransfer, which runs inside the EP0 handler).
+ * The host bias to address 0xC0 (the Si5351) matches protocol_fuzz so this
+ * reproduces the conditions that wedged at op ~2432.
+ *
+ * Note: this scribbles the Si5351 — a PASS means "I2C abuse did not wedge EP0"
+ * (the clock is still likely corrupted; reload before streaming).  A FAIL is
+ * the #154 wedge reproduced in isolation. */
+static void i2c_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
+                          struct fuzz_log *log)
+{
+    int is_read = fuzz_below(rng, 2);
+    uint8_t code = is_read ? I2CRFX3 : I2CWFX3;
+    uint8_t dir  = is_read ? LIBUSB_ENDPOINT_IN : LIBUSB_ENDPOINT_OUT; /* correct */
+    uint8_t bmrt = dir | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE;
+
+    /* wValue = I2C device address, wIndex = register (firmware:
+     * I2cTransfer(wIndex, wValue, wLength, ...)).  35% snap to the Si5351. */
+    uint16_t addr = (fuzz_below(rng, 100) < 35) ? 0x00C0
+                                                : (uint16_t)fuzz_below(rng, 0x10000);
+    uint16_t reg  = (uint16_t)fuzz_below(rng, 0x10000);
+
+    /* Length <= 64 (no oversize — keep it past the wLength>64 STALL so
+     * I2cTransfer actually runs), weighted toward small + multi-byte. */
+    uint16_t wLength;
+    uint32_t wsel = fuzz_below(rng, 100);
+    if      (wsel < 20) wLength = 0;
+    else if (wsel < 50) wLength = 1;
+    else if (wsel < 80) wLength = (uint16_t)(2 + fuzz_below(rng, 7));   /* 2..8 */
+    else                wLength = (uint16_t)(1 + fuzz_below(rng, 64));  /* 1..64 */
+
+    static uint8_t buf[64];
+    uint16_t plen = wLength <= sizeof(buf) ? wLength : (uint16_t)sizeof(buf);
+    for (uint16_t i = 0; i < plen; i++) buf[i] = (uint8_t)fuzz_next(rng);
+
+    int rc = libusb_control_transfer(h, bmrt, code, addr, reg, buf, plen, 250);
+    struct fuzz_op op = { bmrt, code, addr, reg, wLength, plen, rc };
+    fuzz_record(log, &op, 0);
+}
+
+int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
+{
+    libusb_device_handle *h = *h_inout;
+    if (num_ops <= 0) num_ops = 5000;
+    seed = fuzz_seed_or_time(seed);
+    struct fuzz_rng rng = { seed };
+    struct fuzz_log log; fuzz_log_init(&log);
+
+    fuzz_stop = 0;
+    signal(SIGINT, fuzz_sigint);
+    printf("=== I2C_FUZZ === ops=%ld seed=0x%016llx "
+           "(I2CWFX3/I2CRFX3 only, correct direction, random addr/reg/len)\n",
+           num_ops, (unsigned long long)seed);
+
+    uint32_t boot = 0;
+    if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+        printf("FAIL i2c_fuzz: device unhealthy before start\n");
+        signal(SIGINT, SIG_DFL);
+        *h_inout = h;
+        return 1;
+    }
+
+    int rc = 0;
+    for (long i = 0; i < num_ops && !fuzz_stop; i++) {
+        i2c_fuzz_step(h, &rng, &log);
+        if ((i + 1) % 64 == 0) {
+            int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
+            if (hc != 0) {
+                printf("FAIL i2c_fuzz: health gate failed at op %ld (%s) — "
+                       "malformed I2C alone wedged EP0 (#154 confirmed)\n",
+                       i + 1, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
+                                                      : libusb_strerror(hc));
+                fuzz_dump(&log, seed, "i2c_fuzz", h);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (h) cmd_u32(h, STOPFX3, 0);
+    signal(SIGINT, SIG_DFL);
+    fuzz_coverage_report(&log);
+    if (rc == 0)
+        printf("PASS i2c_fuzz: %llu I2C ops, EP0 survived (#154 not reproduced "
+               "by I2C alone). NOTE: Si5351 likely reconfigured — reload before "
+               "streaming.\n", (unsigned long long)log.seq);
+    *h_inout = h;
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* oversend_fuzz — #154 isolation: short-wLength on fixed-size IN      */
+/* responders (GETSTATS=30, TESTFX3=4, READINFODEBUG=len+1) that ignore*/
+/* wLength and over-send when the host requests fewer bytes.           */
+/* ------------------------------------------------------------------ */
+int fuzz_oversend(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
+{
+    libusb_device_handle *h = *h_inout;
+    if (num_ops <= 0) num_ops = 5000;
+    seed = fuzz_seed_or_time(seed);
+    struct fuzz_rng rng = { seed };
+    struct fuzz_log log; fuzz_log_init(&log);
+
+    fuzz_stop = 0;
+    signal(SIGINT, fuzz_sigint);
+    printf("=== OVERSEND_FUZZ === ops=%ld seed=0x%016llx "
+           "(GETSTATS/TESTFX3/READINFODEBUG, correct IN dir, wLength < payload)\n",
+           num_ops, (unsigned long long)seed);
+
+    /* Enable debug mode so READINFODEBUG has output queued (len+1 > 1). */
+    { uint8_t info[4]; ctrl_read(h, TESTFX3, 1, 0, info, 4); }
+
+    uint32_t boot = 0;
+    if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+        printf("FAIL oversend_fuzz: device unhealthy before start\n");
+        signal(SIGINT, SIG_DFL);
+        *h_inout = h;
+        return 1;
+    }
+
+    /* The fixed-size over-senders (I2CRFX3 is excluded — it honours wLength). */
+    static const uint8_t responders[] = { GETSTATS, TESTFX3, READINFODEBUG };
+
+    int rc = 0;
+    static uint8_t buf[64];
+    for (long i = 0; i < num_ops && !fuzz_stop; i++) {
+        uint8_t code = responders[fuzz_below(&rng, 3)];
+        /* wLength 0..3 — below TESTFX3's 4 and far below GETSTATS's 30, so the
+         * handler's fixed SendEP0Data over-sends past what the host asked. */
+        uint16_t wLength = (uint16_t)fuzz_below(&rng, 4);
+        uint8_t bmrt = LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR
+                     | LIBUSB_RECIPIENT_DEVICE;
+        int r = libusb_control_transfer(h, bmrt, code, 0, 0, buf, wLength, 250);
+        struct fuzz_op op = { bmrt, code, 0, 0, wLength, wLength, r };
+        fuzz_record(&log, &op, 0);
+
+        if ((i + 1) % 64 == 0) {
+            int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
+            if (hc != 0) {
+                printf("FAIL oversend_fuzz: health gate failed at op %ld (%s) — "
+                       "short-wLength over-send alone wedged EP0 (#154 confirmed)\n",
+                       i + 1, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
+                                                      : libusb_strerror(hc));
+                fuzz_dump(&log, seed, "oversend_fuzz", h);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (h) cmd_u32(h, STOPFX3, 0);
+    signal(SIGINT, SIG_DFL);
+    fuzz_coverage_report(&log);
+    if (rc == 0)
+        printf("PASS oversend_fuzz: %llu over-send ops, EP0 survived "
+               "(#154 not reproduced by over-send alone)\n",
+               (unsigned long long)log.seq);
     *h_inout = h;
     return rc;
 }
