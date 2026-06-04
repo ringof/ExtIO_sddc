@@ -152,62 +152,32 @@ void ApplicationThread ( uint32_t input)
 	int32_t Seconds = 0;  // second count in serial debug
 #endif
 	uint32_t nline;
-	CyBool_t measure;
     CyU3PReturnStatus_t Status;
-    glHWconfig = 0;
+
+    /* RX888mk2-only firmware: the hardware model is fixed.  The previous
+     * boot-time autodetect probed the R828D tuner over I2C and fell back to
+     * NORADIO on any failure, so a disturbed or corrupted I2C bus could
+     * silently brick the device into a non-streaming state that a firmware
+     * reload could not clear (only a power cycle could).  Hardcode the model
+     * and bring up the clock unconditionally: a failed Si5351 init no longer
+     * blocks enumeration, and a later STARTADC re-establishes the sample
+     * clock.  See issue #158. */
+    glHWconfig = RX888r2;
 
     GpioInitClock();
 
-	DebugPrint(4, "Detect Hardware");
     Status = I2cInit ();
     if (Status != CY_U3P_SUCCESS)
-    	DebugPrint(4, "I2cInit failed to initialize. Error code: %d.", Status);
-	else
-	{
-		Status = Si5351Init();
-		if (Status != CY_U3P_SUCCESS)
-		{
-			DebugPrint(4, "Si5351Init failed to initialize. Error code: %d.", Status);
-		}
-		else
-		{
-			ConfGPIOsimpleinputPU(GPIO36);
-
-			Status = si5351aSetFrequencyB(16000000);
-			if (Status != CY_U3P_SUCCESS)
-				DebugPrint(4, "si5351aSetFrequencyB(16MHz) failed: %d.", Status);
-			uint8_t identity;
-			if (I2cTransfer(0, R828D_I2C_ADDR, 1, &identity, true) == CY_U3P_SUCCESS)
-			{
-				CyU3PGpioSimpleGetValue ( GPIO36, &measure);
-
-				if (!measure)
-				{
-					glHWconfig = RX888r2;
-					DebugPrint(4, "R828D detected. RX888r2 detected.");
-				}
-				else
-				{
-					glHWconfig = NORADIO;
-					DebugPrint(4, "R828D detected but GPIO36 sense failed.");
-				}
-			}
-			else
-			{
-				glHWconfig = NORADIO;
-				DebugPrint(4, "No R828D tuner detected.");
-			}
-			Status = si5351aSetFrequencyB(0);
-			if (Status != CY_U3P_SUCCESS)
-				DebugPrint(4, "si5351aSetFrequencyB(0) failed: %d.", Status);
-		}
-	}
+        DebugPrint(4, "I2cInit failed to initialize. Error code: %d.", Status);
+    else
+    {
+        Status = Si5351Init();
+        if (Status != CY_U3P_SUCCESS)
+            DebugPrint(4, "Si5351Init failed to initialize. Error code: %d.", Status);
+    }
     DebugPrint(4, "HWconfig: %d.", glHWconfig);
 
-	if (glHWconfig == RX888r2)
-	{
-		rx888r2_GpioInitialize();
-	}
+    rx888r2_GpioInitialize();
 
     // Spin up the USB Connection
 	Status = InitializeUSB(glHWconfig);
