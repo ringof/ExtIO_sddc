@@ -747,6 +747,77 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
 }
 
 /* ------------------------------------------------------------------ */
+/* oversend_fuzz — #154 isolation: short-wLength on fixed-size IN      */
+/* responders (GETSTATS=30, TESTFX3=4, READINFODEBUG=len+1) that ignore*/
+/* wLength and over-send when the host requests fewer bytes.           */
+/* ------------------------------------------------------------------ */
+int fuzz_oversend(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
+{
+    libusb_device_handle *h = *h_inout;
+    if (num_ops <= 0) num_ops = 5000;
+    seed = fuzz_seed_or_time(seed);
+    struct fuzz_rng rng = { seed };
+    struct fuzz_log log; fuzz_log_init(&log);
+
+    fuzz_stop = 0;
+    signal(SIGINT, fuzz_sigint);
+    printf("=== OVERSEND_FUZZ === ops=%ld seed=0x%016llx "
+           "(GETSTATS/TESTFX3/READINFODEBUG, correct IN dir, wLength < payload)\n",
+           num_ops, (unsigned long long)seed);
+
+    /* Enable debug mode so READINFODEBUG has output queued (len+1 > 1). */
+    { uint8_t info[4]; ctrl_read(h, TESTFX3, 1, 0, info, 4); }
+
+    uint32_t boot = 0;
+    if (fuzz_gate(&h, &log, &boot, /*quiet=*/0) != 0) {
+        printf("FAIL oversend_fuzz: device unhealthy before start\n");
+        signal(SIGINT, SIG_DFL);
+        *h_inout = h;
+        return 1;
+    }
+
+    /* The fixed-size over-senders (I2CRFX3 is excluded — it honours wLength). */
+    static const uint8_t responders[] = { GETSTATS, TESTFX3, READINFODEBUG };
+
+    int rc = 0;
+    static uint8_t buf[64];
+    for (long i = 0; i < num_ops && !fuzz_stop; i++) {
+        uint8_t code = responders[fuzz_below(&rng, 3)];
+        /* wLength 0..3 — below TESTFX3's 4 and far below GETSTATS's 30, so the
+         * handler's fixed SendEP0Data over-sends past what the host asked. */
+        uint16_t wLength = (uint16_t)fuzz_below(&rng, 4);
+        uint8_t bmrt = LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR
+                     | LIBUSB_RECIPIENT_DEVICE;
+        int r = libusb_control_transfer(h, bmrt, code, 0, 0, buf, wLength, 250);
+        struct fuzz_op op = { bmrt, code, 0, 0, wLength, wLength, r };
+        fuzz_record(&log, &op, 0);
+
+        if ((i + 1) % 64 == 0) {
+            int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
+            if (hc != 0) {
+                printf("FAIL oversend_fuzz: health gate failed at op %ld (%s) — "
+                       "short-wLength over-send alone wedged EP0 (#154 confirmed)\n",
+                       i + 1, hc == FUZZ_HWCONFIG_BAD ? "hwconfig changed"
+                                                      : libusb_strerror(hc));
+                fuzz_dump(&log, seed, "oversend_fuzz", h);
+                rc = 1;
+                break;
+            }
+        }
+    }
+
+    if (h) cmd_u32(h, STOPFX3, 0);
+    signal(SIGINT, SIG_DFL);
+    fuzz_coverage_report(&log);
+    if (rc == 0)
+        printf("PASS oversend_fuzz: %llu over-send ops, EP0 survived "
+               "(#154 not reproduced by over-send alone)\n",
+               (unsigned long long)log.seq);
+    *h_inout = h;
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
 /* stream_fuzz — async bulk + host-lifecycle fuzzer                   */
 /* ------------------------------------------------------------------ */
 #define SF_POOL 8

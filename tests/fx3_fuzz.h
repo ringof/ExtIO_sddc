@@ -37,6 +37,10 @@ int fuzz_ep0_sweep(libusb_device_handle **h_inout);
  * addr/reg/len) — confirms whether the I2C path alone wedges EP0. */
 int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
 
+/* #154 isolation: short-wLength requests to the fixed-size IN responders
+ * (GETSTATS/TESTFX3/READINFODEBUG) that over-send past wLength. */
+int fuzz_oversend(libusb_device_handle **h_inout, long num_ops, uint64_t seed);
+
 /* #148: the standalone fuzzers return 2 when the device is EP0-healthy but no
  * longer streaming (Si5351 likely reconfigured by fuzz); main() maps that to a
  * reload-and-re-verify recovery check. */
