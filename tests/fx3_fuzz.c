@@ -792,9 +792,18 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
                     }
                 }
                 if (!still_mute) {
+                    /* Log the op that preceded the blip so we can tell a pure
+                     * bus/USB transient from an allowed 0xC0 write briefly
+                     * perturbing the chip (the latter would implicate the
+                     * guard's allow/block boundary). */
                     printf("    (find-wedge: transient probe failure after op "
-                           "%ld — 0xC0 recovered on re-probe; not a wedge)\n",
-                           i + 1);
+                           "%ld — 0xC0 recovered on re-probe; not a wedge; "
+                           "preceding op: %s wVal=0x%04x (devAddr 0x%02x) "
+                           "wIdx=0x%04x (reg 0x%02x) len=%u)\n",
+                           i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                           g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                           g_i2c_last_reg, g_i2c_last_reg & 0xff,
+                           g_i2c_last_plen);
                     continue;
                 }
                 printf("\n>>> Si5351 WENT MUTE after op %ld "
