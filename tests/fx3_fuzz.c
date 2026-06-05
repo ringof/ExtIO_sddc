@@ -684,6 +684,11 @@ int fuzz_ep0_sweep(libusb_device_handle **h_inout)
  * Note: this scribbles the Si5351 — a PASS means "I2C abuse did not wedge EP0"
  * (the clock is still likely corrupted; reload before streaming).  A FAIL is
  * the #154 wedge reproduced in isolation. */
+/* #163 find-wedge: last I2C op's address/register/data, stashed for the
+ * trigger report (the op dump records addr/reg but not the payload bytes). */
+static uint16_t g_i2c_last_addr, g_i2c_last_reg, g_i2c_last_plen;
+static uint8_t  g_i2c_last_isread, g_i2c_last_data[64];
+
 static void i2c_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
                           struct fuzz_log *log)
 {
@@ -714,6 +719,11 @@ static void i2c_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
     int rc = libusb_control_transfer(h, bmrt, code, addr, reg, buf, plen, 250);
     struct fuzz_op op = { bmrt, code, addr, reg, wLength, plen, rc };
     fuzz_record(log, &op, 0);
+
+    /* Stash for the find-wedge trigger report. */
+    g_i2c_last_addr = addr; g_i2c_last_reg = reg; g_i2c_last_plen = plen;
+    g_i2c_last_isread = (uint8_t)is_read;
+    for (uint16_t k = 0; k < plen; k++) g_i2c_last_data[k] = buf[k];
 }
 
 int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
@@ -738,9 +748,41 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
         return 1;
     }
 
+    /* #163 find-wedge: probe the Si5351 (read 0xC0 reg0) after EVERY op; the
+     * op immediately before the first failed probe is the write that wedged
+     * it.  Env-gated like the other knobs.  Probes are extra reads — they do
+     * not advance the RNG, so the write sequence is identical to a plain run. */
+    int find_wedge = (getenv("RX888_FIND_WEDGE") != NULL);
+    if (find_wedge)
+        printf("--- find-wedge: probing Si5351 0xC0 after every op "
+               "(seq unchanged; reports the trigger write) ---\n");
+
     int rc = 0;
     for (long i = 0; i < num_ops && !fuzz_stop; i++) {
         i2c_fuzz_step(h, &rng, &log);
+
+        if (find_wedge) {
+            uint8_t probe = 0;
+            int pr = ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1);
+            if (pr < 0) {
+                printf("\n>>> Si5351 WENT MUTE after op %ld "
+                       "(probe read 0xC0 reg0 -> %s) <<<\n",
+                       i + 1, libusb_strerror(pr));
+                printf("    TRIGGER op %ld: %s  wVal=0x%04x (devAddr 0x%02x)"
+                       "  wIdx=0x%04x (reg 0x%02x)  len=%u  data=",
+                       i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                       g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                       g_i2c_last_reg, g_i2c_last_reg & 0xff, g_i2c_last_plen);
+                for (uint16_t k = 0; k < g_i2c_last_plen; k++)
+                    printf("%02x ", g_i2c_last_data[k]);
+                printf("\n    (context — recent ops below)\n");
+                fuzz_dump(&log, seed, "i2c_fuzz/find-wedge", h);
+                rc = 1;
+                break;
+            }
+            continue;
+        }
+
         if ((i + 1) % 64 == 0) {
             int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
             if (hc != 0) {
@@ -754,6 +796,9 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
             }
         }
     }
+
+    if (find_wedge && rc == 0)
+        printf("--- find-wedge: no Si5351 mute observed in %ld ops ---\n", num_ops);
 
     if (h) cmd_u32(h, STOPFX3, 0);
     signal(SIGINT, SIG_DFL);
