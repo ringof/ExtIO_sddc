@@ -6,6 +6,7 @@
  */
 
 #include "Application.h"
+#include "cyu3i2c.h"   /* CyU3PI2cGetErrorCode — granular I2C NAK reason (issue #163 diagnostic) */
 
 #define SI_CLK0_CONTROL		16			// Registers
 #define SI_CLK1_CONTROL		17
@@ -232,7 +233,8 @@ CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
 									// Set up PLL A with the calculated multiplication ratio
 	status = SetupPLL(SI_SYNTH_PLL_A, mult, num, denom);
 	if (status != CY_U3P_SUCCESS) {
-		DebugPrint(4, "Si5351 SetupPLL A failed: %d", status);
+		{ CyU3PI2cError_t ec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&ec);
+		  DebugPrint(4, "Si5351 SetupPLL A failed: %d (i2c ec=%d)", status, ec); }
 		return status;
 	}
 	// Set up MultiSynth divider 0, with the calculated divider.
@@ -309,7 +311,8 @@ CyU3PReturnStatus_t si5351aSetFrequencyB(UINT32 freq2)
 									// Set up PLL B with the calculated multiplication ratio
 	status = SetupPLL(SI_SYNTH_PLL_B, mult, num, denom);
 	if (status != CY_U3P_SUCCESS) {
-		DebugPrint(4, "Si5351 SetupPLL B failed: %d", status);
+		{ CyU3PI2cError_t ec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&ec);
+		  DebugPrint(4, "Si5351 SetupPLL B failed: %d (i2c ec=%d)", status, ec); }
 		return status;
 	}
 	// Set up MultiSynth divider 0, with the calculated divider.
