@@ -753,9 +753,22 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
      * it.  Env-gated like the other knobs.  Probes are extra reads — they do
      * not advance the RNG, so the write sequence is identical to a plain run. */
     int find_wedge = (getenv("RX888_FIND_WEDGE") != NULL);
-    if (find_wedge)
-        printf("--- find-wedge: probing Si5351 0xC0 after every op "
-               "(seq unchanged; reports the trigger write) ---\n");
+    if (find_wedge) {
+        /* Guard: the chip must start clean (ACKing) or the result is bogus.
+         * fuzz_gate passes on a mute Si5351 because hwconfig is hardcoded
+         * (#158), so probe 0xC0 directly here. */
+        uint8_t p = 0;
+        if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &p, 1) < 0) {
+            printf("FAIL find-wedge: Si5351 already mute at start "
+                   "(read 0xC0 -> pipe error). Power-cycle the board "
+                   "(must re-upload firmware) and retry.\n");
+            signal(SIGINT, SIG_DFL);
+            *h_inout = h;
+            return 1;
+        }
+        printf("--- find-wedge: Si5351 ACKs at start; probing 0xC0 after "
+               "every op (seq unchanged; reports the trigger write) ---\n");
+    }
 
     int rc = 0;
     for (long i = 0; i < num_ops && !fuzz_stop; i++) {
