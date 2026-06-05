@@ -52,15 +52,21 @@ extern uint32_t glDMACount;
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
 
-/* #163: AN619 tabulates registers 4-8 and 10-14 as Reserved (register 9 =
- * OEB Pin Enable is documented).  A non-zero host write to a reserved
- * register (empirically 0x05/0x07) wedges the MS5351's I2C slave into an
- * unrecoverable, power-cycle-only state.  The firmware uses none of these
- * (its Si5351 writes are all reg 15+), so block them on the host (I2CWFX3)
- * path.  Firmware-internal writes call I2cTransfer directly and bypass this. */
-static CyBool_t si5351_reg_reserved(uint8_t r)
+/* #163: Si5351 documented-register allowlist (AN619).  A non-zero host write
+ * to a *reserved* register — the low gaps 4-8/10-14 OR the high gaps 93-148,
+ * 171-176, 178-182, 184-186, 188+ — can wedge the MS5351's I2C slave into an
+ * unrecoverable, power-cycle-only state.  Permit only documented registers;
+ * block everything else on the host (I2CWFX3) path.  Firmware-internal Si5351
+ * writes call I2cTransfer directly and bypass this. */
+static CyBool_t si5351_reg_writable(uint8_t r)
 {
-    return (r >= 4 && r <= 8) || (r >= 10 && r <= 14);
+    return (r <= 3)               /* status / interrupt / output enable      */
+        || (r == 9)               /* OEB pin enable control mask             */
+        || (r >= 15 && r <= 92)   /* PLL src, CLK0-7 ctrl, disable state, MultiSynth, R-div */
+        || (r >= 149 && r <= 170) /* spread spectrum, VCXO, CLK phase offsets */
+        || (r == 177)             /* PLL reset                               */
+        || (r == 183)             /* crystal internal load                   */
+        || (r == 187);            /* fanout enable                           */
 }
 
 /* GETSTATS payload length. Single source of truth; the per-field writes
@@ -364,16 +370,23 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
-							/* #163: protect the Si5351 — reject host writes whose
-							 * register range touches a reserved register (the
-							 * auto-increment can cross into 0x05/0x07). */
+							/* #163: protect the Si5351 (7-bit 0x60 = 0xC0 write /
+							 * 0xC1 read).  A write sent to the read-address 0xC1 is
+							 * malformed — block it.  At 0xC0, block any write whose
+							 * register range (auto-increment included) touches a
+							 * reserved register. */
 							CyBool_t blocked = CyFalse;
-							if ((uint8_t)wValue == 0xC0)
+							if (((uint8_t)wValue & 0xFEu) == 0xC0u)   /* Si5351, either address */
 							{
-								uint16_t k;
-								for (k = 0; k < wLength; k++)
-									if (si5351_reg_reserved((uint8_t)(wIndex + k)))
-										{ blocked = CyTrue; break; }
+								if ((uint8_t)wValue & 0x01u)
+									blocked = CyTrue;                 /* 0xC1: write to read-address */
+								else
+								{
+									uint16_t k;
+									for (k = 0; k < wLength; k++)
+										if (!si5351_reg_writable((uint8_t)(wIndex + k)))
+											{ blocked = CyTrue; break; }
+								}
 							}
 							if (blocked)
 							{
