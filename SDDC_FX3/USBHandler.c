@@ -405,9 +405,9 @@ CyFxSlFifoApplnUSBSetupCB (
 							break;
 						case I2C_RECOVER:
 							{
-								uint8_t clk = 0;
-								CyU3PReturnStatus_t rs = I2cBusRecover(&clk);
-								DebugPrint(4, "\r\nI2C recover: %d clocks, reinit=%d", clk, rs);
+								uint8_t sda = 0;
+								CyU3PReturnStatus_t rs = I2cBusRecover(&sda);
+								DebugPrint(4, "\r\nI2C recover: 9 forced, sda=0x%x (b0=before b1=after) reinit=%d", sda, rs);
 							}
 							glVendorRqtCnt++;
 							isHandled = CyTrue;

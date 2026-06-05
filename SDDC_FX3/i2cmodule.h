@@ -18,10 +18,10 @@
 
 CyU3PReturnStatus_t I2cInit();
 
-/* I2C bus recovery (#163 diagnostic): release the I2C block, clock SCL up to
- * 9 times to free a slave holding SDA, issue a STOP, then re-init the block.
- * *clocks (if non-NULL) returns the number of SCL pulses before SDA released. */
-CyU3PReturnStatus_t I2cBusRecover(uint8_t *clocks);
+/* I2C bus recovery (#163 diagnostic): release the I2C block, force 9 SCL
+ * pulses (no early bail), issue a STOP, then re-init the block.  *info (if
+ * non-NULL) returns SDA state: bit0 = before the clocks, bit1 = after. */
+CyU3PReturnStatus_t I2cBusRecover(uint8_t *info);
 
 CyU3PReturnStatus_t I2cTransferW1 (  // Write one byte only
 		uint8_t   byteAddress,
