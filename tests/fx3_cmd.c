@@ -222,19 +222,6 @@ static int do_wdg_max(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
-/* #163: trigger firmware I2C bus-recovery. mode 0 = 9 SCL clocks + STOP;
- * mode 1 = pulse SDA+SCL together 9x + STOP. */
-static int do_i2c_recover(libusb_device_handle *h, uint16_t mode)
-{
-    int r = set_arg(h, I2C_RECOVER, mode);
-    if (r < 0) {
-        printf("FAIL i2c_recover mode %u: %s\n", mode, libusb_strerror(r));
-        return 1;
-    }
-    printf("PASS i2c_recover mode %u (issued; re-probe to verify)\n", mode);
-    return 0;
-}
-
 /* #163: from a CLEAN Si5351, write each register start..0xFF (single byte =
  * value) and probe (read 0xC0 reg0) after each.  Reports the first register
  * whose write mutes the chip.  Wedge is POR-only, so it stops there; resume
@@ -743,9 +730,6 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     if (strcmp(cmd, "wdg_max") == 0) {
         if (!args) { printf("usage: wdg_max <0-255>\n"); return 1; }
         return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
-    }
-    if (strcmp(cmd, "i2c_recover") == 0) {
-        return do_i2c_recover(h, args ? (uint16_t)strtoul(args, NULL, 0) : 0);
     }
     if (strcmp(cmd, "i2c_sweep") == 0) {
         unsigned long st = 0, v = 0xFF;
@@ -5407,7 +5391,6 @@ static void usage(const char *prog)
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
-        "  i2c_recover [mode]           I2C bus recovery: 0=9 SCL+STOP, 1=SDA+SCL together (#163)\n"
         "  i2c_sweep [start] [val]      Write Si5351 regs start..0xFF=val, probe each; find forbidden reg (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
@@ -5623,9 +5606,6 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "wdg_max") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
-
-    } else if (strcmp(cmd, "i2c_recover") == 0) {
-        rc = do_i2c_recover(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0);
 
     } else if (strcmp(cmd, "i2c_sweep") == 0) {
         rc = do_i2c_sweep(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0,

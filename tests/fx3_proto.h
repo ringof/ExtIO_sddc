@@ -54,7 +54,6 @@
 #define AD8370_VGA         11
 #define WDG_MAX_RECOV      14
 #define WDG_RESET_ESCALATE 15   /* enable(!=0)/disable(0) cold-start reset escalation (#137) */
-#define I2C_RECOVER        20   /* trigger I2C bus recovery (9-clock + STOP), #163 diagnostic */
 
 /* Timeouts */
 #define CTRL_TIMEOUT_MS  1000
