@@ -52,6 +52,22 @@ extern uint32_t glDMACount;
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
 
+/* #163: Si5351 register write allowlist.  A non-zero host write to the
+ * MS5351's *reserved* registers (e.g. 0x05/0x07) wedges its I2C slave into an
+ * unrecoverable, power-cycle-only state.  Permit only the registers AN619
+ * documents; block the reserved gaps on the host (I2CWFX3) path.  Firmware-
+ * internal Si5351 writes call I2cTransfer directly and bypass this. */
+static CyBool_t si5351_reg_writable(uint8_t r)
+{
+    return (r <= 3)               /* device status / interrupt / output enable */
+        || (r == 9)               /* OEB pin enable control mask              */
+        || (r >= 15 && r <= 92)   /* PLL src, CLK0-7 ctrl, disable state, MultiSynth, R-div */
+        || (r >= 149 && r <= 170) /* spread spectrum, VCXO, CLK phase offsets */
+        || (r == 177)             /* PLL reset                               */
+        || (r == 183)             /* crystal internal load                   */
+        || (r == 187);            /* fanout enable                           */
+}
+
 /* GETSTATS payload length. Single source of truth; the per-field writes
  * inside the GETSTATS handler must sum to exactly this. Compile-time
  * guard below catches any future addition that would overrun glEp0Buffer. */
@@ -353,6 +369,25 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
+							/* #163: protect the Si5351 — reject host writes whose
+							 * register range touches a reserved register (the
+							 * auto-increment can cross into 0x05/0x07). */
+							CyBool_t blocked = CyFalse;
+							if ((uint8_t)wValue == 0xC0)
+							{
+								uint16_t k;
+								for (k = 0; k < wLength; k++)
+									if (!si5351_reg_writable((uint8_t)(wIndex + k)))
+										{ blocked = CyTrue; break; }
+							}
+							if (blocked)
+							{
+								DebugPrint (4, "\r\nI2CWR BLOCKED: Si5351 reg 0x%x len %d touches reserved (#163)", wIndex, wLength);
+								glCounter[1]++;   /* count as an i2c_failure for visibility */
+								isHandled = CyFalse;
+							}
+							else
+							{
 							apiRetStatus = I2cTransfer ( wIndex, wValue, wLength, glEp0Buffer, CyFalse);
 							if (apiRetStatus == CY_U3P_SUCCESS)
 								isHandled = CyTrue;
@@ -361,6 +396,7 @@ CyFxSlFifoApplnUSBSetupCB (
 								{ CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
 								  DebugPrint (4, "\r\nI2CWR a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec); }
 								isHandled = CyFalse;
+							}
 							}
 						}
 					break;
