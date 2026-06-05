@@ -52,20 +52,15 @@ extern uint32_t glDMACount;
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
 
-/* #163: Si5351 register write allowlist.  A non-zero host write to the
- * MS5351's *reserved* registers (e.g. 0x05/0x07) wedges its I2C slave into an
- * unrecoverable, power-cycle-only state.  Permit only the registers AN619
- * documents; block the reserved gaps on the host (I2CWFX3) path.  Firmware-
- * internal Si5351 writes call I2cTransfer directly and bypass this. */
-static CyBool_t si5351_reg_writable(uint8_t r)
+/* #163: AN619 tabulates registers 4-8 and 10-14 as Reserved (register 9 =
+ * OEB Pin Enable is documented).  A non-zero host write to a reserved
+ * register (empirically 0x05/0x07) wedges the MS5351's I2C slave into an
+ * unrecoverable, power-cycle-only state.  The firmware uses none of these
+ * (its Si5351 writes are all reg 15+), so block them on the host (I2CWFX3)
+ * path.  Firmware-internal writes call I2cTransfer directly and bypass this. */
+static CyBool_t si5351_reg_reserved(uint8_t r)
 {
-    return (r <= 3)               /* device status / interrupt / output enable */
-        || (r == 9)               /* OEB pin enable control mask              */
-        || (r >= 15 && r <= 92)   /* PLL src, CLK0-7 ctrl, disable state, MultiSynth, R-div */
-        || (r >= 149 && r <= 170) /* spread spectrum, VCXO, CLK phase offsets */
-        || (r == 177)             /* PLL reset                               */
-        || (r == 183)             /* crystal internal load                   */
-        || (r == 187);            /* fanout enable                           */
+    return (r >= 4 && r <= 8) || (r >= 10 && r <= 14);
 }
 
 /* GETSTATS payload length. Single source of truth; the per-field writes
@@ -377,7 +372,7 @@ CyFxSlFifoApplnUSBSetupCB (
 							{
 								uint16_t k;
 								for (k = 0; k < wLength; k++)
-									if (!si5351_reg_writable((uint8_t)(wIndex + k)))
+									if (si5351_reg_reserved((uint8_t)(wIndex + k)))
 										{ blocked = CyTrue; break; }
 							}
 							if (blocked)
