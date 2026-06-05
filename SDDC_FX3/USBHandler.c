@@ -11,6 +11,7 @@
  */
 
 #include "Application.h"
+#include "cyu3i2c.h"   /* CyU3PI2cGetErrorCode — granular I2C NAK reason (issue #163 diagnostic) */
 
 #include "Si5351.h"
 
@@ -357,7 +358,8 @@ CyFxSlFifoApplnUSBSetupCB (
 								isHandled = CyTrue;
 							else
 							{
-								CyU3PDebugPrint (4, "I2cwrite Error %d\n", apiRetStatus);
+								{ CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+								  DebugPrint (4, "\r\nI2CWR a=0x%02X r=0x%02X failed:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec); }
 								isHandled = CyFalse;
 							}
 						}
@@ -370,6 +372,12 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						apiRetStatus = CyU3PUsbSendEP0Data(wLength, glEp0Buffer);
 						isHandled = CyTrue;
+					}
+					else
+					{
+						CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+						DebugPrint (4, "\r\nI2CRD a=0x%02X r=0x%02X failed:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec);
+						/* isHandled stays CyFalse -> EP0 STALL (host sees pipe error) */
 					}
 					break;
 			case SETARGFX3:

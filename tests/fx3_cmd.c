@@ -249,9 +249,22 @@ static int do_i2cr(libusb_device_handle *h, uint16_t addr, uint16_t reg, uint16_
     uint8_t buf[64];
     if (len > sizeof(buf)) len = sizeof(buf);
 
+    /* Enable USB debug first so a firmware-side I2C failure is captured: the
+     * I2CRFX3 handler logs CyU3PI2cGetErrorCode (the granular NAK reason) via
+     * DebugPrint2USB, which only buffers when debug mode is on (#163). */
+    ctrl_read(h, TESTFX3, 1, 0, buf, 4);
+
     int r = ctrl_read(h, I2CRFX3, addr, reg, buf, len);
     if (r < 0) {
         printf("FAIL i2cr addr=0x%02X reg=0x%02X: %s\n", addr, reg, libusb_strerror(r));
+        /* Drain the firmware debug buffer — surfaces "I2CRD ... ec=N", where
+         * ec=0 NAK_BYTE_0 (address), 1 NAK_BYTE_1 (register), 8 NAK_DATA. */
+        uint8_t dbg[64];
+        for (int k = 0; k < 16; k++) {
+            int n = ctrl_read(h, READINFODEBUG, 0, 0, dbg, sizeof(dbg));
+            if (n > 1) printf("  [fw]%.*s\n", n - 1, (char *)dbg);
+            usleep(15000);
+        }
         return 1;
     }
     printf("PASS i2cr addr=0x%02X reg=0x%02X len=%d:", addr, reg, r);
