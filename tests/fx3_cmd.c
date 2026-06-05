@@ -5373,6 +5373,7 @@ static void usage(const char *prog)
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
+        "  i2c_recover                  I2C bus recovery: 9-clock + STOP + reinit (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
@@ -5587,6 +5588,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "wdg_max") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
+
+    } else if (strcmp(cmd, "i2c_recover") == 0) {
+        rc = do_i2c_recover(h);
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);
