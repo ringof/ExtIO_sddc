@@ -52,11 +52,14 @@ extern uint32_t glDMACount;
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
 
-/* #163: Si5351 documented-register allowlist (AN619).  A non-zero host write
- * to a *reserved* register — the low gaps 4-8/10-14 OR the high gaps 93-148,
- * 171-176, 178-182, 184-186, 188+ — can wedge the MS5351's I2C slave into an
- * unrecoverable, power-cycle-only state.  Permit only documented registers;
- * block everything else on the host (I2CWFX3) path.  Firmware-internal Si5351
+/* #163: clock-chip documented-register allowlist (AN619 register map).  The
+ * RX888mk2 fits an MS5351M (a register-compatible Si5351 clone), NOT a genuine
+ * Skyworks Si5351A.  On the MS5351M, a non-zero host write to a *reserved*
+ * register — the low gaps 4-8/10-14 OR the high gaps 93-148, 171-176, 178-182,
+ * 184-186, 188+ — can wedge its I2C slave into an unrecoverable,
+ * power-cycle-only state.  (Not confirmed on a true Si5351A; the allowlist is
+ * harmless there regardless.)  Permit only documented registers; block
+ * everything else on the host (I2CWFX3) path.  Firmware-internal clock-chip
  * writes call I2cTransfer directly and bypass this. */
 static CyBool_t si5351_reg_writable(uint8_t r)
 {
