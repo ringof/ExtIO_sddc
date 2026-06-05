@@ -222,15 +222,16 @@ static int do_wdg_max(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
-/* #163: trigger the firmware I2C bus-recovery (9-clock + STOP + re-init). */
-static int do_i2c_recover(libusb_device_handle *h)
+/* #163: trigger firmware I2C bus-recovery. mode 0 = 9 SCL clocks + STOP;
+ * mode 1 = pulse SDA+SCL together 9x + STOP. */
+static int do_i2c_recover(libusb_device_handle *h, uint16_t mode)
 {
-    int r = set_arg(h, I2C_RECOVER, 0);
+    int r = set_arg(h, I2C_RECOVER, mode);
     if (r < 0) {
-        printf("FAIL i2c_recover: %s\n", libusb_strerror(r));
+        printf("FAIL i2c_recover mode %u: %s\n", mode, libusb_strerror(r));
         return 1;
     }
-    printf("PASS i2c_recover (bus-clock + reinit issued; re-probe to verify)\n");
+    printf("PASS i2c_recover mode %u (issued; re-probe to verify)\n", mode);
     return 0;
 }
 
@@ -716,7 +717,7 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
         return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
     }
     if (strcmp(cmd, "i2c_recover") == 0) {
-        return do_i2c_recover(h);
+        return do_i2c_recover(h, args ? (uint16_t)strtoul(args, NULL, 0) : 0);
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }
@@ -5373,7 +5374,7 @@ static void usage(const char *prog)
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
-        "  i2c_recover                  I2C bus recovery: 9-clock + STOP + reinit (#163)\n"
+        "  i2c_recover [mode]           I2C bus recovery: 0=9 SCL+STOP, 1=SDA+SCL together (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
@@ -5590,7 +5591,7 @@ int main(int argc, char **argv)
         rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
 
     } else if (strcmp(cmd, "i2c_recover") == 0) {
-        rc = do_i2c_recover(h);
+        rc = do_i2c_recover(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0);
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);

@@ -18,10 +18,11 @@
 
 CyU3PReturnStatus_t I2cInit();
 
-/* I2C bus recovery (#163 diagnostic): release the I2C block, force 9 SCL
- * pulses (no early bail), issue a STOP, then re-init the block.  *info (if
- * non-NULL) returns SDA state: bit0 = before the clocks, bit1 = after. */
-CyU3PReturnStatus_t I2cBusRecover(uint8_t *info);
+/* I2C bus recovery (#163 diagnostic).  mode 0: 9 SCL pulses + STOP (SDA as
+ * input).  mode 1: pulse SDA+SCL together 9x + STOP.  Releases the I2C block,
+ * drives the pins as GPIO, then re-inits.  *info (mode 0): bit0=SDA before,
+ * bit1=SDA after the clocks. */
+CyU3PReturnStatus_t I2cBusRecover(uint8_t mode, uint8_t *info);
 
 CyU3PReturnStatus_t I2cTransferW1 (  // Write one byte only
 		uint8_t   byteAddress,

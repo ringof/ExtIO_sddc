@@ -126,7 +126,7 @@ static void i2c_gpio_in (uint8_t gpio)
  * Only meaningful if the bus is actually held; a slave that has gone mute
  * without holding SDA will not be revived by this.  Returns the re-init
  * status; *clocks (if non-NULL) = SCL pulses issued before SDA released. */
-CyU3PReturnStatus_t I2cBusRecover (uint8_t *info)
+CyU3PReturnStatus_t I2cBusRecover (uint8_t mode, uint8_t *info)
 {
 	CyBool_t sda_before = CyFalse, sda_after = CyFalse;
 	uint8_t  n;
@@ -136,29 +136,45 @@ CyU3PReturnStatus_t I2cBusRecover (uint8_t *info)
 	CyU3PDeviceGpioOverride (I2C_SCL_GPIO, CyTrue);
 	CyU3PDeviceGpioOverride (I2C_SDA_GPIO, CyTrue);
 
-	i2c_gpio_in  (I2C_SDA_GPIO);        /* sample SDA (pulled up)   */
-	i2c_gpio_out (I2C_SCL_GPIO, CyTrue);/* SCL idle high            */
-	CyU3PBusyWait (20);
-
-	CyU3PGpioSimpleGetValue (I2C_SDA_GPIO, &sda_before);
-
-	/* FORCED: issue all 9 SCL pulses unconditionally (no early bail on
-	 * SDA-high) — exercises the clock line even when the bus is not held,
-	 * to test whether toggling SCL jogs a mute slave out of its state. */
-	for (n = 0; n < 9; n++)
+	if (mode == 1)
 	{
-		CyU3PGpioSetValue (I2C_SCL_GPIO, CyFalse); CyU3PBusyWait (20);
+		/* Mode 1: drive SDA and SCL low/high *together*, 9 pulses, then STOP.
+		 * Non-standard "shake both lines" last resort. */
+		i2c_gpio_out (I2C_SDA_GPIO, CyTrue);
+		i2c_gpio_out (I2C_SCL_GPIO, CyTrue);
+		CyU3PBusyWait (20);
+		for (n = 0; n < 9; n++)
+		{
+			CyU3PGpioSetValue (I2C_SCL_GPIO, CyFalse);
+			CyU3PGpioSetValue (I2C_SDA_GPIO, CyFalse); CyU3PBusyWait (20);
+			CyU3PGpioSetValue (I2C_SCL_GPIO, CyTrue);
+			CyU3PGpioSetValue (I2C_SDA_GPIO, CyTrue);  CyU3PBusyWait (20);
+		}
+		/* STOP: SDA low->high while SCL high. */
+		CyU3PGpioSetValue (I2C_SDA_GPIO, CyFalse); CyU3PBusyWait (20);
 		CyU3PGpioSetValue (I2C_SCL_GPIO, CyTrue);  CyU3PBusyWait (20);
+		CyU3PGpioSetValue (I2C_SDA_GPIO, CyTrue);  CyU3PBusyWait (20);
+	}
+	else
+	{
+		/* Mode 0: 9 SCL pulses (SDA released as input) followed by a STOP. */
+		i2c_gpio_in  (I2C_SDA_GPIO);
+		i2c_gpio_out (I2C_SCL_GPIO, CyTrue);
+		CyU3PBusyWait (20);
+		CyU3PGpioSimpleGetValue (I2C_SDA_GPIO, &sda_before);
+		for (n = 0; n < 9; n++)
+		{
+			CyU3PGpioSetValue (I2C_SCL_GPIO, CyFalse); CyU3PBusyWait (20);
+			CyU3PGpioSetValue (I2C_SCL_GPIO, CyTrue);  CyU3PBusyWait (20);
+		}
+		CyU3PGpioSimpleGetValue (I2C_SDA_GPIO, &sda_after);
+		/* STOP: SDA low->high while SCL high. */
+		i2c_gpio_out (I2C_SDA_GPIO, CyFalse);       CyU3PBusyWait (20);
+		CyU3PGpioSetValue (I2C_SCL_GPIO, CyTrue);   CyU3PBusyWait (20);
+		CyU3PGpioSetValue (I2C_SDA_GPIO, CyTrue);   CyU3PBusyWait (20);
 	}
 
-	CyU3PGpioSimpleGetValue (I2C_SDA_GPIO, &sda_after);
-
-	/* STOP condition: SDA low->high while SCL is high. */
-	i2c_gpio_out (I2C_SDA_GPIO, CyFalse);       CyU3PBusyWait (20);
-	CyU3PGpioSetValue (I2C_SCL_GPIO, CyTrue);   CyU3PBusyWait (20);
-	CyU3PGpioSetValue (I2C_SDA_GPIO, CyTrue);   CyU3PBusyWait (20);
-
-	/* info: bit0 = SDA before the clocks, bit1 = SDA after. */
+	/* info: bit0 = SDA before the clocks, bit1 = SDA after (mode 0 only). */
 	if (info) *info = (uint8_t)((sda_before ? 1 : 0) | (sda_after ? 2 : 0));
 
 	/* Hand the pins back to the I2C block and re-initialise it. */
