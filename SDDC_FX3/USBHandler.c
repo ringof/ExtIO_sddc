@@ -69,6 +69,21 @@ static CyBool_t si5351_reg_writable(uint8_t r)
         || (r == 187);            /* fanout enable                           */
 }
 
+/* #163: should this host I2C access (read or write) to the Si5351 be blocked?
+ * Blocks the read-address 0xC1 used as a base (malformed preamble), or any
+ * register in the [wIndex, wIndex+wLength) range that is reserved.  Applies to
+ * both directions; firmware-internal Si5351 access bypasses this. */
+static CyBool_t si5351_access_blocked(uint16_t wValue, uint16_t wIndex, uint16_t wLength)
+{
+    uint16_t k;
+    if (wLength == 0)                          return CyFalse;  /* no-op transfer        */
+    if (((uint8_t)wValue & 0xFEu) != 0xC0u)    return CyFalse;  /* not the Si5351 (0x60) */
+    if ((uint8_t)wValue & 0x01u)               return CyTrue;   /* 0xC1 base = malformed */
+    for (k = 0; k < wLength; k++)
+        if (!si5351_reg_writable((uint8_t)(wIndex + k))) return CyTrue;  /* reserved reg */
+    return CyFalse;
+}
+
 /* GETSTATS payload length. Single source of truth; the per-field writes
  * inside the GETSTATS handler must sum to exactly this. Compile-time
  * guard below catches any future addition that would overrun glEp0Buffer. */
@@ -370,27 +385,11 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
-							/* #163: protect the Si5351 (7-bit 0x60 = 0xC0 write /
-							 * 0xC1 read).  A write sent to the read-address 0xC1 is
-							 * malformed — block it.  At 0xC0, block any write whose
-							 * register range (auto-increment included) touches a
-							 * reserved register. */
-							CyBool_t blocked = CyFalse;
-							if (((uint8_t)wValue & 0xFEu) == 0xC0u)   /* Si5351, either address */
+							/* #163: protect the Si5351 — reject host writes to the
+							 * read-address 0xC1 or any reserved register. */
+							if (si5351_access_blocked(wValue, wIndex, wLength))
 							{
-								if ((uint8_t)wValue & 0x01u)
-									blocked = CyTrue;                 /* 0xC1: write to read-address */
-								else
-								{
-									uint16_t k;
-									for (k = 0; k < wLength; k++)
-										if (!si5351_reg_writable((uint8_t)(wIndex + k)))
-											{ blocked = CyTrue; break; }
-								}
-							}
-							if (blocked)
-							{
-								DebugPrint (4, "\r\nI2CWR BLOCKED: Si5351 reg 0x%x len %d touches reserved (#163)", wIndex, wLength);
+								DebugPrint (4, "\r\nI2CWR BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
 								glCounter[1]++;   /* count as an i2c_failure for visibility */
 								isHandled = CyFalse;
 							}
@@ -410,6 +409,13 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 
 			case I2CRFX3:
+					if (si5351_access_blocked(wValue, wIndex, wLength))
+					{
+						DebugPrint (4, "\r\nI2CRD BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
+						glCounter[1]++;
+						/* isHandled stays CyFalse -> STALL */
+					}
+					else {
 					CyU3PMemSet (glEp0Buffer, 0, CYFX_SDRAPP_MAX_EP0LEN);
 					apiRetStatus = I2cTransfer (wIndex, wValue, wLength, glEp0Buffer, CyTrue);
 					if (apiRetStatus == CY_U3P_SUCCESS)
@@ -422,6 +428,7 @@ CyFxSlFifoApplnUSBSetupCB (
 						CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
 						DebugPrint (4, "\r\nI2CRD a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec);
 						/* isHandled stays CyFalse -> EP0 STALL (host sees pipe error) */
+					}
 					}
 					break;
 			case SETARGFX3:
