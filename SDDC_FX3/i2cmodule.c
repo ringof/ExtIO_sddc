@@ -11,7 +11,6 @@
 #include "cyu3error.h"
 #include "cyu3usb.h"
 #include "cyu3i2c.h"
-#include "cyu3utils.h"
 #include "i2cmodule.h"
 
 extern uint32_t glCounter[20];
@@ -89,4 +88,3 @@ CyU3PReturnStatus_t I2cTransferW1(  // Write one byte only
 	uint8_t   ldata = data;
 	return I2cTransfer (byteAddress, devAddr, byteCount, &ldata, CyFalse);
 }
-
