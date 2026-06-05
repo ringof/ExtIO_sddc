@@ -403,6 +403,15 @@ CyFxSlFifoApplnUSBSetupCB (
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
+						case I2C_RECOVER:
+							{
+								uint8_t clk = 0;
+								CyU3PReturnStatus_t rs = I2cBusRecover(&clk);
+								DebugPrint(4, "\r\nI2C recover: %d clocks, reinit=%d", clk, rs);
+							}
+							glVendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
 						default:
 							/* Data phase already ACKed; stall status to
 							   signal the unrecognized wIndex to the host. */

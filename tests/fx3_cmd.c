@@ -222,6 +222,18 @@ static int do_wdg_max(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
+/* #163: trigger the firmware I2C bus-recovery (9-clock + STOP + re-init). */
+static int do_i2c_recover(libusb_device_handle *h)
+{
+    int r = set_arg(h, I2C_RECOVER, 0);
+    if (r < 0) {
+        printf("FAIL i2c_recover: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS i2c_recover (bus-clock + reinit issued; re-probe to verify)\n");
+    return 0;
+}
+
 static int do_start(libusb_device_handle *h)
 {
     int r = cmd_u32(h, STARTFX3, 0);
@@ -702,6 +714,9 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     if (strcmp(cmd, "wdg_max") == 0) {
         if (!args) { printf("usage: wdg_max <0-255>\n"); return 1; }
         return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "i2c_recover") == 0) {
+        return do_i2c_recover(h);
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }

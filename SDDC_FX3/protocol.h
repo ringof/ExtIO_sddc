@@ -90,6 +90,7 @@ enum ArgumentList {
     AD8370_VGA         = 11,   /* AD8370 VGA (0-255) */
     WDG_MAX_RECOV      = 14,   /* Max consecutive watchdog recoveries (0=unlimited) */
     WDG_RESET_ESCALATE = 15,   /* Enable(!=0)/disable(0) cold-start reset escalation (#137) */
+    I2C_RECOVER        = 20,   /* Trigger I2C bus recovery (9-clock + STOP), #163 diagnostic */
 };
 
 #define WDG_MAX_RECOVERY_DEFAULT 5
