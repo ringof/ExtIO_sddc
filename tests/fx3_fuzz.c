@@ -778,8 +778,28 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
             uint8_t probe = 0;
             int pr = ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1);
             if (pr < 0) {
+                /* A real wedge is persistent (address-NAK survives across
+                 * transactions); a lone transient read failure is not.  Before
+                 * declaring a trigger, re-probe a few times — only flag it if
+                 * 0xC0 stays mute, otherwise treat it as a glitch and carry on.
+                 * (The write sequence is untouched: probes don't advance RNG.) */
+                int still_mute = 1;
+                for (int rt = 0; rt < 3; rt++) {
+                    usleep(1000);   /* 1 ms */
+                    if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1) >= 0) {
+                        still_mute = 0;
+                        break;
+                    }
+                }
+                if (!still_mute) {
+                    printf("    (find-wedge: transient probe failure after op "
+                           "%ld — 0xC0 recovered on re-probe; not a wedge)\n",
+                           i + 1);
+                    continue;
+                }
                 printf("\n>>> Si5351 WENT MUTE after op %ld "
-                       "(probe read 0xC0 reg0 -> %s) <<<\n",
+                       "(probe read 0xC0 reg0 -> %s, persisted across "
+                       "re-probes) <<<\n",
                        i + 1, libusb_strerror(pr));
                 printf("    TRIGGER op %ld: %s  wVal=0x%04x (devAddr 0x%02x)"
                        "  wIdx=0x%04x (reg 0x%02x)  len=%u  data=",
