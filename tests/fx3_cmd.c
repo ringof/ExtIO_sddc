@@ -235,6 +235,34 @@ static int do_i2c_recover(libusb_device_handle *h, uint16_t mode)
     return 0;
 }
 
+/* #163: from a CLEAN Si5351, write each register start..0xFF (single byte =
+ * value) and probe (read 0xC0 reg0) after each.  Reports the first register
+ * whose write mutes the chip.  Wedge is POR-only, so it stops there; resume
+ * past it after a power cycle: i2c_sweep <found+1> <value>. */
+static int do_i2c_sweep(libusb_device_handle *h, uint16_t start, uint16_t value)
+{
+    uint8_t p = 0;
+    if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &p, 1) < 0) {
+        printf("FAIL i2c_sweep: Si5351 already mute at start — power-cycle first.\n");
+        return 1;
+    }
+    uint8_t v = (uint8_t)value;
+    int s = start & 0xFF;
+    printf("i2c_sweep: write 0xC0 reg 0x%02x..0xFF = 0x%02x, probe after each...\n", s, v);
+    for (int reg = s; reg <= 0xFF; reg++) {
+        ctrl_write_buf(h, I2CWFX3, 0x00C0, (uint16_t)reg, &v, 1);
+        uint8_t probe;
+        if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1) < 0) {
+            printf(">>> reg 0x%02x (write 0x%02x) WEDGED the Si5351 <<<\n", reg, v);
+            printf("    clean through 0x%02x..0x%02x; next: power-cycle, then  i2c_sweep 0x%02x 0x%02x\n",
+                   s, reg - 1 < s ? s : reg - 1, reg + 1, v);
+            return 1;
+        }
+    }
+    printf("i2c_sweep: 0x%02x..0xFF ALL survived value 0x%02x (no forbidden reg in this range/value)\n", s, v);
+    return 0;
+}
+
 static int do_start(libusb_device_handle *h)
 {
     int r = cmd_u32(h, STARTFX3, 0);
@@ -718,6 +746,11 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     }
     if (strcmp(cmd, "i2c_recover") == 0) {
         return do_i2c_recover(h, args ? (uint16_t)strtoul(args, NULL, 0) : 0);
+    }
+    if (strcmp(cmd, "i2c_sweep") == 0) {
+        unsigned long st = 0, v = 0xFF;
+        if (args) sscanf(args, "%li %li", &st, &v);
+        return do_i2c_sweep(h, (uint16_t)st, (uint16_t)v);
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }
@@ -5375,6 +5408,7 @@ static void usage(const char *prog)
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
         "  i2c_recover [mode]           I2C bus recovery: 0=9 SCL+STOP, 1=SDA+SCL together (#163)\n"
+        "  i2c_sweep [start] [val]      Write Si5351 regs start..0xFF=val, probe each; find forbidden reg (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
@@ -5592,6 +5626,10 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "i2c_recover") == 0) {
         rc = do_i2c_recover(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0);
+
+    } else if (strcmp(cmd, "i2c_sweep") == 0) {
+        rc = do_i2c_sweep(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0,
+                             (argc >= 4) ? (uint16_t)parse_num(argv[3]) : 0xFF);
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);
