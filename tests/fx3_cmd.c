@@ -3108,9 +3108,14 @@ static int do_test_setarg_gap_index(libusb_device_handle *h)
         /* Either STALL or accept is fine — just no crash */
     }
 
-    /* Verify alive */
-    uint8_t info[4] = {0};
-    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    /* Verify alive.  The final gap probe STALLs EP0 (expected); the FX3 can
+     * race the stall auto-clear, so this survival check — the very next SETUP —
+     * can see a transient LIBUSB_ERROR_PIPE on a device that is alive and
+     * answers the next request.  Tolerate and retry, exactly as the #135
+     * scenarios do.  This was the ~5.9% setarg_gap_index intermittent (#111);
+     * the per-probe loop above already accepts PIPE, so the survival check was
+     * the only spot that turned the transient stall into a false failure. */
+    int r = ep0_alive_after_stall(h);
     if (r < 0) {
         int have_after = (read_stats(h, &after) == 0);
         printf("FAIL setarg_gap_index: device unresponsive: %s\n",
