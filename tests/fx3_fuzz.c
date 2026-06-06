@@ -684,6 +684,11 @@ int fuzz_ep0_sweep(libusb_device_handle **h_inout)
  * Note: this scribbles the Si5351 — a PASS means "I2C abuse did not wedge EP0"
  * (the clock is still likely corrupted; reload before streaming).  A FAIL is
  * the #154 wedge reproduced in isolation. */
+/* #163 find-wedge: last I2C op's address/register/data, stashed for the
+ * trigger report (the op dump records addr/reg but not the payload bytes). */
+static uint16_t g_i2c_last_addr, g_i2c_last_reg, g_i2c_last_plen;
+static uint8_t  g_i2c_last_isread, g_i2c_last_data[64];
+
 static void i2c_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
                           struct fuzz_log *log)
 {
@@ -714,6 +719,11 @@ static void i2c_fuzz_step(libusb_device_handle *h, struct fuzz_rng *rng,
     int rc = libusb_control_transfer(h, bmrt, code, addr, reg, buf, plen, 250);
     struct fuzz_op op = { bmrt, code, addr, reg, wLength, plen, rc };
     fuzz_record(log, &op, 0);
+
+    /* Stash for the find-wedge trigger report. */
+    g_i2c_last_addr = addr; g_i2c_last_reg = reg; g_i2c_last_plen = plen;
+    g_i2c_last_isread = (uint8_t)is_read;
+    for (uint16_t k = 0; k < plen; k++) g_i2c_last_data[k] = buf[k];
 }
 
 int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
@@ -738,9 +748,110 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
         return 1;
     }
 
+    /* #163 find-wedge: probe the Si5351 (read 0xC0 reg0) after EVERY op; the
+     * op immediately before the first failed probe is the write that wedged
+     * it.  Env-gated like the other knobs.  Probes are extra reads — they do
+     * not advance the RNG, so the write sequence is identical to a plain run. */
+    int find_wedge = (getenv("RX888_FIND_WEDGE") != NULL);
+    if (find_wedge) {
+        /* Guard: the chip must start clean (ACKing) or the result is bogus.
+         * fuzz_gate passes on a mute Si5351 because hwconfig is hardcoded
+         * (#158), so probe 0xC0 directly here. */
+        uint8_t p = 0;
+        if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &p, 1) < 0) {
+            printf("FAIL find-wedge: Si5351 already mute at start "
+                   "(read 0xC0 -> pipe error). Power-cycle the board "
+                   "(must re-upload firmware) and retry.\n");
+            signal(SIGINT, SIG_DFL);
+            *h_inout = h;
+            return 1;
+        }
+        printf("--- find-wedge: Si5351 ACKs at start; probing 0xC0 after "
+               "every op (seq unchanged; reports the trigger write) ---\n");
+    }
+
     int rc = 0;
     for (long i = 0; i < num_ops && !fuzz_stop; i++) {
         i2c_fuzz_step(h, &rng, &log);
+
+        if (find_wedge) {
+            uint8_t probe = 0;
+            int pr = ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1);
+            if (pr < 0) {
+                /* A real wedge is persistent (address-NAK survives across
+                 * transactions); a lone transient read failure is not.  Before
+                 * declaring a trigger, re-probe a few times — only flag it if
+                 * 0xC0 stays mute, otherwise treat it as a glitch and carry on.
+                 * (The write sequence is untouched: probes don't advance RNG.) */
+                int still_mute = 1;
+                for (int rt = 0; rt < 3; rt++) {
+                    usleep(1000);   /* 1 ms */
+                    if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1) >= 0) {
+                        still_mute = 0;
+                        break;
+                    }
+                }
+                if (!still_mute) {
+                    /* Log the op that preceded the blip so we can tell a pure
+                     * bus/USB transient from an allowed 0xC0 write briefly
+                     * perturbing the chip (the latter would implicate the
+                     * guard's allow/block boundary). */
+                    printf("    (find-wedge: transient probe failure after op "
+                           "%ld — 0xC0 recovered on re-probe; not a wedge; "
+                           "preceding op: %s wVal=0x%04x (devAddr 0x%02x) "
+                           "wIdx=0x%04x (reg 0x%02x) len=%u)\n",
+                           i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                           g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                           g_i2c_last_reg, g_i2c_last_reg & 0xff,
+                           g_i2c_last_plen);
+                    continue;
+                }
+                /* The probe is itself an EP0 (I2CRFX3) control transfer, and so
+                 * are the re-probes above.  A malformed I2C op can wedge the
+                 * EP0 handler (not the clock chip) — #154/#165 — in which case
+                 * every probe fails because the control endpoint is down, not
+                 * because 0xC0 stopped ACKing.  Disambiguate with a NON-I2C
+                 * vendor command (TESTFX3, returns hwconfig): if that fails too,
+                 * EP0 is wedged and this is not a Si5351 mute. */
+                {
+                    uint8_t alive[4] = {0};
+                    if (ctrl_read(h, TESTFX3, 0, 0, alive, 4) < 0) {
+                        printf("\n>>> EP0 WEDGED after op %ld — 0xC0 probe AND "
+                               "non-I2C TESTFX3 both failed: control endpoint "
+                               "down, NOT a Si5351 mute (see #154/#165) <<<\n",
+                               i + 1);
+                        printf("    TRIGGER op %ld: %s  wVal=0x%04x (devAddr "
+                               "0x%02x)  wIdx=0x%04x (reg 0x%02x)  len=%u\n",
+                               i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                               g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                               g_i2c_last_reg, g_i2c_last_reg & 0xff,
+                               g_i2c_last_plen);
+                        fuzz_dump(&log, seed, "i2c_fuzz/find-wedge (EP0 wedge)", h);
+                        rc = 1;
+                        break;
+                    }
+                }
+                /* TESTFX3 answered: EP0 is alive, so the 0xC0 failure is a
+                 * genuine clock-chip mute. */
+                printf("\n>>> Si5351 WENT MUTE after op %ld "
+                       "(probe read 0xC0 reg0 -> %s, persisted across "
+                       "re-probes) <<<\n",
+                       i + 1, libusb_strerror(pr));
+                printf("    TRIGGER op %ld: %s  wVal=0x%04x (devAddr 0x%02x)"
+                       "  wIdx=0x%04x (reg 0x%02x)  len=%u  data=",
+                       i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                       g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                       g_i2c_last_reg, g_i2c_last_reg & 0xff, g_i2c_last_plen);
+                for (uint16_t k = 0; k < g_i2c_last_plen; k++)
+                    printf("%02x ", g_i2c_last_data[k]);
+                printf("\n    (context — recent ops below)\n");
+                fuzz_dump(&log, seed, "i2c_fuzz/find-wedge", h);
+                rc = 1;
+                break;
+            }
+            continue;
+        }
+
         if ((i + 1) % 64 == 0) {
             int hc = fuzz_gate(&h, &log, &boot, /*quiet=*/0);
             if (hc != 0) {
@@ -754,6 +865,9 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
             }
         }
     }
+
+    if (find_wedge && rc == 0)
+        printf("--- find-wedge: no Si5351 mute observed in %ld ops ---\n", num_ops);
 
     if (h) cmd_u32(h, STOPFX3, 0);
     signal(SIGINT, SIG_DFL);

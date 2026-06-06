@@ -222,6 +222,34 @@ static int do_wdg_max(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
+/* #163: from a CLEAN Si5351, write each register start..0xFF (single byte =
+ * value) and probe (read 0xC0 reg0) after each.  Reports the first register
+ * whose write mutes the chip.  Wedge is POR-only, so it stops there; resume
+ * past it after a power cycle: i2c_sweep <found+1> <value>. */
+static int do_i2c_sweep(libusb_device_handle *h, uint16_t start, uint16_t value)
+{
+    uint8_t p = 0;
+    if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &p, 1) < 0) {
+        printf("FAIL i2c_sweep: Si5351 already mute at start — power-cycle first.\n");
+        return 1;
+    }
+    uint8_t v = (uint8_t)value;
+    int s = start & 0xFF;
+    printf("i2c_sweep: write 0xC0 reg 0x%02x..0xFF = 0x%02x, probe after each...\n", s, v);
+    for (int reg = s; reg <= 0xFF; reg++) {
+        ctrl_write_buf(h, I2CWFX3, 0x00C0, (uint16_t)reg, &v, 1);
+        uint8_t probe;
+        if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1) < 0) {
+            printf(">>> reg 0x%02x (write 0x%02x) WEDGED the Si5351 <<<\n", reg, v);
+            printf("    clean through 0x%02x..0x%02x; next: power-cycle, then  i2c_sweep 0x%02x 0x%02x\n",
+                   s, reg - 1 < s ? s : reg - 1, reg + 1, v);
+            return 1;
+        }
+    }
+    printf("i2c_sweep: 0x%02x..0xFF ALL survived value 0x%02x (no forbidden reg in this range/value)\n", s, v);
+    return 0;
+}
+
 static int do_start(libusb_device_handle *h)
 {
     int r = cmd_u32(h, STARTFX3, 0);
@@ -249,9 +277,22 @@ static int do_i2cr(libusb_device_handle *h, uint16_t addr, uint16_t reg, uint16_
     uint8_t buf[64];
     if (len > sizeof(buf)) len = sizeof(buf);
 
+    /* Enable USB debug first so a firmware-side I2C failure is captured: the
+     * I2CRFX3 handler logs CyU3PI2cGetErrorCode (the granular NAK reason) via
+     * DebugPrint2USB, which only buffers when debug mode is on (#163). */
+    ctrl_read(h, TESTFX3, 1, 0, buf, 4);
+
     int r = ctrl_read(h, I2CRFX3, addr, reg, buf, len);
     if (r < 0) {
         printf("FAIL i2cr addr=0x%02X reg=0x%02X: %s\n", addr, reg, libusb_strerror(r));
+        /* Drain the firmware debug buffer — surfaces "I2CRD ... ec=N", where
+         * ec=0 NAK_BYTE_0 (address), 1 NAK_BYTE_1 (register), 8 NAK_DATA. */
+        uint8_t dbg[64];
+        for (int k = 0; k < 16; k++) {
+            int n = ctrl_read(h, READINFODEBUG, 0, 0, dbg, sizeof(dbg));
+            if (n > 1) printf("  [fw]%.*s\n", n - 1, (char *)dbg);
+            usleep(15000);
+        }
         return 1;
     }
     printf("PASS i2cr addr=0x%02X reg=0x%02X len=%d:", addr, reg, r);
@@ -689,6 +730,11 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     if (strcmp(cmd, "wdg_max") == 0) {
         if (!args) { printf("usage: wdg_max <0-255>\n"); return 1; }
         return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "i2c_sweep") == 0) {
+        unsigned long st = 0, v = 0xFF;
+        if (args) sscanf(args, "%li %li", &st, &v);
+        return do_i2c_sweep(h, (uint16_t)st, (uint16_t)v);
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }
@@ -3189,12 +3235,17 @@ static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
     return 0;
 }
 
-/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers. */
+/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers.
+ * Uses the CLK0-7 control block (regs 16-23): an 8-register contiguous span
+ * that is all within the AN619-documented (host-writable) range, so the #163
+ * reserved-register guard permits it.  (Regs 0-7 would straddle reserved
+ * 4-7 and be STALLed.)  Non-destructive: reads the originals and writes the
+ * identical bytes back. */
 static int do_test_i2c_multibyte(libusb_device_handle *h)
 {
-    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 0 */
+    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 16 (CLK0_CONTROL) */
     uint8_t orig[8] = {0};
-    int r = ctrl_read(h, I2CRFX3, 0xC0, 0, orig, 8);
+    int r = ctrl_read(h, I2CRFX3, 0xC0, 16, orig, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: initial read: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
@@ -3202,7 +3253,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
     }
 
     /* Write the same bytes back (non-destructive) */
-    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 0, orig, 8);
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 16, orig, 8);
     if (r < 0) {
         printf("FAIL i2c_multibyte: write 8 bytes: %s\n", libusb_strerror(r));
         return 1;
@@ -3210,7 +3261,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
 
     /* Read back */
     uint8_t readback[8] = {0};
-    r = ctrl_read(h, I2CRFX3, 0xC0, 0, readback, 8);
+    r = ctrl_read(h, I2CRFX3, 0xC0, 16, readback, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: readback: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
@@ -5345,6 +5396,7 @@ static void usage(const char *prog)
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
+        "  i2c_sweep [start] [val]      Write Si5351 regs start..0xFF=val, probe each; find forbidden reg (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
@@ -5559,6 +5611,10 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "wdg_max") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
+
+    } else if (strcmp(cmd, "i2c_sweep") == 0) {
+        rc = do_i2c_sweep(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0,
+                             (argc >= 4) ? (uint16_t)parse_num(argv[3]) : 0xFF);
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);

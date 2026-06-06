@@ -11,6 +11,7 @@
  */
 
 #include "Application.h"
+#include "cyu3i2c.h"   /* CyU3PI2cGetErrorCode — granular I2C NAK reason (issue #163 diagnostic) */
 
 #include "Si5351.h"
 
@@ -50,6 +51,41 @@ extern uint32_t glDMACount;
 
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
+
+/* #163: clock-chip documented-register allowlist (AN619 register map).  The
+ * RX888mk2 fits an MS5351M (a register-compatible Si5351 clone), NOT a genuine
+ * Skyworks Si5351A.  On the MS5351M, a non-zero host write to a *reserved*
+ * register — the low gaps 4-8/10-14 OR the high gaps 93-148, 171-176, 178-182,
+ * 184-186, 188+ — can wedge its I2C slave into an unrecoverable,
+ * power-cycle-only state.  (Not confirmed on a true Si5351A; the allowlist is
+ * harmless there regardless.)  Permit only documented registers; block
+ * everything else on the host (I2CWFX3) path.  Firmware-internal clock-chip
+ * writes call I2cTransfer directly and bypass this. */
+static CyBool_t si5351_reg_writable(uint8_t r)
+{
+    return (r <= 3)               /* status / interrupt / output enable      */
+        || (r == 9)               /* OEB pin enable control mask             */
+        || (r >= 15 && r <= 92)   /* PLL src, CLK0-7 ctrl, disable state, MultiSynth, R-div */
+        || (r >= 149 && r <= 170) /* spread spectrum, VCXO, CLK phase offsets */
+        || (r == 177)             /* PLL reset                               */
+        || (r == 183)             /* crystal internal load                   */
+        || (r == 187);            /* fanout enable                           */
+}
+
+/* #163: should this host I2C access (read or write) to the Si5351 be blocked?
+ * Blocks the read-address 0xC1 used as a base (malformed preamble), or any
+ * register in the [wIndex, wIndex+wLength) range that is reserved.  Applies to
+ * both directions; firmware-internal Si5351 access bypasses this. */
+static CyBool_t si5351_access_blocked(uint16_t wValue, uint16_t wIndex, uint16_t wLength)
+{
+    uint16_t k;
+    if (wLength == 0)                          return CyFalse;  /* no-op transfer        */
+    if (((uint8_t)wValue & 0xFEu) != 0xC0u)    return CyFalse;  /* not the Si5351 (0x60) */
+    if ((uint8_t)wValue & 0x01u)               return CyTrue;   /* 0xC1 base = malformed */
+    for (k = 0; k < wLength; k++)
+        if (!si5351_reg_writable((uint8_t)(wIndex + k))) return CyTrue;  /* reserved reg */
+    return CyFalse;
+}
 
 /* GETSTATS payload length. Single source of truth; the per-field writes
  * inside the GETSTATS handler must sum to exactly this. Compile-time
@@ -352,24 +388,50 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
+							/* #163: protect the Si5351 — reject host writes to the
+							 * read-address 0xC1 or any reserved register. */
+							if (si5351_access_blocked(wValue, wIndex, wLength))
+							{
+								DebugPrint (4, "\r\nI2CWR BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
+								glCounter[1]++;   /* count as an i2c_failure for visibility */
+								isHandled = CyFalse;
+							}
+							else
+							{
 							apiRetStatus = I2cTransfer ( wIndex, wValue, wLength, glEp0Buffer, CyFalse);
 							if (apiRetStatus == CY_U3P_SUCCESS)
 								isHandled = CyTrue;
 							else
 							{
-								CyU3PDebugPrint (4, "I2cwrite Error %d\n", apiRetStatus);
+								{ CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+								  DebugPrint (4, "\r\nI2CWR a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec); }
 								isHandled = CyFalse;
+							}
 							}
 						}
 					break;
 
 			case I2CRFX3:
+					if (si5351_access_blocked(wValue, wIndex, wLength))
+					{
+						DebugPrint (4, "\r\nI2CRD BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
+						glCounter[1]++;
+						/* isHandled stays CyFalse -> STALL */
+					}
+					else {
 					CyU3PMemSet (glEp0Buffer, 0, CYFX_SDRAPP_MAX_EP0LEN);
 					apiRetStatus = I2cTransfer (wIndex, wValue, wLength, glEp0Buffer, CyTrue);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
 						apiRetStatus = CyU3PUsbSendEP0Data(wLength, glEp0Buffer);
 						isHandled = CyTrue;
+					}
+					else
+					{
+						CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+						DebugPrint (4, "\r\nI2CRD a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec);
+						/* isHandled stays CyFalse -> EP0 STALL (host sees pipe error) */
+					}
 					}
 					break;
 			case SETARGFX3:
