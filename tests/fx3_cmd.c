@@ -3235,12 +3235,17 @@ static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
     return 0;
 }
 
-/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers. */
+/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers.
+ * Uses the CLK0-7 control block (regs 16-23): an 8-register contiguous span
+ * that is all within the AN619-documented (host-writable) range, so the #163
+ * reserved-register guard permits it.  (Regs 0-7 would straddle reserved
+ * 4-7 and be STALLed.)  Non-destructive: reads the originals and writes the
+ * identical bytes back. */
 static int do_test_i2c_multibyte(libusb_device_handle *h)
 {
-    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 0 */
+    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 16 (CLK0_CONTROL) */
     uint8_t orig[8] = {0};
-    int r = ctrl_read(h, I2CRFX3, 0xC0, 0, orig, 8);
+    int r = ctrl_read(h, I2CRFX3, 0xC0, 16, orig, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: initial read: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
@@ -3248,7 +3253,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
     }
 
     /* Write the same bytes back (non-destructive) */
-    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 0, orig, 8);
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 16, orig, 8);
     if (r < 0) {
         printf("FAIL i2c_multibyte: write 8 bytes: %s\n", libusb_strerror(r));
         return 1;
@@ -3256,7 +3261,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
 
     /* Read back */
     uint8_t readback[8] = {0};
-    r = ctrl_read(h, I2CRFX3, 0xC0, 0, readback, 8);
+    r = ctrl_read(h, I2CRFX3, 0xC0, 16, readback, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: readback: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
