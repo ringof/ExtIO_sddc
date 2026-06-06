@@ -18,6 +18,14 @@
 #define SI_SYNTH_MS_2		58
 #define SI_PLL_RESET		177
 
+/* Registers used by the Fig. 10 power-up / recovery sequence (#163). */
+#define SI_OUTPUT_ENABLE_CTRL	3	// Output Enable Control (1 = output disabled)
+#define SI_OEB_PIN_ENABLE	9	// OEB pin enable control mask
+#define SI_CLK3_0_DIS_STATE	24	// CLK3-0 disable state
+#define SI_CLK7_4_DIS_STATE	25	// CLK7-4 disable state
+#define SI_SSC_ENABLE		149	// Spread-spectrum (bit7 = SSC_EN)
+#define SI_FANOUT_ENABLE	187	// Fanout enable (MS / XO / CLKIN)
+
 #define SI_R_DIV_1		(0)     //  0b00000000		/
 #define SI_R_DIV_2		(0x10)  //  0b00010000
 #define SI_R_DIV_4		(0x20)  //  0b00100000
@@ -51,24 +59,69 @@
 #define SI5351_PLLB_SOURCE              (1<<3)
 #define SI5351_PLLA_SOURCE              (1<<2)
 
+/* Power-up / recovery programming per the Si5351 datasheet "I2C Programming
+ * Procedure" (Fig. 10) and AN619.  Runs at boot and on every firmware reload.
+ *
+ * Beyond first-boot setup this is the #163 recovery path: a host driver or the
+ * destructive fuzzers can scribble the documented config registers — notably
+ * enabling spread spectrum at reg 149 — and stop the PLL locking.  The old
+ * init wrote only the crystal-load cap and three CLK power-down bits, so those
+ * corrupted registers survived a firmware reload and the clock stayed dead
+ * until a physical power cycle.  Following the full Fig. 10 sequence rebuilds a
+ * lockable baseline over I2C, now that the reserved-register guard (#163) keeps
+ * the chip answering.  Outputs are enabled at the OE-control level but the
+ * drivers stay powered down (regs 16-23 = 0x80) until STARTADC turns CLK0 on. */
 CyU3PReturnStatus_t Si5351Init()
 {
 	CyU3PReturnStatus_t status;
-	status = I2cTransferW1 ( SI5351_CRYSTAL_LOAD , SI5351_ADDR, 0x52);
+	uint8_t reg;
+
+	/* 1. Disable all outputs. */
+	status = I2cTransferW1 ( SI_OUTPUT_ENABLE_CTRL, SI5351_ADDR, 0xFF);
 	if (status != CY_U3P_SUCCESS)
 		return status;
 
-	status = I2cTransferW1 (     SI_CLK0_CONTROL , SI5351_ADDR, 0x80); // clocks off
+	/* 2. Power down all output drivers (CLK0..CLK7 control = 0x80). */
+	for (reg = SI_CLK0_CONTROL; reg <= (uint8_t)(SI_CLK0_CONTROL + 7); reg++)
+	{
+		status = I2cTransferW1 ( reg, SI5351_ADDR, 0x80);
+		if (status != CY_U3P_SUCCESS)
+			return status;
+	}
+
+	/* 4. Known-good baseline for the config registers the STARTADC /
+	 *    SetFrequency path does NOT otherwise rewrite — these are what a
+	 *    corrupted I2C session leaves stranded (#163). */
+	status = I2cTransferW1 ( SI5351_PLL_INPUT_SOURCE, SI5351_ADDR, 0x00); // reg 15:  PLLA/B <- XTAL, CLKIN div 1
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI_OEB_PIN_ENABLE,       SI5351_ADDR, 0x00); // reg 9:   OEB pin mask
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI_CLK3_0_DIS_STATE,     SI5351_ADDR, 0x00); // reg 24:  CLK3-0 disable state
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI_CLK7_4_DIS_STATE,     SI5351_ADDR, 0x00); // reg 25:  CLK7-4 disable state
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI_SSC_ENABLE,           SI5351_ADDR, 0x00); // reg 149: disable spread spectrum (SSC_EN=0)
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI5351_CRYSTAL_LOAD,     SI5351_ADDR, 0x52); // reg 183: crystal internal load
+	if (status != CY_U3P_SUCCESS)
+		return status;
+	status = I2cTransferW1 ( SI_FANOUT_ENABLE,        SI5351_ADDR, 0xD0); // reg 187: fanout enable (MS/XO/CLKIN)
 	if (status != CY_U3P_SUCCESS)
 		return status;
 
-	status = I2cTransferW1 (     SI_CLK1_CONTROL , SI5351_ADDR, 0x80); // clocks off
+	/* 5. Soft-reset both PLLs (datasheet value 0xAC). */
+	status = I2cTransferW1 ( SI_PLL_RESET, SI5351_ADDR, 0xAC);
 	if (status != CY_U3P_SUCCESS)
 		return status;
 
-	status = I2cTransferW1 (     SI_CLK2_CONTROL , SI5351_ADDR, 0x80); // clocks off
-	if (status != CY_U3P_SUCCESS)
-		return status;
+	/* 6. Enable outputs at the OE-control level (drivers remain powered down
+	 *    above until STARTADC powers up CLK0). */
+	status = I2cTransferW1 ( SI_OUTPUT_ENABLE_CTRL, SI5351_ADDR, 0x00);
 
 	return status;
 }
