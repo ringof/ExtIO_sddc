@@ -806,6 +806,33 @@ int fuzz_i2c(libusb_device_handle **h_inout, long num_ops, uint64_t seed)
                            g_i2c_last_plen);
                     continue;
                 }
+                /* The probe is itself an EP0 (I2CRFX3) control transfer, and so
+                 * are the re-probes above.  A malformed I2C op can wedge the
+                 * EP0 handler (not the clock chip) — #154/#165 — in which case
+                 * every probe fails because the control endpoint is down, not
+                 * because 0xC0 stopped ACKing.  Disambiguate with a NON-I2C
+                 * vendor command (TESTFX3, returns hwconfig): if that fails too,
+                 * EP0 is wedged and this is not a Si5351 mute. */
+                {
+                    uint8_t alive[4] = {0};
+                    if (ctrl_read(h, TESTFX3, 0, 0, alive, 4) < 0) {
+                        printf("\n>>> EP0 WEDGED after op %ld — 0xC0 probe AND "
+                               "non-I2C TESTFX3 both failed: control endpoint "
+                               "down, NOT a Si5351 mute (see #154/#165) <<<\n",
+                               i + 1);
+                        printf("    TRIGGER op %ld: %s  wVal=0x%04x (devAddr "
+                               "0x%02x)  wIdx=0x%04x (reg 0x%02x)  len=%u\n",
+                               i + 1, g_i2c_last_isread ? "I2CRD" : "I2CWR",
+                               g_i2c_last_addr, g_i2c_last_addr & 0xff,
+                               g_i2c_last_reg, g_i2c_last_reg & 0xff,
+                               g_i2c_last_plen);
+                        fuzz_dump(&log, seed, "i2c_fuzz/find-wedge (EP0 wedge)", h);
+                        rc = 1;
+                        break;
+                    }
+                }
+                /* TESTFX3 answered: EP0 is alive, so the 0xC0 failure is a
+                 * genuine clock-chip mute. */
                 printf("\n>>> Si5351 WENT MUTE after op %ld "
                        "(probe read 0xC0 reg0 -> %s, persisted across "
                        "re-probes) <<<\n",
