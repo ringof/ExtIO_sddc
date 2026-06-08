@@ -28,8 +28,8 @@ RX888_STREAM_BIN := $(RX888_TOOLS)/rx888_stream
 all: fx3_cmd rx888_stream
 
 # fx3_cmd is built from several modules (issue #139 modularization start).
-FX3_OBJS := fx3_cmd.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.o
-FX3_HDRS := fx3_proto.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h
+FX3_OBJS := fx3_cmd.o fx3_core.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.o
+FX3_HDRS := fx3_proto.h fx3_core.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h
 
 fx3_cmd: $(FX3_OBJS)
 	$(CC) $(FX3_CFLAGS) -o $@ $(FX3_OBJS) $(LIBUSB_LDLIBS) $(LDLIBS)
