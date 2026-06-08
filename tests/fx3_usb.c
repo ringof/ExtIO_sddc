@@ -12,6 +12,7 @@
 
 libusb_context *g_ctx;
 const char *g_firmware_path = NULL;
+int g_no_claim = 0;
 
 int ctrl_write_u32(libusb_device_handle *h, uint8_t request,
                           uint16_t wValue, uint16_t wIndex, uint32_t val)
@@ -199,6 +200,16 @@ libusb_device_handle *open_rx888(libusb_context *ctx)
         return NULL;
     }
 
+    /* Read-only mode (--no-claim): skip the interface claim, kernel-driver
+     * detach, and EP1-IN ring restart entirely.  Vendor control transfers go
+     * to endpoint 0, which is not owned by interface 0, so EP0-only commands
+     * (test/stats/stats_pll/stack_check) still work — and because we never
+     * touch interface 0 or the bulk endpoint, this does not disturb another
+     * process (e.g. ka9q-radio) that is streaming with the interface claimed.
+     * The caller restricts --no-claim to those read-only commands. */
+    if (g_no_claim)
+        return h;
+
     /* Claim interface 0, retrying briefly on BUSY/ACCESS: a second host actor
      * (a udev-spawned prober, a stale process, or another tool) may hold the
      * interface for a moment during the same enumeration window (#143). */
@@ -237,7 +248,8 @@ libusb_device_handle *open_rx888(libusb_context *ctx)
 void close_rx888(libusb_device_handle *h)
 {
     if (h) {
-        libusb_release_interface(h, 0);
+        if (!g_no_claim)            /* nothing was claimed in read-only mode */
+            libusb_release_interface(h, 0);
         libusb_close(h);
     }
 }

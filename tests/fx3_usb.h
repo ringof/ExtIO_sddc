@@ -11,6 +11,9 @@
  * re-acquire path for libusb_handle_events*.  Set once in main(). */
 extern libusb_context *g_ctx;
 extern const char *g_firmware_path;   /* set from -F option in main() */
+extern int g_no_claim;                /* set from --no-claim: open without
+                                       * claiming interface 0 (read-only EP0
+                                       * commands only) */
 
 int ctrl_write_u32(libusb_device_handle *h, uint8_t request,
                    uint16_t wValue, uint16_t wIndex, uint32_t val);

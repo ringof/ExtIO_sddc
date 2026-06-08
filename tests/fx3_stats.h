@@ -7,10 +7,13 @@
 #include <stdint.h>
 #include <libusb-1.0/libusb.h>
 
-#define GETSTATS_LEN  30    /* bumped 26 -> 30: adds gpio_state [26..29] for
-                             * #131 observability. Strict-length check means
-                             * flashing the new firmware is required after a
-                             * host update — paired flash. */
+/* GETSTATS payload sizes.  The firmware grew the payload from 26 to 30 bytes
+ * when it added gpio_state[26..29] (#131).  The first 26 bytes are identical
+ * across versions, so the host reads up to GETSTATS_LEN but accepts anything
+ * from GETSTATS_MIN_LEN up: older firmware (26-byte) is decoded fine, with
+ * gpio_state reported as unavailable. */
+#define GETSTATS_LEN      30   /* full payload (firmware with gpio_state) */
+#define GETSTATS_MIN_LEN  26   /* legacy payload through clk0_result */
 
 /* GETSTATS response layout (firmware: SDDC_FX3/USBHandler.c GETSTATS handler,
  * GETSTATS_PAYLOAD_LEN is its single source of truth — keep in sync):
@@ -49,7 +52,11 @@ struct fx3_stats {
     uint32_t gpio_state;       /* Steady-state GPIO snapshot, bit positions
                                 * match the GPIOFX3 control word (enum
                                 * GPIOPin in protocol.h). PGA is un-inverted
-                                * — a host can do `if (gs & SHDWN)` etc. */
+                                * — a host can do `if (gs & SHDWN)` etc.
+                                * Only valid when has_gpio_state == 1. */
+    int      payload_len;      /* bytes the firmware actually returned */
+    int      has_gpio_state;   /* 1 if gpio_state was present (>= 30-byte
+                                * payload); 0 on legacy 26-byte firmware */
 };
 
 int read_stats(libusb_device_handle *h, struct fx3_stats *s);

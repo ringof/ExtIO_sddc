@@ -589,6 +589,12 @@ int do_test_stats_shdn(libusb_device_handle *h)
         printf("FAIL stats_shdn: GETSTATS: %s\n", libusb_strerror(r));
         return 1;
     }
+    if (!s.has_gpio_state) {
+        printf("FAIL stats_shdn: this firmware's GETSTATS is %d bytes with no "
+               "gpio_state field; SHDN cannot be observed (needs the 30-byte "
+               "payload, #131)\n", s.payload_len);
+        return 1;
+    }
     if (!(s.gpio_state & SHDWN)) {
         printf("FAIL stats_shdn: SHDWN not asserted after STOPFX3 (gpio_state=0x%05X)\n",
                s.gpio_state);
