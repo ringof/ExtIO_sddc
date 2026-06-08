@@ -69,3 +69,6 @@ jobs:
 
       - name: Build test tools
         run: make -C tests
+
+      - name: CLI smoke test (fx3_cmd --no-claim guard + usage)
+        run: make -C tests check-cli

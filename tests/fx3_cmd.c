@@ -4767,10 +4767,10 @@ static void usage(const char *prog)
         "  -F, --firmware <path>        Upload firmware first if device is in\n"
         "                               bootloader mode (PID 0x00F3)\n"
         "      --no-claim               Open without claiming interface 0 or\n"
-        "                               touching the bulk endpoint. Read-only EP0\n"
-        "                               commands only (test/stats/stats_pll/\n"
-        "                               stack_check). Safe to run alongside a\n"
-        "                               process streaming from the device.\n"
+        "                               touching the bulk endpoint. EP0 diagnostics\n"
+        "                               only (test/stats/stats_pll/stack_check) —\n"
+        "                               no radio reconfiguration. Safe to run\n"
+        "                               alongside a process streaming the device.\n"
         "\n"
         "Commands:\n"
         "  load <firmware.img>          Upload firmware and exit\n"
@@ -4901,10 +4901,15 @@ int main(int argc, char **argv)
 
     const char *cmd = argv[1];
 
-    /* --no-claim is only meaningful for the read-only EP0 commands.  Writes,
-     * recovery, firmware upload, the debug console, and every harness scenario
-     * need a claimed interface (or would perturb a running stream), so reject
-     * them up front rather than silently producing a confusing libusb error. */
+    /* --no-claim permits only the EP0 diagnostics that neither reconfigure the
+     * radio nor need the streaming interface, so they can run alongside another
+     * process streaming from the device. test/stats/stats_pll are passive reads;
+     * stack_check additionally toggles firmware debug mode (TESTFX3 wValue=1) and
+     * drives the debug console, but stays on EP0 and leaves the RF/sample path
+     * untouched. Everything else — config writes, recovery, firmware upload, the
+     * interactive debug console, and every harness scenario — changes hardware
+     * state or needs a claimed interface, so reject it up front rather than emit
+     * a confusing libusb error. */
     if (g_no_claim &&
         strcmp(cmd, "test")        != 0 &&
         strcmp(cmd, "stats")       != 0 &&

@@ -56,8 +56,14 @@ $(HOST_HEALTH_BIN): $(HOST_HEALTH_DEPS)
 check-health: $(HOST_HEALTH_BIN)
 	./$(HOST_HEALTH_BIN)
 
+# --- Host CLI smoke test (needs fx3_cmd built; no hardware) ---------------
+# Pins the --no-claim guard allow-list and usage exit codes — all resolved
+# before libusb touches the device, so it runs in CI without an RX888.
+check-cli: fx3_cmd
+	./cli_smoke.sh
+
 clean:
 	rm -f fx3_cmd $(FX3_OBJS) rx888_stream $(HOST_HEALTH_BIN)
 	$(MAKE) -C $(RX888_TOOLS) clean 2>/dev/null || true
 
-.PHONY: all clean rx888_stream check-health
+.PHONY: all clean rx888_stream check-health check-cli
