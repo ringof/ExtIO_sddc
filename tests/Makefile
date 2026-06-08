@@ -19,22 +19,42 @@ CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
 # host-only targets such as check-health remain usable without libusb-dev.
 LIBUSB_CFLAGS = $(shell pkg-config --cflags libusb-1.0)
 LIBUSB_LDLIBS = $(shell pkg-config --libs libusb-1.0)
-FX3_CFLAGS    = $(CFLAGS) $(LIBUSB_CFLAGS)
+FX3_CFLAGS    = $(CFLAGS) $(LIBUSB_CFLAGS) -I$(FX3_CORE_DIR) -I$(RX888_TOOLS)/include
 
 # rx888_tools submodule paths
 RX888_TOOLS := rx888_tools
 RX888_STREAM_BIN := $(RX888_TOOLS)/rx888_stream
+# Shared FX3 host core (single source of truth — see docs/fx3_cmd-split-plan.md)
+FX3_CORE_DIR := $(RX888_TOOLS)/src/fx3_cmd
 
 all: fx3_cmd rx888_stream
 
-# fx3_cmd is built from several modules (issue #139 modularization start).
-FX3_OBJS := fx3_cmd.o fx3_core.o fx3_usb.o fx3_stats.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.o
-FX3_HDRS := fx3_proto.h fx3_core.h fx3_usb.h fx3_stats.h fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h
+# fx3_cmd links the firmware harness (local) against the shared FX3 host core
+# that lives in the rx888_tools submodule. Local objects are the harness main +
+# scenarios, the bulk reader, the fuzzers, and the lifecycle tests; the core
+# objects (fx3_core/usb/stats) are compiled straight from the submodule so the
+# two repos no longer carry parallel copies (docs/fx3_cmd-split-plan.md, Phase 3).
+FX3_LOCAL_OBJS := fx3_cmd.o fx3_bulk.o fx3_fuzz.o fx3_lifecycle.o
+FX3_CORE_OBJS  := fx3_core.o fx3_usb.o fx3_stats.o
+FX3_OBJS       := $(FX3_LOCAL_OBJS) $(FX3_CORE_OBJS)
+
+FX3_HDRS := fx3_bulk.h fx3_fuzz.h fx3_lifecycle.h fx3_test_proto.h \
+            $(FX3_CORE_DIR)/fx3_core.h $(FX3_CORE_DIR)/fx3_usb.h \
+            $(FX3_CORE_DIR)/fx3_stats.h $(RX888_TOOLS)/include/rx888.h
 
 fx3_cmd: $(FX3_OBJS)
 	$(CC) $(FX3_CFLAGS) -o $@ $(FX3_OBJS) $(LIBUSB_LDLIBS) $(LDLIBS)
 
+# Local harness modules (sources in tests/).
 %.o: %.c $(FX3_HDRS)
+	$(CC) $(FX3_CFLAGS) -c -o $@ $<
+
+# Shared core, compiled from the submodule into tests/ object files.
+fx3_core.o: $(FX3_CORE_DIR)/fx3_core.c $(FX3_HDRS)
+	$(CC) $(FX3_CFLAGS) -c -o $@ $<
+fx3_usb.o: $(FX3_CORE_DIR)/fx3_usb.c $(FX3_HDRS)
+	$(CC) $(FX3_CFLAGS) -c -o $@ $<
+fx3_stats.o: $(FX3_CORE_DIR)/fx3_stats.c $(FX3_HDRS)
 	$(CC) $(FX3_CFLAGS) -c -o $@ $<
 
 rx888_stream: $(RX888_STREAM_BIN)

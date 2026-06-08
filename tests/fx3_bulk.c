@@ -4,7 +4,8 @@
  */
 #include "fx3_bulk.h"
 #include "fx3_usb.h"
-#include "fx3_proto.h"
+#include "rx888.h"
+#include "fx3_test_proto.h"
 
 #include <stdlib.h>
 #include <unistd.h>

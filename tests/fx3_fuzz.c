@@ -3,7 +3,8 @@
  * See fx3_fuzz.h and the tests/README.md fuzzing section (issue #139).
  */
 #include "fx3_fuzz.h"
-#include "fx3_proto.h"
+#include "rx888.h"
+#include "fx3_test_proto.h"
 #include "fx3_usb.h"
 #include "fx3_stats.h"
 #include "fx3_bulk.h"

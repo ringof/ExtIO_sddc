@@ -542,15 +542,24 @@ exclude them.
 
 ## File map
 
+The shared FX3 host core (`fx3_core`, `fx3_usb`, `fx3_stats`, and the canonical
+protocol header `rx888.h`) lives in the **`rx888_tools` submodule** and is the
+single source of truth — the harness compiles it straight from there rather than
+keeping its own copy (see `docs/fx3_cmd-split-plan.md`). Only the harness-specific
+modules live in `tests/`.
+
 | File | Purpose |
 |------|---------|
-| `fx3_cmd.c` | Vendor command exerciser, scenarios, soak test, `usbreset`/`reload`, `main()` |
-| `fx3_proto.h` | Shared protocol constants (IDs, command codes, GPIO/arg masks) |
-| `fx3_usb.{c,h}` | USB transport + device open/close/upload helpers |
-| `fx3_stats.{c,h}` | `GETSTATS` decoding (`struct fx3_stats`, `read_stats`) |
+| `fx3_cmd.c` | Harness main + scenarios, soak test, `usbreset`/`reload`, `main()`/dispatch |
+| `fx3_test_proto.h` | Harness-only protocol bits kept out of the public header (`HANG*`, `EP1_IN`, `FX3_MAX_EP0LEN`) |
 | `fx3_bulk.{c,h}` | Bulk (EP1-IN) read helpers (primed async start-and-read) |
 | `fx3_fuzz.{c,h}` | Seeded `protocol_fuzz` / `stream_fuzz` + coverage/failure log (#139) |
 | `fx3_lifecycle.{c,h}` | Host enumeration-race tests: `reopen_race_storm`, `two_actor_open` (#143) |
+| `cli_smoke.sh` | Hardware-free `fx3_cmd` arg/`--no-claim`-guard exit-code checks (`make check-cli`) |
+| `rx888_tools/src/fx3_cmd/fx3_core.{c,h}` | **Shared core (submodule):** EP0 command senders + diagnostics primitives |
+| `rx888_tools/src/fx3_cmd/fx3_usb.{c,h}` | **Shared core (submodule):** USB transport, open/close/upload, `--no-claim` |
+| `rx888_tools/src/fx3_cmd/fx3_stats.{c,h}` | **Shared core (submodule):** `GETSTATS` decode (`struct fx3_stats`, `read_stats`) |
+| `rx888_tools/include/rx888.h` | **Shared core (submodule):** canonical FX3 protocol constants (IDs, codes, GPIO/arg) |
 | `fw_test.sh` | TAP test suite wrapper (single-pass; parks ADC in SHDN on exit) |
 | `soak_test.sh` | Soak test wrapper (firmware upload + `fx3_cmd soak`) |
 | `usb_trace.sh` | Host-side USB lifecycle tracer (no device claim) |

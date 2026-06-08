@@ -3,7 +3,7 @@
  * See fx3_lifecycle.h (issue #143).
  */
 #include "fx3_lifecycle.h"
-#include "fx3_proto.h"
+#include "rx888.h"
 #include "fx3_usb.h"
 #include "fx3_stats.h"
 #include "fx3_bulk.h"

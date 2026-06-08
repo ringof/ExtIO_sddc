@@ -40,7 +40,8 @@
 /* this file keeps the regression/fuzz/soak harness.  Future cuts:        */
 /* fx3_scenarios.c (the do_test_* scenarios) and fx3_soak.c (the runner). */
 /* ------------------------------------------------------------------ */
-#include "fx3_proto.h"
+#include "rx888.h"
+#include "fx3_test_proto.h"
 #include "fx3_usb.h"
 #include "fx3_stats.h"
 #include "fx3_bulk.h"
