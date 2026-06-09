@@ -77,6 +77,77 @@ orchestrator is parameterized by `MODE={ft8,wspr}`.
       or stop after 4 attempts
 ```
 
+## Goal ladder (staged)
+
+Decompose the two phases into small, independently-verifiable rungs. Each
+rung is a single `/goal` (one measurable verdict line + a turn bound) and a
+natural commit / sub-issue under #171. A rung's predecessor must be green
+before it starts.
+
+Hardware dependency is called out because the off-hardware rungs (**G0, 4,
+6**) can be developed and regression-tested anywhere — including in hosted CI
+(`build.yml`), not just on the bench.
+
+| Rung | What it proves | RX888 | QDX | RF/TX |
+|---|---|:--:|:--:|:--:|
+| **G0** | software encode↔decode self-test; emit known-content fixtures | – | – | – |
+| **1** | HITL image (built `FROM` the ka9q-radio image) reproduces the existing smoke-test output with an RX888 attached | ✓ | – | – |
+| **2a** | QDX CAT control: set freq / key PTT / read response (serial) | – | ✓ | – |
+| **2b** | QDX audio path: TX audio injected via the USB soundcard | – | ✓ | – |
+| **3** | CW carrier near 10 MHz appears in the `powers` spectrum | ✓ | ✓ | ✓ |
+| **4** | FT8 decode automation: orchestrator decodes the G0 fixture and emits its verdict line | – | – | – |
+| **5** | TX/RX FT8 end-to-end over the bench | ✓ | ✓ | ✓ |
+| **6** | WSPR decode automation (wsprdaemon) on a known fixture | – | – | – |
+| **7** | TX/RX WSPR end-to-end over the bench | ✓ | ✓ | ✓ |
+
+Per-rung specifics:
+
+- **Rung 1:** the HITL image is built `FROM` the existing `ka9q-radio` image
+  (or shares its builder stage) so smoke-test parity is structural and cannot
+  drift. Success = reproduces the current smoke output.
+- **Rung 3 assertion (numeric):** transmit a steady single audio tone → a
+  single RF carrier near **10 MHz** (reuses the WWV 10 MHz channel already in
+  `rx888-test.conf`). PASS = `powers` shows a peak **within 300 Hz** of the
+  expected frequency, **≥ 20 dB above the noise floor**. ("CW" here = a
+  constant tone → constant carrier; the QDX is a constant-envelope digital
+  transceiver, not a Morse keyer.)
+- **Rungs 4 & 6** assert against generated known-content fixtures (see Audio
+  fixtures) — no transmit, no hardware. These belong in hosted CI as decoder
+  regression tests, pinning the decoder + ka9q-radio versions to known output.
+
+### RF safety pre-gate (rungs 3, 5, 7)
+
+The first time the QDX is keyed into the RX888 is the destructive-risk
+moment. Every rung that transmits into the RX888 (3, 5, 7) MUST print a
+**red `DANGER!!` banner** before keying — reminding the operator that the
+first attenuator stage must be power-rated for full QDX output and the level
+at the RX888 input must be in range. This is an operator pre-flight that
+*gates* the rung; it is not discovered by it.
+
+## Audio fixtures (generated, known-content)
+
+We generate the FT8/WSPR audio ourselves rather than rely on found samples,
+so **ground truth is known by construction** — we choose the message, so the
+expected decode is authoritative.
+
+This does double duty:
+
+- The **encoder** (`gen_ft8`, a WSPR encoder) is the same component that later
+  drives the QDX in rungs 5 and 7 — so building it de-risks the TX stimulus.
+- The **fixtures** are the assertion inputs for the off-hardware decode rungs
+  (4, 6).
+
+**Caveat — avoid a same-tool blind spot.** Encoding and decoding with the
+*same* library can pass even if both share a bug. So the authoritative
+regression fixtures are authored once by a **reference tool** (e.g. WSJT-X)
+with documented expected content and checked in (small, single-window clips;
+`git-lfs` if large), and/or cross-checked with an independent decoder. The
+on-the-fly `gen_ft8` encoder is for driving the QDX, not for self-certifying
+the decoder.
+
+Format: `ft8_lib` / `wsprd` expect 12 kHz mono; fixtures at another rate get
+a resample step in the harness.
+
 ## Bench topology
 
 ```
@@ -173,6 +244,7 @@ turn, so the bench must be self-recovering and bounded:
 
 ## Next step after approval
 
-On approval, implement Phase A first (FT8 fast loop end-to-end), validate it
-drives a local `/goal` to `FT8 DECODE OK`, then add Phase B (WSPR sign-off).
-Plan 2 (remote HWIL CI + security) is written separately.
+On approval, implement **G0** first (software encode↔decode + known-content
+fixtures — no hardware, runnable in hosted CI), then rung 1 (HITL image at
+smoke-test parity), and climb the ladder through Phase A (FT8) to Phase B
+(WSPR sign-off). Plan 2 (remote HWIL CI + security) is written separately.
