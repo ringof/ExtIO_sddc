@@ -4,6 +4,18 @@ Implements the staged goal ladder from `docs/local-hwil-plan.md`. Each rung is
 a small, independently-verifiable check that prints one grep-stable verdict
 line and exits 0/1 — the contract a local Claude Code `/goal` reads.
 
+## Prerequisites
+
+Debian/Ubuntu — install once; the scripts clone+build the pinned encoder/
+decoder sources under `.build/` on first run:
+
+```sh
+sudo apt-get install -y gcc gfortran libfftw3-dev libfftw3-single3 libgfortran5 sox git
+```
+
+Independent operator verification (optional) uses WSJT-X tools (`jt9`,
+`wsprd`): install the `wsjtx` package.
+
 ## Rungs & tools
 
 | Script | Purpose | Hardware |

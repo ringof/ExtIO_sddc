@@ -1,7 +1,8 @@
 # Local Hardware-in-the-Loop (HWIL) Test Bench — Plan 1
 
-Status: **DRAFT — awaiting approval**. No build code is written until this
-plan is approved.
+Status: **Approved; in progress.** Rung **G0** is implemented and committed
+(PR #172): off-hardware FT8 + WSPR audio encode→decode self-tests and audio
+generators, validated end to end. Rungs 1–7 pending.
 
 ## Purpose
 
@@ -90,7 +91,7 @@ Hardware dependency is called out because the off-hardware rungs (**G0, 4,
 
 | Rung | What it proves | RX888 | QDX | RF/TX |
 |---|---|:--:|:--:|:--:|
-| **G0** | software encode↔decode self-test; emit known-content fixtures | – | – | – |
+| **G0** | audio encode↔decode self-test; emits out/ artifacts to decode | – | – | – |
 | **1** | HITL image (built `FROM` the ka9q-radio image) reproduces the existing smoke-test output with an RX888 attached | ✓ | – | – |
 | **2a** | QDX CAT control: set freq / key PTT / read response (serial) | – | ✓ | – |
 | **2b** | QDX audio path: TX audio injected via the USB soundcard | – | ✓ | – |
@@ -124,29 +125,40 @@ first attenuator stage must be power-rated for full QDX output and the level
 at the RX888 input must be in range. This is an operator pre-flight that
 *gates* the rung; it is not discovered by it.
 
-## Audio fixtures (generated, known-content)
+## Audio generation, fixtures, and independent verification
 
-We generate the FT8/WSPR audio ourselves rather than rely on found samples,
-so **ground truth is known by construction** — we choose the message, so the
+We generate the FT8/WSPR audio ourselves with the real protocol tools, so
+**ground truth is known by construction** — we choose the message, so the
 expected decode is authoritative.
 
-This does double duty:
+Tooling (validated; see `tests/bench/`):
 
-- The **encoder** (`gen_ft8`, a WSPR encoder) is the same component that later
-  drives the QDX in rungs 5 and 7 — so building it de-risks the TX stimulus.
-- The **fixtures** are the assertion inputs for the off-hardware decode rungs
-  (4, 6).
+- **FT8:** `gen_ft8` / `decode_ft8` (`ft8_lib`@9fec6ca) — 12 kHz mono audio.
+- **WSPR:** `wsprsimwav` (`wspr-cui`@839b86f, WSJT-X 2.7.1-based) renders
+  48 kHz mono audio with raised-cosine shaping; `wsprd` decodes (12 kHz input).
+- **`sox`** does sample-rate/format conversion only (48k↔12k) — never signal
+  synthesis.
 
-**Caveat — avoid a same-tool blind spot.** Encoding and decoding with the
-*same* library can pass even if both share a bug. So the authoritative
-regression fixtures are authored once by a **reference tool** (e.g. WSJT-X)
-with documented expected content and checked in (small, single-window clips;
-`git-lfs` if large), and/or cross-checked with an independent decoder. The
-on-the-fly `gen_ft8` encoder is for driving the QDX, not for self-certifying
-the decoder.
+The encoders do double duty: the same `gen_ft8` / `wsprsimwav` that make the
+test audio are the TX stimulus source for the on-bench rungs (5, 7).
 
-Format: `ft8_lib` / `wsprd` expect 12 kHz mono; fixtures at another rate get
-a resample step in the harness.
+**Independence model — the operator is the verifier.** Encoder independence
+was intentionally *waived* (the same tool family encodes and decodes).
+Verification independence comes from the human instead: every G0 run writes
+its rendered audio to `tests/bench/out/` (gitignored) and prints a decode
+command, so the operator confirms the result with their **own** tools — e.g.
+`jt9 -8 out/g0_ft8_selfloop.wav` (WSJT-X `jt9`, an independent codebase from
+`ft8_lib`) or `wsprd out/g0_wspr_selfloop_12k.wav`. The harness verdict is a
+check the operator re-runs, not a claim to trust. On the hardware rungs this
+is stronger still: the transmitter and the receive/measurement chain are
+independent systems coupled only by RF.
+
+**Committed fixtures vs on-the-fly.** A small FT8 fixture
+(`fixtures/ft8/cq_t1abc.wav`, 12 kHz, ~350 KB) is committed so rung 4 has a
+fixed regression input; WSPR audio is generated on the fly each run (a 48 kHz
+WSPR clip is ~11 MB — too large to commit) and surfaced via `out/`. Each
+harness auto-discovers any `fixtures/<mode>/<name>.wav` + `.expected` and
+resamples as needed.
 
 ## Bench topology
 
@@ -236,15 +248,16 @@ turn, so the bench must be self-recovering and bounded:
 ## Open questions for the operator
 
 1. Initial band for Phase A FT8 (default 20 m, 14.074 MHz dial)?
-2. Reserved test callsign + grid to standardize on (placeholder: `T1ABC` /
-   `FN20`)?
+2. ~~Reserved test callsign + grid~~ — **resolved: `T1ABC` / `FN20`** (used
+   throughout G0).
 3. Is a USB-switchable hub (`uhubctl`-capable) available for self-reset, or
    should reset fall back to software-only (DFU re-flash + `radiod` restart)?
 4. Sibling-container split (TX head vs RX/decoder) or single container?
 
-## Next step after approval
+## Next step
 
-On approval, implement **G0** first (software encode↔decode + known-content
-fixtures — no hardware, runnable in hosted CI), then rung 1 (HITL image at
-smoke-test parity), and climb the ladder through Phase A (FT8) to Phase B
-(WSPR sign-off). Plan 2 (remote HWIL CI + security) is written separately.
+G0 is implemented and verified (PR #172). Next is **rung 1** (HITL image built
+`FROM` the ka9q-radio image, at smoke-test parity — the first hardware-touching
+rung), with the off-hardware CI decode-automation rungs (4, 6) as cheap
+parallel wins. Then climb through Phase A (FT8) to Phase B (WSPR sign-off).
+Plan 2 (remote HWIL CI + security) is written separately.
