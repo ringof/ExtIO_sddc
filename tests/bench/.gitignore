@@ -1,0 +1,3 @@
+# Toolchain checkouts and generated audio — never committed.
+# Authoritative fixtures live in fixtures/ (tracked) and are NOT ignored.
+.build/
