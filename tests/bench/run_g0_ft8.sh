@@ -70,6 +70,7 @@ fi
 [ -x "$GEN" ] && [ -x "$DEC" ] || fail "gen_ft8/decode_ft8 missing after build"
 
 mkdir -p "$BUILD/gen"
+OUT="$HERE/out"; mkdir -p "$OUT"
 checks=0
 fixture_checks=0
 
@@ -90,11 +91,14 @@ for wav in "$FIX_DIR"/*.wav; do
 done
 
 # --- Check 2: self-loop mechanics ----------------------------------------
-selfwav="$BUILD/gen/selfloop.wav"
+# Render to the visible out/ dir so the operator has a real FT8 audio file to
+# inspect and independently decode (e.g. `jt9 -8 out/g0_ft8_selfloop.wav`).
+selfwav="$OUT/g0_ft8_selfloop.wav"
 "$GEN" "$G0_MSG" "$selfwav" 1500 >/dev/null 2>&1 || fail "gen_ft8 failed for \"$G0_MSG\""
 out="$("$DEC" "$selfwav" 2>/dev/null || true)"
 grep -Fq -- "$G0_MSG" <<<"$out" || { echo "$out" | tail -3; fail "self-loop: \"$G0_MSG\" did not round-trip"; }
 echo "G0: self-loop round-trip OK -> \"$G0_MSG\""
+echo "G0: FT8 audio written -> $selfwav (12 kHz; verify yourself: jt9 -8 $selfwav)"
 checks=$((checks+1))
 
 # --- Verdict -------------------------------------------------------------

@@ -55,6 +55,18 @@ tests/bench/run_g0_wspr.sh   # -> "G0 WSPR OK ..." | "G0 WSPR FAIL — ..."
 Both are hardware-free and intended to also run in hosted CI as decoder
 regression tests.
 
+### Outputs (for independent verification)
+
+Every run writes its rendered audio to `out/` (gitignored) so you have a real
+file to inspect and decode **with your own tools** — that's how you check this
+work without trusting the harness's own verdict:
+
+```
+out/g0_ft8_selfloop.wav        # jt9 -8 out/g0_ft8_selfloop.wav
+out/g0_wspr_selfloop_48k.wav   # 48 kHz, the QDX TX rate
+out/g0_wspr_selfloop_12k.wav   # wsprd out/g0_wspr_selfloop_12k.wav
+```
+
 ## Generating audio (TX stimulus / fixtures)
 
 ```sh

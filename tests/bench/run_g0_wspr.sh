@@ -40,6 +40,7 @@ if [ ! -x "$WSWAV" ] || [ ! -x "$WD" ]; then
 fi
 
 WORK="$BUILD/wspr_work"; mkdir -p "$WORK"
+OUT="$HERE/out"; mkdir -p "$OUT"
 checks=0; fixture_checks=0
 
 # wsprd writes scratch files (hashtable.txt, ALL_WSPR.TXT, ...) into cwd, so
@@ -74,13 +75,20 @@ for wav in "$FIX_DIR"/*.wav; do
 done
 
 # --- Check 2: self-loop mechanics ----------------------------------------
-self48="$WORK/selfloop48.wav"
+# Render to the visible out/ dir so the operator has a real WSPR audio file to
+# inspect and independently decode (e.g. `wsprd out/g0_wspr_selfloop_12k.wav`
+# with their own WSJT-X). 48 kHz is the QDX TX rate; 12 kHz is wsprd's input.
+self48="$OUT/g0_wspr_selfloop_48k.wav"
+self12="$OUT/g0_wspr_selfloop_12k.wav"
 # NB: wsprsimwav returns a spurious nonzero exit even on success, so validate
 # by its output file rather than its exit status.
 "$WSWAV" -a -6 -o "$self48" "$G0_MSG" >/dev/null 2>&1 || true
 [ -s "$self48" ] || fail "wsprsimwav produced no output for \"$G0_MSG\""
-decode "$(to12k "$self48")" "$G0_MSG" || fail "self-loop: \"$G0_MSG\" did not round-trip"
+sox "$self48" -r 12000 -c 1 -b 16 -e signed-integer "$self12"
+decode "$self12" "$G0_MSG" || fail "self-loop: \"$G0_MSG\" did not round-trip"
 echo "G0: self-loop round-trip OK -> \"$G0_MSG\""
+echo "G0: WSPR audio written -> $self48 (48 kHz TX)"
+echo "G0:                       $self12 (12 kHz; verify yourself: wsprd $self12)"
 checks=$((checks+1))
 
 # --- Verdict -------------------------------------------------------------
