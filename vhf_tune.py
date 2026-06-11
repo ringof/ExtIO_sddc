@@ -301,9 +301,22 @@ class RX888:
         return word
 
     def standby(self, base):
-        self.r828d_standby()
-        self.clkb_off()
-        self.gpio((base | BIAS_HF) & ~VHF_EN & ~BIAS_VHF)
+        """Best-effort teardown: attempt every step even if an earlier one
+        raises, so a failed R828D standby still turns CLKB off and restores the
+        HF GPIO. Prints its own status."""
+        errs = []
+        for name, step in (
+                ("R828D standby", self.r828d_standby),
+                ("CLKB off",      self.clkb_off),
+                ("HF GPIO",       lambda: self.gpio((base | BIAS_HF) & ~VHF_EN & ~BIAS_VHF))):
+            try:
+                step()
+            except Exception as e:
+                errs.append(f"{name}: {e!r}")
+        if errs:
+            print("  standby PARTIAL — " + "; ".join(errs))
+        else:
+            print("standby: R828D off, CLKB off, HF")
 
 
 def firmware_load(img, fx3_cmd="fx3_cmd", timeout=15):
@@ -328,7 +341,8 @@ def firmware_load(img, fx3_cmd="fx3_cmd", timeout=15):
 
 def main():
     ap = argparse.ArgumentParser(description="RX888 mk2 VHF tune (host-side, EP0)")
-    ap.add_argument("rf_hz", type=float, help="VHF RF frequency to tune, Hz")
+    ap.add_argument("rf_hz", type=float, nargs="?", default=None,
+                    help="VHF RF frequency to tune, Hz (omit only with --standby)")
     ap.add_argument("--base", type=lambda s: int(s, 0), default=None,
                     help="HF GPIO control word (hex) to build on; default: read "
                          "the live word from GETSTATS so the running app's "
@@ -354,6 +368,8 @@ def main():
                          "clock; required before STARTFX3 streaming)")
     args = ap.parse_args()
 
+    if not args.standby and args.rf_hz is None:
+        ap.error("rf_hz is required unless --standby")
     if usb is None:
         sys.exit("pyusb is required: pip install pyusb")
 
@@ -380,7 +396,7 @@ def main():
         print(f"base GPIO 0x{base:05X} (read live from GETSTATS)")
 
     if args.standby:
-        rx.standby(base); print("standby: R828D off, CLKB off, HF"); return
+        rx.standby(base); return                  # standby() prints its own status
 
     if args.adc:                                  # prerequisite 2: ADC sample clock
         rx.start_adc(int(args.adc)); print(f"STARTADC = {args.adc/1e6:.3f} MHz")
@@ -420,11 +436,7 @@ def main():
         failed = str(e)
     finally:
         if not leave_active:
-            try:
-                rx.standby(base)
-                print("standby: R828D off, CLKB off, HF")
-            except Exception as e2:               # best-effort cleanup
-                print(f"warning: standby cleanup failed: {e2}")
+            rx.standby(base)                      # best-effort; prints its own status
 
     if failed:
         sys.exit(f"FAIL: {failed}")
