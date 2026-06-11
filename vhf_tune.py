@@ -1,164 +1,351 @@
 #!/usr/bin/env python3
 """
-vhf_tune.py — minimal RX888 mk2 VHF front-end config utility.
+vhf_tune.py — RX888 mk2 VHF front-end: enter+init, tune to a frequency, and
+standby on exit. All over EP0 vendor control transfers; runs concurrently with
+a streamer (EP0 vs EP1, the two_actor_open pattern, firmware test #143).
 
-Configures the analog front-end for VHF entirely over EP0 vendor control
-transfers, then exits. The front-end state persists in hardware (GPIO latch,
-Si5351 + R828D registers), so a streamer (rx888_stream / ka9q-radio) reading
-EP1 sees the configured IF. Control (EP0) and stream (EP1) are independent and
-vendor/device-recipient control needs no interface claim, so this can run
-*alongside* a live stream (the two_actor_open pattern, firmware test #143).
+Lifecycle:
+  enter   : select VHF (GPIOFX3 VHF_EN) + Si5351 CLKB=16 MHz + R828D init
+  tune    : R828D set_freq to the LO for the requested RF
+  hold    : keep the tune live (stream in another terminal) until Ctrl-C
+  exit    : R828D standby + CLKB off + back to HF   (skip with --persist)
 
-What is real here: device open, the EP0 command helpers, the GPIO VHF switch,
-and the R828D reachability probe — all grounded in the firmware's actual
-command formats.
-
-What is STUBBED (fill from the bench / clean upstream — see vhf_host_bringup.md):
-  * Si5351 CLK2/CLKB programming  -> multisynth registers for your reference
-  * R828D init + set_freq         -> steve-m/librtlsdr src/tuner_r82xx.c
+The register sequences are ported faithfully from the original firmware
+(si5351aSetFrequencyB, r82xx_init/set_bandwidth/set_mux/set_pll/standby,
+0ffa512) and the host radio class (RX888R2Radio.cpp: R828D_FREQ=16 MHz,
+R828D_IF_CARRIER=4.57 MHz). They are PORTED, not bench-verified — expect to
+iterate the set_pll/set_mux math against real hardware.
 
 Requires: pyusb  (pip install pyusb)
 """
 
-import argparse
-import struct
-import sys
-import usb.core
-import usb.util
+import argparse, struct, sys, time, signal, subprocess
+import usb.core, usb.util
 
-# ---- device ----------------------------------------------------------------
-RX888_VID = 0x04B4
-RX888_PID = 0x00F1          # application mode (0x00F3 = bootloader)
+RX888_VID, RX888_PID = 0x04B4, 0x00F1
+RX888_PID_BOOT = 0x00F3
 
-# ---- EP0 vendor commands (protocol.h) --------------------------------------
-GPIOFX3   = 0xAD            # OUT, 4-byte LE control word in data phase
-I2CWFX3   = 0xAE            # OUT, wValue=devaddr wIndex=reg, data=payload
-I2CRFX3   = 0xAF            # IN,  wValue=devaddr wIndex=reg, wLength=count
-STARTADC  = 0xB2
-GETSTATS  = 0xB3
+# EP0 vendor commands (protocol.h)
+TESTFX3, GPIOFX3, I2CWFX3, I2CRFX3, STARTADC = 0xAC, 0xAD, 0xAE, 0xAF, 0xB2
+BM_OUT, BM_IN = 0x40, 0xC0
 
-BM_OUT = 0x40              # host->device | vendor | device
-BM_IN  = 0xC0             # device->host | vendor | device
+# GPIO bits (protocol.h enum GPIOPin)
+BIAS_HF, BIAS_VHF, VHF_EN = 1 << 8, 1 << 9, 1 << 15
 
-# ---- GPIO control-word bits (protocol.h enum GPIOPin) ----------------------
-BIAS_HF  = 1 << 8         # 0x0100  HF antenna bias-tee
-BIAS_VHF = 1 << 9         # 0x0200  VHF antenna bias-tee
-VHF_EN   = 1 << 15        # 0x8000  HF/VHF RF switch  (set = VHF)
+# I2C addresses (8-bit form the firmware's I2cTransfer uses)
+R828D_ADDR, SI5351_ADDR = 0x74, 0xC0
 
-# ---- I2C addresses ---------------------------------------------------------
-R828D_ADDR = 0x74         # 8-bit form, as the firmware uses it
-SI5351_ADDR = 0xC0        # Si5351 (8-bit form used by the firmware's I2cTransfer)
-R828D_ID_REG = 0x00
-R828D_ID_VAL = 0x69       # expected after the R82xx read bit-reversal (raw byte = 0x96)
+# Confirmed board constants (RX888R2Radio.cpp)
+R828D_REF_HZ = 16_000_000        # tuner reference (Si5351 CLKB)
+IF_CARRIER   = 4_570_000         # IF center (8 MHz filter)
+SI5351_XTAL  = 27_000_000        # Si5351 crystal (Si5351.c SI5351_FREQ)
+
+# Si5351 register addresses
+SI_PLL_B, SI_MS2, SI_PLL_RESET, SI_CLK2 = 34, 58, 177, 18
+
+# R828D init array, regs 0x05..0x1f (r82xx_init_array, DEFAULT_IF_VGA_VAL=11,
+# VER_NUM=49 resolved)
+R828D_INIT = [0x80,0x13,0x70,0xC0,0x40,0xDB,0x6B,0xEB,0x53,0x75,0x68,0x6C,0xBB,
+              0x80,0x31,0x0F,0x00,0xC0,0x30,0x48,0xEC,0x60,0x00,0x24,0xDD,0x0E,0x40]
+R828D_INIT_BASE = 0x05
+
+# Tracking-filter bands: (start_MHz, open_d, rf_mux_ploy, tf_c). xtal_cap0p=0.
+FREQ_RANGES = [
+    (0,0x08,0x02,0xDF),(50,0x08,0x02,0xBE),(55,0x08,0x02,0x8B),(60,0x08,0x02,0x7B),
+    (65,0x08,0x02,0x69),(70,0x08,0x02,0x58),(75,0x00,0x02,0x44),(80,0x00,0x02,0x44),
+    (90,0x00,0x02,0x34),(100,0x00,0x02,0x34),(110,0x00,0x02,0x24),(120,0x00,0x02,0x24),
+    (140,0x00,0x02,0x14),(180,0x00,0x02,0x13),(220,0x00,0x02,0x13),(250,0x00,0x02,0x11),
+    (280,0x00,0x02,0x00),(310,0x00,0x41,0x00),(450,0x00,0x41,0x00),(588,0x00,0x40,0x00),
+    (650,0x00,0x40,0x00)]
 
 
-def _bitrev8(b):
+def bitrev8(b):
     """R82xx returns register reads bit-reversed within each byte."""
-    return int(f"{b:08b}"[::-1], 2)
+    return int(f"{b & 0xFF:08b}"[::-1], 2)
 
 
 class RX888:
     def __init__(self):
         self.dev = usb.core.find(idVendor=RX888_VID, idProduct=RX888_PID)
         if self.dev is None:
-            sys.exit("RX888 mk2 not found (04B4:00F1). In bootloader (00F3)? "
-                     "Upload firmware first.")
-        # NOTE: deliberately do NOT claim the interface — vendor/device-recipient
-        # EP0 control works without it, so a streamer can hold EP1 concurrently.
+            sys.exit("RX888 mk2 not found (04B4:00F1).")
+        self.regs = {}            # R828D shadow (firmware-style; masked writes read this)
 
-    # --- EP0 primitives -----------------------------------------------------
+    # --- EP0 primitives ---
     def gpio(self, word):
-        """GPIOFX3: whole 32-bit steady-state GPIO word, LE, in the data phase."""
         self.dev.ctrl_transfer(BM_OUT, GPIOFX3, 0, 0, struct.pack("<I", word))
 
-    def i2c_write(self, dev_addr, reg, data):
-        """I2CWFX3: wValue=dev_addr, wIndex=reg, payload=data (bytes)."""
-        self.dev.ctrl_transfer(BM_OUT, I2CWFX3, dev_addr, reg, bytes(data))
+    def start_adc(self, rate_hz):
+        """STARTADC: set the ADC sample clock (Si5351 CLKA) and enable the ADC
+        clock flag that STARTFX3 requires. 4-byte LE payload, like GPIOFX3."""
+        self.dev.ctrl_transfer(BM_OUT, STARTADC, 0, 0, struct.pack("<I", rate_hz))
 
-    def i2c_read(self, dev_addr, reg, count):
-        """I2CRFX3: wValue=dev_addr, wIndex=reg, wLength=count -> bytes."""
-        return bytes(self.dev.ctrl_transfer(BM_IN, I2CRFX3, dev_addr, reg, count))
+    def i2c_w(self, addr, reg, data):
+        self.dev.ctrl_transfer(BM_OUT, I2CWFX3, addr, reg, bytes(data))
 
-    # --- front-end ----------------------------------------------------------
-    def select_vhf(self, base, bias_tee=False):
-        """Route the VHF path. `base` = your existing HF GPIO control word
-        (ADC and other settings preserved); VHF_EN/bias are flipped on top."""
-        word = (base | VHF_EN) & ~BIAS_HF
-        if bias_tee:
-            word |= BIAS_VHF
-        self.gpio(word)
-        return word
+    def i2c_r(self, addr, reg, n):
+        return bytes(self.dev.ctrl_transfer(BM_IN, I2CRFX3, addr, reg, n))
 
-    def select_hf(self, base):
-        word = (base | BIAS_HF) & ~VHF_EN & ~BIAS_VHF
-        self.gpio(word)
-        return word
+    # --- liveness / verification ---
+    def check_alive(self):
+        """Confirm the FIRMWARE answers vendor commands (beyond lsusb): TESTFX3
+        returns [hwconfig, fw_major, fw_minor, vendor_rqt_count]. wValue=0 so we
+        don't toggle debug mode."""
+        try:
+            info = bytes(self.dev.ctrl_transfer(BM_IN, TESTFX3, 0, 0, 4))
+        except usb.core.USBError as e:
+            sys.exit(f"RX888 is on USB but firmware is not responding to TESTFX3 "
+                     f"({e}). Powered up? claimed by another process?")
+        hw, fwhi, fwlo, rqt = info[0], info[1], info[2], info[3]
+        print(f"alive: hwconfig=0x{hw:02X} fw={fwhi}.{fwlo} vendor_rqts={rqt}")
+        if hw != 0x04:
+            print(f"  WARNING: hwconfig 0x{hw:02X} is not RX888r2 (0x04)")
+        return hw
+
+    def clkb_verify(self):
+        """Read back Si5351 CLK2_CONTROL (reads are NOT bit-reversed) to confirm
+        CLKB is actually enabled — verifies the Si5351 write path took."""
+        try:
+            v = self.i2c_r(SI5351_ADDR, SI_CLK2, 1)[0]
+        except usb.core.USBError as e:
+            print(f"  CLKB verify: Si5351 read failed ({e})"); return False
+        on = not (v & 0x80)                       # bit7 = CLK2_PDN
+        print(f"  CLKB verify: CLK2_CTRL=0x{v:02X} -> {'enabled' if on else 'OFF'}")
+        return on
 
     def r828d_probe(self):
-        """Read the R828D ID register. Returns True if the tuner is reachable."""
+        """Confirm the R828D is reachable over I2C (it must ACK) and read its ID
+        (reg 0x00 == 0x69 after the R82xx bit-reverse). A successful read at all
+        means the I2C path physically reaches the tuner."""
         try:
-            raw = self.i2c_read(R828D_ADDR, R828D_ID_REG, 1)[0]
+            raw = self.i2c_r(R828D_ADDR, 0x00, 1)[0]
         except usb.core.USBError as e:
-            print(f"  I2C read failed (tuner not ACKing?): {e}")
+            print(f"  R828D probe: no I2C response ({e}) — tuner unreachable")
             return False
-        rev = _bitrev8(raw)
-        ok = rev == R828D_ID_VAL
-        print(f"  R828D reg0x00: raw=0x{raw:02X} bitrev=0x{rev:02X} "
-              f"(expect 0x{R828D_ID_VAL:02X}) -> {'OK' if ok else 'mismatch'}")
-        return ok  # a successful read at all already means the I2C path reaches it
+        rev = bitrev8(raw)
+        print(f"  R828D probe: reg0=0x{raw:02X} bitrev=0x{rev:02X} (want 0x69) -> "
+              f"{'OK' if rev == 0x69 else 'reachable, ID mismatch'}")
+        return True
 
-    # --- STUBS: fill these from upstream / the bench ------------------------
-    def si5351_set_clkb(self, ref_hz):
-        """TODO: program Si5351 CLK2/CLKB to ref_hz (multisynth + PLL regs),
-        the same way you already program CLK0 for the ADC, via self.i2c_write(
-        SI5351_ADDR, reg, ...). For a first demo, hardcode the register set for
-        one chosen reference frequency."""
-        raise NotImplementedError("Si5351 CLKB programming — see vhf_host_bringup.md step 2")
+    # --- R828D register access (shadowed, like the firmware) ---
+    def _wr(self, reg, val):
+        self.regs[reg] = val & 0xFF
+        self.i2c_w(R828D_ADDR, reg, [val & 0xFF])
 
-    def r828d_init(self, ref_hz):
-        """TODO: port init from steve-m/librtlsdr src/tuner_r82xx.c r82xx_init(),
-        swapping its reg I/O for self.i2c_write/self.i2c_read(R828D_ADDR, ...).
-        Set cfg->xtal = ref_hz (the Si5351 CLKB you programmed, NOT a crystal)."""
-        raise NotImplementedError("R828D init — port r82xx_init() from librtlsdr")
+    def _wr_mask(self, reg, val, mask):
+        cur = self.regs.get(reg, 0)
+        self._wr(reg, (cur & ~mask) | (val & mask))
 
+    def _rd(self, reg, n):
+        return [bitrev8(b) for b in self.i2c_r(R828D_ADDR, reg, n)]
+
+    # --- (1) Si5351 CLKB = ref_hz on CLK2/PLL-B (port of si5351aSetFrequencyB) ---
+    def clkb_on(self, ref_hz):
+        freq, rdiv = ref_hz, 0
+        while freq <= 1_000_000:
+            freq *= 2; rdiv += 0x10
+        divider = 900_000_000 // freq
+        if divider % 2: divider -= 1
+        pll = divider * freq
+        mult = pll // SI5351_XTAL
+        num  = ((pll % SI5351_XTAL) * 1048575) // SI5351_XTAL
+        denom = 1048575
+        self.i2c_w(SI5351_ADDR, SI_PLL_B, self._si_regs(mult, num, denom))
+        self.i2c_w(SI5351_ADDR, SI_MS2,   self._si_regs(divider, 0, 1, rdiv))
+        self.i2c_w(SI5351_ADDR, SI_PLL_RESET, [0x80])           # reset PLL-B only
+        self.i2c_w(SI5351_ADDR, SI_CLK2, [0x4C | 0x20])         # enable CLK2 from PLL-B
+
+    def clkb_off(self):
+        self.i2c_w(SI5351_ADDR, SI_CLK2, [0x80])
+
+    @staticmethod
+    def _si_regs(a, num, denom, rdiv=None):
+        # PLL: a=mult. MS: a=divider, rdiv given. P1/P2/P3 encoding (SetupPLL/SetupMultisynth).
+        if rdiv is None:        # PLL
+            P1 = 128 * a + (128 * num) // denom - 512
+            P2 = 128 * num - denom * ((128 * num) // denom)
+            P3 = denom
+            d2 = (P1 >> 16) & 0x03
+        else:                   # multisynth (integer divider)
+            P1 = 128 * a - 512; P2 = 0; P3 = 1
+            d2 = ((P1 >> 16) & 0x03) | rdiv
+        return [(P3 >> 8) & 0xFF, P3 & 0xFF, d2, (P1 >> 8) & 0xFF, P1 & 0xFF,
+                ((P3 >> 12) & 0xF0) | ((P2 >> 16) & 0x0F), (P2 >> 8) & 0xFF, P2 & 0xFF]
+
+    # --- (2) R828D init (port of r82xx_init + set_bandwidth(8 MHz)) ---
+    def r828d_init(self):
+        for i, v in enumerate(R828D_INIT):           # seed shadow + write 0x05..0x1f
+            reg = R828D_INIT_BASE + i
+            self.regs[reg] = v
+            self.i2c_w(R828D_ADDR, reg, [v])
+        # set_bandwidth(8 MHz): IF channel filter -> IF center 4.57 MHz
+        self._wr_mask(0x0A, 0x10, 0x0F)
+        self._wr_mask(0x0B, 0x0B, 0xEF)
+        self._wr_mask(0x1E, 0x60, 0x40)
+
+    # --- (3) R828D tune (port of set_freq64 -> set_mux + set_pll) ---
     def r828d_set_freq(self, rf_hz):
-        """TODO: port r82xx_set_freq(): set_mux (tracking filter) + set_pll
-        (LO = rf_hz + IF, IF ~= 4.57 MHz with the 8 MHz filter) + lock check."""
-        raise NotImplementedError("R828D tune — port r82xx_set_freq() from librtlsdr")
+        lo = rf_hz + IF_CARRIER                       # low-side injection
+        self._set_mux(lo)
+        return self._set_pll(lo)
+
+    def _set_mux(self, lo):
+        mhz = lo // 1_000_000
+        band = FREQ_RANGES[0]
+        for r in FREQ_RANGES:
+            if mhz < r[0]: break
+            band = r
+        _, open_d, rf_mux_ploy, tf_c = band
+        self._wr_mask(0x17, open_d, 0x08)
+        self._wr_mask(0x1A, rf_mux_ploy, 0xC3)
+        self._wr(0x1B, tf_c)
+        self._wr_mask(0x10, 0x00 | 0x08, 0x0B)        # default xtal cap (0pF | drive)
+
+    def _set_pll(self, lo):
+        VCO_MIN, VCO_MAX = 1_770_000, 3_540_000       # kHz
+        VCO_POWER_REF = 1                             # R828D
+        freq_khz = (lo + 500) // 1000
+        pll_ref = R828D_REF_HZ
+        self._wr_mask(0x10, 0x00, 0x10)               # refdiv2 = 0
+        self._wr_mask(0x1A, 0x00, 0x0C)               # PLL autotune 128 kHz
+        self._wr_mask(0x12, 0x80, 0xE0)               # VCO current min (0x80)
+
+        mix_div, div_num = 2, 0
+        while mix_div <= 64:
+            if VCO_MIN <= freq_khz * mix_div < VCO_MAX:
+                b = mix_div
+                while b > 2:
+                    b >>= 1; div_num += 1
+                break
+            mix_div <<= 1
+
+        data = self._rd(0x00, 5)
+        vco_fine = (data[4] & 0x30) >> 4
+        if vco_fine > VCO_POWER_REF: div_num -= 1
+        elif vco_fine < VCO_POWER_REF: div_num += 1
+        self._wr_mask(0x10, div_num << 5, 0xE0)
+
+        vco_freq = lo * mix_div
+        vco_div = (pll_ref + 65536 * vco_freq) // (2 * pll_ref)
+        nint, sdm = vco_div // 65536, vco_div % 65536
+        if nint > (128 // VCO_POWER_REF) - 1:
+            print(f"  set_pll: no valid PLL for {lo/1e6:.4f} MHz LO"); return False
+
+        ni, = ((nint - 13) // 4,)
+        si = nint - 4 * ni - 13
+        self._wr(0x14, ni + (si << 6))
+        self._wr_mask(0x12, 0x08 if sdm == 0 else 0x00, 0x18)
+        self._wr(0x16, sdm >> 8)
+        self._wr(0x15, sdm & 0xFF)
+
+        time.sleep(0.002)
+        locked = False
+        for i in range(2):
+            if self._rd(0x00, 3)[2] & 0x40:
+                locked = True; break
+            self._wr_mask(0x12, 0x60, 0xE0)           # bump VCO current to max, retry
+        self._wr_mask(0x1A, 0x08, 0x08)               # autotune 8 kHz
+        print(f"  LO={lo/1e6:.4f} MHz mix_div={mix_div} nint={nint} sdm={sdm} "
+              f"lock={'YES' if locked else 'NO'}")
+        return locked
+
+    # --- R828D standby (port of r82xx_standby) ---
+    def r828d_standby(self):
+        for reg, val in ((0x06,0xB1),(0x05,0xA0),(0x07,0x3A),(0x08,0x40),(0x09,0xC0),
+                         (0x0A,0x36),(0x0C,0x35),(0x0F,0x68),(0x11,0x03),(0x17,0xF4),
+                         (0x19,0x0C)):
+            self._wr(reg, val)
+
+    # --- path + lifecycle ---
+    def enter_vhf(self, base, bias_tee):
+        word = (base | VHF_EN) & ~BIAS_HF
+        if bias_tee: word |= BIAS_VHF
+        self.gpio(word)
+        return word
+
+    def standby(self, base):
+        self.r828d_standby()
+        self.clkb_off()
+        self.gpio((base | BIAS_HF) & ~VHF_EN & ~BIAS_VHF)
+
+
+def firmware_load(img, fx3_cmd="fx3_cmd", timeout=15):
+    """Prerequisite: load firmware if the device is in bootloader (04B4:00F3).
+    Delegates to the proven `fx3_cmd load` rather than reimplementing the FX3
+    RAM-download protocol, then waits for re-enumeration to 04B4:00F1."""
+    if usb.core.find(idVendor=RX888_VID, idProduct=RX888_PID) is not None:
+        print("load: already in app mode (00F1) — skipping"); return
+    if usb.core.find(idVendor=RX888_VID, idProduct=RX888_PID_BOOT) is None:
+        sys.exit("load: device not found in bootloader (00F3) or app mode (00F1)")
+    print(f"load: {fx3_cmd} load {img}")
+    r = subprocess.run([fx3_cmd, "load", img])
+    if r.returncode != 0:
+        sys.exit(f"load: '{fx3_cmd} load' failed (rc={r.returncode})")
+    deadline = time.time() + timeout         # wait for re-enumeration to 00F1
+    while time.time() < deadline:
+        if usb.core.find(idVendor=RX888_VID, idProduct=RX888_PID) is not None:
+            print("load: re-enumerated as 00F1"); return
+        time.sleep(0.3)
+    sys.exit("load: device did not re-enumerate to app mode (00F1)")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="RX888 mk2 VHF front-end config")
-    ap.add_argument("freq_hz", type=float, help="VHF RF frequency to tune, Hz")
-    ap.add_argument("--ref", type=float, default=16e6,
-                    help="R828D reference clock fed via Si5351 CLKB (Hz)")
-    ap.add_argument("--bias-tee", action="store_true",
-                    help="enable DC bias on the VHF antenna port")
+    ap = argparse.ArgumentParser(description="RX888 mk2 VHF tune (host-side, EP0)")
+    ap.add_argument("rf_hz", type=float, help="VHF RF frequency to tune, Hz")
     ap.add_argument("--base", type=lambda s: int(s, 0), default=0,
-                    help="your existing HF GPIO control word (hex); the VHF/bias "
-                         "bits are flipped on top so ADC/other settings persist")
-    ap.add_argument("--hf", action="store_true", help="switch back to HF and exit")
-    ap.add_argument("--probe-only", action="store_true",
-                    help="select VHF, probe the tuner, then stop")
+                    help="your existing HF GPIO control word (hex)")
+    ap.add_argument("--ref", type=float, default=R828D_REF_HZ,
+                    help=f"R828D reference via Si5351 CLKB (default {R828D_REF_HZ})")
+    ap.add_argument("--bias-tee", action="store_true", help="VHF-port DC bias")
+    ap.add_argument("--persist", action="store_true",
+                    help="leave the tune active and exit (no standby on exit)")
+    ap.add_argument("--standby", action="store_true",
+                    help="just standby (R828D off + CLKB off + HF) and exit")
+    # Prerequisites the script can run for you:
+    ap.add_argument("--load", metavar="IMG",
+                    help="load firmware if in bootloader (via `fx3_cmd load IMG`)")
+    ap.add_argument("--fx3-cmd", default="fx3_cmd",
+                    help="path to the fx3_cmd binary used by --load")
+    ap.add_argument("--adc", metavar="RATE_HZ", type=float,
+                    help="run STARTADC at RATE_HZ first (sets the ADC sample "
+                         "clock; required before STARTFX3 streaming)")
     args = ap.parse_args()
 
+    if args.load:                                 # prerequisite 1: firmware
+        firmware_load(args.load, args.fx3_cmd)
+
     rx = RX888()
+    rx.check_alive()                              # firmware responds? (beyond lsusb)
 
-    if args.hf:
-        print(f"HF: GPIO word 0x{rx.select_hf(args.base):05X}")
-        return
+    if args.standby:
+        rx.standby(args.base); print("standby: R828D off, CLKB off, HF"); return
 
-    print(f"VHF path: GPIO word 0x{rx.select_vhf(args.base, bias_tee=args.bias_tee):05X}")
-    if not rx.r828d_probe():
-        print("  tuner not reachable — check the VHF GPIO/power before tuning")
-    if args.probe_only:
-        return
+    if args.adc:                                  # prerequisite 2: ADC sample clock
+        rx.start_adc(int(args.adc)); print(f"STARTADC = {args.adc/1e6:.3f} MHz")
 
-    rx.si5351_set_clkb(int(args.ref))          # STUB
-    rx.r828d_init(int(args.ref))               # STUB
-    rx.r828d_set_freq(int(args.freq_hz))       # STUB
-    print(f"tuned to {args.freq_hz/1e6:.4f} MHz; IF ~4.57 MHz — "
-          f"now stream and FFT the IF")
+    # enter + init + tune
+    print(f"enter VHF: GPIO 0x{rx.enter_vhf(args.base, args.bias_tee):05X}")
+    rx.clkb_on(int(args.ref)); print(f"CLKB = {args.ref/1e6:.3f} MHz")
+    rx.clkb_verify()                              # read back: CLKB actually on?
+    if not rx.r828d_probe():                      # tuner reachable before we tune it?
+        rx.standby(args.base)
+        sys.exit("aborting: R828D not reachable over I2C")
+    rx.r828d_init(); print("R828D init + 8 MHz filter (IF 4.57 MHz)")
+    rx.r828d_set_freq(int(args.rf_hz))
+    print(f"tuned {args.rf_hz/1e6:.4f} MHz -> IF ~4.57 MHz; stream the IF")
+
+    if args.persist:
+        print("persist: leaving tune active"); return
+
+    print("holding tune — Ctrl-C to standby and exit")
+    try:
+        signal.signal(signal.SIGINT, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rx.standby(args.base)
+        print("\nstandby: R828D off, CLKB off, HF")
 
 
 if __name__ == "__main__":
