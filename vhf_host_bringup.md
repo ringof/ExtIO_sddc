@@ -31,7 +31,9 @@ retune live, in a separate process, while ka9q-radio streams.
    the ADC. Disable it in HF mode to keep its spurs out of the ADC.
 
 3. **Tune the R828D** — over `I2CWFX3` / `I2CRFX3` at `0x74`. Probe first: read
-   reg `0x00`, expect `0x69` (after the R82xx per-byte bit-reverse). Then init
+   reg `0x00`, expect `0x69` (read directly over `I2CRFX3` — the FX3 path
+   returns canonical byte order, so **no host-side bit-reverse**, confirmed on
+   hardware). Then init
    + `set_freq` with `LO = RF + 4.57 MHz`. Wire format: **`wValue` = device
    addr, `wIndex` = register, `wLength` = byte count**, data in the EP0 payload.
 
@@ -102,7 +104,7 @@ gain` is a few hundred lines.
 |---|---|
 | VHF switch | `GPIOFX3`, `VHF_EN = 0x8000` set |
 | `GPIOFX3` payload | 32-bit LE, `wLength = 4` |
-| R828D addr / ID | `0x74` / reg `0x00` == `0x69` (bit-reversed) |
+| R828D addr / ID | `0x74` / reg `0x00` == `0x69` (direct, no host reverse) |
 | I2C passthrough | `wValue`=addr, `wIndex`=reg, `wLength`=count |
 | Tuner reference | Si5351 **CLK2 / CLKB** = **16 MHz** (`R828D_FREQ`) |
 | IF center (8 MHz filter) | **4.57 MHz** (`R828D_IF_CARRIER`; `LO = RF + IF`) |

@@ -59,9 +59,9 @@ FREQ_RANGES = [
     (650,0x00,0x40,0x00)]
 
 
-def bitrev8(b):
-    """R82xx returns register reads bit-reversed within each byte."""
-    return int(f"{b & 0xFF:08b}"[::-1], 2)
+# NOTE: the FX3 I2CRFX3 path returns R828D registers in canonical order
+# (reg 0x00 reads 0x69 directly on hardware — the same order librtlsdr uses
+# *after* its per-byte bit-reverse), so NO host-side reversal is needed.
 
 
 class RX888:
@@ -115,16 +115,15 @@ class RX888:
 
     def r828d_probe(self):
         """Confirm the R828D is reachable over I2C (it must ACK) and read its ID
-        (reg 0x00 == 0x69 after the R82xx bit-reverse). A successful read at all
-        means the I2C path physically reaches the tuner."""
+        (reg 0x00 reads 0x69 directly via I2CRFX3 — canonical order, no reverse).
+        A successful read at all means the I2C path physically reaches it."""
         try:
-            raw = self.i2c_r(R828D_ADDR, 0x00, 1)[0]
+            v = self.i2c_r(R828D_ADDR, 0x00, 1)[0]
         except usb.core.USBError as e:
             print(f"  R828D probe: no I2C response ({e}) — tuner unreachable")
             return False
-        rev = bitrev8(raw)
-        print(f"  R828D probe: reg0=0x{raw:02X} bitrev=0x{rev:02X} (want 0x69) -> "
-              f"{'OK' if rev == 0x69 else 'reachable, ID mismatch'}")
+        print(f"  R828D probe: reg0=0x{v:02X} (want 0x69) -> "
+              f"{'OK' if v == 0x69 else 'reachable, ID mismatch'}")
         return True
 
     # --- R828D register access (shadowed, like the firmware) ---
@@ -137,7 +136,7 @@ class RX888:
         self._wr(reg, (cur & ~mask) | (val & mask))
 
     def _rd(self, reg, n):
-        return [bitrev8(b) for b in self.i2c_r(R828D_ADDR, reg, n)]
+        return list(self.i2c_r(R828D_ADDR, reg, n))   # canonical order; no reverse
 
     # --- (1) Si5351 CLKB = ref_hz on CLK2/PLL-B (port of si5351aSetFrequencyB) ---
     def clkb_on(self, ref_hz):
