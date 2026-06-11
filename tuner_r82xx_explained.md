@@ -288,6 +288,56 @@ flowchart LR
 
 ---
 
+## 9. Bonus: image-rejection (IMR) self-calibration
+
+> **Not in this repo's `tuner_r82xx.c`** — the librtlsdr lineage omits it.
+> This lives only in the **Linux kernel** driver
+> (`drivers/media/tuners/r820t.c`); line numbers below cite that file. It is
+> called out here because it's a real chip capability the SDR drivers drop,
+> and it ports to a **host-side** driver over the I2C passthrough with **zero
+> firmware change** — a concrete opportunity for the VHF work.
+
+The static tracking filter (§4) only *partially* suppresses the image at
+`LO + IF`. The R820T/R828D also has an on-chip **IQ-mismatch trim** that can
+actively null the image — but it must be calibrated. The clever part: the chip
+self-calibrates using **its own internal test tone and its own power detector**,
+so no external signal generator is needed. Three on-chip ingredients:
+
+| Role | Mechanism | Registers | Linux fn |
+|---|---|---|---|
+| **Test tone** | internal ring oscillator, set to a known freq per band segment | `0x18` / `0x19` / `0x1f` | `r820t_imr` (L1907) |
+| **Detector** | read status 6×, drop min+max, sum → denoised image-strength number | `0x00` | `r820t_multi_read` (L1519) |
+| **Trim knobs** | I/Q amplitude (`gain_x`) and I/Q phase (`phase_y`) | `0x08` / `0x09` | `r820t_imr_cross` (L1545) |
+
+The calibration loop (`r820t_imr_cross` → `r820t_iq_tree` L1678 → `r820t_iq`
+L1824), run per band segment and cached in `imr_data[]`:
+
+```mermaid
+flowchart TD
+    START["init, per band segment"] --> RING["Generate internal test tone<br/>ring osc — regs 0x18/0x19/0x1f<br/>r820t_imr (L1907)"]
+    RING --> SWEEP["Try IQ-trim points around current:<br/>reg 0x08 gain_x, reg 0x09 phase_y<br/>center, ±I, ±Q — r820t_imr_cross (L1545)"]
+    SWEEP --> READ["Read chip power detector<br/>reg 0x00 ×6, drop min/max, sum<br/>r820t_multi_read (L1519)"]
+    READ --> MIN{"new minimum?<br/>(deeper image null)"}
+    MIN -->|yes| MOVE["move toward it, refine<br/>r820t_iq_tree (L1678)"]
+    MOVE --> SWEEP
+    MIN -->|converged| STORE["store {gain_x, phase_y}<br/>in imr_data[segment]"]
+    STORE --> APPLY["at tune: set_freq applies<br/>nearest stored IQ point"]
+```
+
+Orchestrated at init by `r820t_imr_callibrate` (~L2059), which also runs an
+**xtal-cap check** (`r820t_xtal_check`) to pick crystal loading; the whole pass
+is gated by the `no_imr_cal` module param.
+
+**Why it's a clean host-side port (no firmware change):** every step is an I2C
+read or write — ring-osc regs, the `0x00` detector read, the `0x08`/`0x09` trim
+regs. The chip is *both* the signal source and the meter, so a host driver can
+run the entire sweep over `I2CWFX3`/`I2CRFX3` at startup, cache `imr_data[]`,
+and apply the nearest point per tune. Cost: a slow one-time init sweep; benefit:
+active image rejection beyond the static filter — meaningful for weak-signal
+VHF near strong signals. (GPL-2.0, but fine host-side.)
+
+---
+
 ## Register cheat-sheet (the load-bearing ones)
 
 | Reg | Role | Set by |
@@ -305,12 +355,14 @@ flowchart LR
 | `0x1a` | PLL autotune bw; **RF mux / polyphase** | `set_pll`, `set_mux` |
 | `0x1b` | **Tracking-filter band** (`tf_c`) | `set_mux` |
 | `0x17` | Open-drain | `set_mux` |
+| `0x08`/`0x09` | IQ trim — image-reject gain / phase | *Linux IMR only (§9)* |
+| `0x18`/`0x19`/`0x1f` | Internal ring-oscillator test tone (cal) | *Linux IMR only (§9)* |
 
 ---
 
 ### One-line summary
 
 > A moving RF bandpass + a divided-down fractional-N LO + a fixed mixer, all
-> poked through ~30 I2C registers, dropping everything to a 3.57 MHz IF for the
-> ADC — and the only knob that *isn't* on the chip is the reference clock
-> (Si5351 CLKB).
+> poked through ~30 I2C registers, dropping everything to a fixed IF (4.57 MHz
+> as this firmware sets it) for the ADC — and the only knob that *isn't* on the
+> chip is the reference clock (Si5351 CLKB).
