@@ -26,18 +26,56 @@ retune live, in a separate process, while ka9q-radio streams.
    (ADC settings, etc.) carries over untouched. Move bias `BIAS_HF`→`BIAS_VHF`
    only if you want the VHF-port bias-tee.
 
-2. **Tuner reference** — program Si5351 **CLK2 (CLKB)** to the R828D reference
-   over `I2CWFX3`, exactly as you program CLK0 for the ADC. Disable it in HF
-   mode to keep its spurs out of the ADC.
+2. **Tuner reference** — program Si5351 **CLK2 (CLKB)** to **16 MHz**
+   (`R828D_FREQ`, from the original host code), exactly as you program CLK0 for
+   the ADC. Disable it in HF mode to keep its spurs out of the ADC.
 
 3. **Tune the R828D** — over `I2CWFX3` / `I2CRFX3` at `0x74`. Probe first: read
-   reg `0x00`, expect `0x69`. Then init + `set_freq`. Wire format: **`wValue` =
-   device addr, `wIndex` = register, `wLength` = byte count**, data in the EP0
-   payload.
+   reg `0x00`, expect `0x69` (after the R82xx per-byte bit-reverse). Then init
+   + `set_freq` with `LO = RF + 4.57 MHz`. Wire format: **`wValue` = device
+   addr, `wIndex` = register, `wLength` = byte count**, data in the EP0 payload.
 
-4. **Stream and look** — `STARTFX3`, FFT the IF. With the chip's 8 MHz filter,
-   `LO = RF + IF` and the carrier lands at **IF ≈ 4.57 MHz** in the ADC
-   spectrum. That's the proof.
+4. **Stream and look** — `STARTFX3`, FFT the IF. The carrier lands at
+   **IF ≈ 4.57 MHz** (`R828D_IF_CARRIER`) in the ADC spectrum. That's the proof.
+
+## Prerequisites (before the VHF front-end)
+
+The VHF config above only touches the front-end. Two things must already be set:
+
+1. **Firmware loaded** — if the device is in bootloader (`04B4:00F3`),
+   `fx3_cmd load SDDC_FX3/SDDC_FX3.img`; it re-enumerates to `04B4:00F1`.
+2. **ADC sample clock** — `STARTADC <rate>` (e.g. `fx3_cmd adc 64000000`). Sets
+   Si5351 **CLKA** and the clock-enabled flag `STARTFX3` requires. Any normal
+   HF rate works — the 4.57 MHz IF sits low in the band. (The Si5351 itself is
+   initialized at boot, so CLKB programming works once firmware is up.)
+
+The only hard ordering rule is `STARTADC` before `STARTFX3`; the VHF front-end
+config can go anywhere in that window (it touches CLKB/PLL-B and the R828D,
+independent of CLKA/PLL-A and the stream).
+
+`vhf_tune.py` can run both prerequisites for you via flags — `--load IMG`
+(delegates to `fx3_cmd load`) and `--adc RATE_HZ` (native `STARTADC`):
+
+```
+python3 vhf_tune.py 144000000 --load SDDC_FX3/SDDC_FX3.img --adc 64000000 --persist
+fx3_cmd start            # STARTFX3, then capture/FFT
+```
+
+## Verify as you go
+
+Each phase has a cheap read-back — don't fly blind:
+
+- **Firmware alive** (beyond `lsusb`): `TESTFX3` returns
+  `[hwconfig, fw_major, fw_minor, vendor_rqt_count]`; expect `hwconfig = 0x04`.
+- **CLKB on**: read back Si5351 `CLK2_CONTROL` (reg 18); bit 7 clear = enabled.
+- **Tuner reachable**: the reg `0x00` == `0x69` probe above — abort if it doesn't
+  ACK before you tune.
+- **PLL locked**: after `set_pll`, read reg `0x00`; `data[2] & 0x40` = lock.
+
+`vhf_tune.py` (this repo) is a worked reference that does the whole lifecycle
+— enter+init, tune to a frequency argument, standby on exit — with these four
+checks wired in. The Si5351 CLKB=16 MHz and R828D init register sequences are
+ported there verbatim from the firmware.
 
 ## Tuner code — use clean upstream, *not* the firmware copy
 
@@ -64,11 +102,13 @@ gain` is a few hundred lines.
 |---|---|
 | VHF switch | `GPIOFX3`, `VHF_EN = 0x8000` set |
 | `GPIOFX3` payload | 32-bit LE, `wLength = 4` |
-| R828D addr / ID | `0x74` / reg `0x00` == `0x69` |
+| R828D addr / ID | `0x74` / reg `0x00` == `0x69` (bit-reversed) |
 | I2C passthrough | `wValue`=addr, `wIndex`=reg, `wLength`=count |
-| Tuner reference | Si5351 **CLK2 / CLKB** |
-| IF center (8 MHz filter) | **4.57 MHz** (`LO = RF + IF`) |
+| Tuner reference | Si5351 **CLK2 / CLKB** = **16 MHz** (`R828D_FREQ`) |
+| IF center (8 MHz filter) | **4.57 MHz** (`R828D_IF_CARRIER`; `LO = RF + IF`) |
+| Liveness | `TESTFX3` → `hwconfig 0x04`, fw, vendor-rqt count |
 
-No firmware build, no new commands. Lone hardware question (5-min bench): do the
-front-end attenuator/VGA sit in the common path, so they also condition the
-tuner IF?
+No firmware build, no new commands. The front-end attenuator/VGA *are* in the
+common path — the original host code sets the AD8370 VGA (`SETARGFX3`, `0x83`)
+in VHF mode, so they condition the tuner IF too; HF-only `DAT31_ATT` aside,
+VHF gain = R828D-internal (I2C) + that VGA.

@@ -13,7 +13,9 @@
 >
 > Live artifacts (supersede the firmware-command framing earlier drafts had):
 > `vhf_host_bringup.md` (1-page host bring-up), `tuner_r82xx_explained.md`
-> (chip walk-through), `vhf_tune.py` (minimal EP0 config utility).
+> (chip walk-through), `vhf_tune.py` (EP0 host utility: full enter/init/tune/
+> standby lifecycle with liveness + tuner-probe + PLL-lock checks, CLKB=16 MHz
+> and R828D init sequences ported from the firmware).
 
 ## 0. Design goals (the lens)
 
@@ -248,8 +250,9 @@ Ordered smallest-risk-first.
 2. **R828D reachability probe (host, GPL-free).** Over `I2CWFX3`/`I2CRFX3`,
    read R828D reg `0x00` and check `0x69` (with the R82xx read bit-reverse).
    The ground-truth "I2C reaches the tuner" check; anchor a regression test.
-   Already stubbed in `vhf_tune.py`. *Falsifier:* if it never reads `0x69`,
-   the bus/addressing is wrong and nothing downstream can work.
+   Implemented in `vhf_tune.py` (`r828d_probe`, aborts the tune if unreachable).
+   *Falsifier:* if it never reads `0x69`, the bus/addressing is wrong and
+   nothing downstream can work.
 3. **Confirm VHF antenna-path switching on the bench.** `VHF_EN`/`BIAS_VHF`
    via `GPIOFX3` (see `vhf_host_bringup.md` step 1). Verify it actually routes
    the VHF front-end. *Falsifier:* if toggling these doesn't change the path,
@@ -257,9 +260,12 @@ Ordered smallest-risk-first.
 4. **Host VHF driver + demo.** In `rx888_tools`/`librx888` (or ka9q-radio):
    port a clean upstream R82xx driver (steve-m/librtlsdr — *not* the
    FX3-mangled firmware copy), swap its I/O for the I2C passthrough, set
-   `cfg->xtal` = the CLK2/CLKB you program. `vhf_tune.py` is the minimal
-   reference — an EP0 config utility that can run **concurrently** with the
-   streamer (EP0 vs EP1; the `two_actor_open` pattern, #143).
+   `cfg->xtal` = the CLK2/CLKB you program (16 MHz). `vhf_tune.py` is the
+   worked reference — an EP0 utility doing the full enter/init/tune/standby
+   lifecycle (CLKB=16 MHz + R828D init/tune/standby ported from the firmware),
+   runnable **concurrently** with the streamer (EP0 vs EP1; `two_actor_open`,
+   #143). Its `set_pll`/`set_mux`/`set_bandwidth` math is ported-not-yet-bench-
+   verified — the bench iteration target.
 5. **Keep the finite I2C timeout (G3).** No new firmware, but verify VHF's new
    I2C consumer doesn't tempt anyone to revert `I2C_BUS_TIMEOUT`. Sanity:
    `i2c_fuzz <ops> <seed>` → `resets=0`.
