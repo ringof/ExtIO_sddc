@@ -34,11 +34,15 @@ to wedge.** Three goals; every specific choice in this plan is one of them:
     (STALL or error status on failure, never silent success); the CLKB
     command **returns the achieved frequency**; unknown commands/args STALL.
     The host always knows what actually happened.
-  - *No wedge:* bounded operations only — a **finite I2C bus timeout** (so a
-    stuck/absent device errors instead of hanging), the health watchdog
-    (EP0/main/cold-start recovery), bounds-checked EP0 buffers, no unbounded
-    loops in the vendor callback. A bad driver gets bad *results*, never a
-    device that needs a physical replug.
+  - *No wedge:* bounded operations only — and the I2C path is properly
+    bounded on `main` today. An absent device NAKs (immediate error); a
+    stranded/clock-stretched bus is bounded by the **finite** `busTimeout`
+    (`I2C_BUS_TIMEOUT` ≈ 4,032,000 core clocks ≈ 10 ms, from **PR #156 /
+    issue #154**, present in `main`), well under the 2 s EP0 watchdog; and the
+    EP0 watchdog backstops anything else. The VHF work must simply **not
+    regress** this (the tuner is a new I2C consumer, addressable while
+    absent/unpowered). Plus bounds-checked EP0 buffers and no unbounded loops
+    in the vendor callback.
 
 This trio resolves the Model 1 vs Model 2 tension (§2c) on its own: **G2**
 says don't block the unconventional "tune via the clock" approach; **G3**
@@ -232,16 +236,16 @@ one primitive.
 
 Two items that are *not* a floor, kept honest:
 
-- **Generic I2C hygiene (keep/harden, not VHF-specific).** Bounds-check
-  `wLength` against the EP0 buffer and keep STALL-on-error so a malformed
-  passthrough request can't overflow. **And bound the I2C bus timeout:**
-  `i2cmodule.c` currently sets `i2cConfig.busTimeout = 0xFFFFFFFF`
-  (*infinite*) — a stuck or absent device holding the bus (exactly the new
-  failure mode VHF adds: an unpowered/missing R828D) could hang the I2C
-  controller with no recovery. That is a literal wedge (violates G3). A finite
-  timeout turns the hang into a returned error the host can see — serving both
-  halves of G3 at once. Pre-existing and generic, but the tuner is the
-  consumer most likely to trip it.
+- **Finite I2C bus timeout — present on `main`, just don't regress it.**
+  `main` sets `busTimeout = I2C_BUS_TIMEOUT` (≈ 4,032,000 core clocks ≈ 10 ms)
+  from **PR #156 (issue #154)**. This matters because the I2C transfer runs
+  inside the EP0 vendor handler: the old `0xFFFFFFFF` (~10.6 s) would block EP0
+  past the **2 s** Level-4 watchdog and trip an unwanted reset; the finite
+  value returns promptly (bumping `glCounter[1]`) instead. The VHF tuner is a
+  new I2C consumer (addressable while absent/unpowered), so the only action
+  needed is to **keep** this finite timeout. Related context from that effort:
+  #157 (stream∧I2C wedge), #160 (`Si5351Init` clock-gating). Also bounds-check
+  `wLength` against the EP0 buffer and keep STALL-on-error.
 - **Host-crash bias-tee fail-safe (optional, decoupled).** Leaving antenna
   bias on after a host crash does not affect streaming; it is at most a
   hardware-tidiness choice. Decide consciously: a one-line bias-off on
@@ -472,15 +476,16 @@ Ordered smallest-risk-first. Each step is independently committable.
    deliverable host driver authors consume. License-clean (project-owned
    definitions + chip facts).
 
-6. **Anti-wedge / anti-silent-failure hardening (goal G3).** Bound the I2C
-   bus timeout — replace `i2cConfig.busTimeout = 0xFFFFFFFF` in `i2cmodule.c`
-   with a finite value so a stuck/absent device (e.g. unpowered R828D) returns
-   an error instead of hanging the controller. Audit the command surface so
-   every request reports success/failure (STALL/error, never silent success)
-   and unknown commands/args STALL. Pre-existing and generic, but elevated to
-   required by G3 and most likely to be tripped by the new tuner I2C consumer.
-   Test: an I2C transfer to an absent address returns promptly with an error;
-   no hang.
+6. **Anti-silent-failure audit (goal G3).** Confirm every command reports
+   success/failure unambiguously — STALL/error on failure, never silent
+   success — and that unknown commands and unknown `SETARGFX3` indices STALL,
+   so the host always learns what happened. The I2C path is already bounded on
+   `main` (finite `I2C_BUS_TIMEOUT` from PR #156; absent device NAKs →
+   immediate error; EP0 watchdog backstop), so the only requirement here is to
+   **preserve** that — do not reintroduce `busTimeout = 0xFFFFFFFF`. Sanity
+   check it still holds with the tuner as a new I2C consumer (the #156
+   `i2c_fuzz <ops> <seed>` test: `resets=0`, I2C error counter climbing on
+   malformed/stranded reads).
 
 7. *(Optional, conscious decision)* **host-crash bias-tee fail-safe.** A
    one-line bias-off on `STOPFX3`/reset if leaving antenna DC across a host
