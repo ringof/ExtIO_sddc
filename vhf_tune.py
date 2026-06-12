@@ -16,8 +16,14 @@ switch, no harmonic retry (only needed >~1.7 GHz). Bench-validated to lock at
 144 MHz; confirm the math outside that band.
 
 PORTING NOTES (the non-obvious, bench-learned lessons):
-  * R828D reads come back in canonical order over I2CRFX3 — do NOT apply
-    librtlsdr's per-byte bit-reverse (reg 0x00 reads 0x69 directly).
+  * R828D read/write bit order is ASYMMETRIC (Rafael "R820T2 Register
+    Description"): writes go MSB-first (the chip stores the byte verbatim), but
+    reads stream LSB-first, so a standard I2C master receives every read byte
+    bit-reversed from the datasheet's logical numbering. So: write values
+    verbatim, but bit-reverse each read byte (as librtlsdr does) to recover
+    logical order. Proven on this hardware: writing init 0x13 to reg 0x06 reads
+    back 0xC8, and reg 0x00 reads wire 0x69 = bit-reverse of the datasheet's
+    logical 0x96. Only the R828D needs this — the Si5351 reads normally.
   * Masked R828D writes need a software register shadow: read-modify-write
     against the last value you wrote, not a chip read-back (this mirrors the
     firmware's r82xx priv->regs[]).
@@ -25,7 +31,8 @@ PORTING NOTES (the non-obvious, bench-learned lessons):
     reset would glitch CLKA (the ADC sample clock) and kill the stream.
   * LO = RF + IF (4.57 MHz). The PLL reference is the CLKB frequency you
     programmed (pll_ref), not a fixed crystal.
-  * PLL lock = reg 0x02 bit 6; on no-lock, raise VCO current (reg 0x12 [7:5]).
+  * PLL lock = reg 0x02 logical bit 6 (mask 0x40 on a bit-reversed read);
+    on no-lock, raise VCO current (reg 0x12 [7:5]).
   * GETSTATS exposes gpio_state at bytes [26:30] only when the payload is >= 30
     bytes (added after release v0.1.0) — length-check before trusting it.
   * EP0 control needs no interface claim, so this coexists with a streamer.
@@ -96,6 +103,17 @@ class TuneError(Exception):
     """Bring-up failure (unreachable tuner, ID mismatch, no PLL lock, ...)."""
 
 
+def _bitrev8(b):
+    """Reverse the 8 bits of a byte. The R828D streams reads LSB-first, so a
+    standard MSB-first I2C master (the FX3) receives each read byte reversed
+    from the datasheet's logical bit order; this undoes that. Writes are NOT
+    reversed (the chip takes writes MSB-first). Mirrors librtlsdr r82xx_read."""
+    b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4)
+    b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2)
+    b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1)
+    return b
+
+
 # ════════════════════════════════════════════════════════════════════════
 #  Portable driver core — this is what a C host driver re-implements.
 # ════════════════════════════════════════════════════════════════════════
@@ -148,15 +166,16 @@ class RX888:
         return on
 
     def r828d_probe(self):
-        """Read the R828D ID (reg 0x00). Returns the byte (0x69 expected), or
-        None if it doesn't ACK. Canonical byte order — no host bit-reverse."""
+        """Read the R828D ID (reg 0x00) in logical order. Returns the byte
+        (0x96 expected — the datasheet's logical chip-id), or None if it doesn't
+        ACK. _rd bit-reverses the wire 0x69 back to logical 0x96."""
         try:
-            v = self.i2c_r(R828D_ADDR, 0x00, 1)[0]
+            v = self._rd(0x00, 1)[0]
         except usb.core.USBError as e:
             print(f"  R828D probe: no I2C response ({e}) — tuner unreachable")
             return None
-        print(f"  R828D probe: reg0=0x{v:02X} (want 0x69) -> "
-              f"{'OK' if v == 0x69 else 'ID MISMATCH'}")
+        print(f"  R828D probe: reg0=0x{v:02X} (want 0x96) -> "
+              f"{'OK' if v == 0x96 else 'ID MISMATCH'}")
         return v
 
     # ── R828D register access (shadowed, like the firmware's priv->regs) ──
@@ -168,7 +187,11 @@ class RX888:
         self._wr(reg, (self.regs.get(reg, 0) & ~mask) | (val & mask))
 
     def _rd(self, reg, n):
-        return list(self.i2c_r(R828D_ADDR, reg, n))   # canonical order; no reverse
+        """Read n R828D registers from reg, in datasheet/librtlsdr LOGICAL bit
+        order. The chip streams reads LSB-first so each wire byte is reversed;
+        _bitrev8 undoes it. i2c_r stays raw (the Si5351 reads normally), so the
+        reverse lives only on this R828D read path."""
+        return [_bitrev8(v) for v in self.i2c_r(R828D_ADDR, reg, n)]
 
     # ── Si5351 CLKB = ref_hz on CLK2/PLL-B (port of si5351aSetFrequencyB) ──
     def clkb_on(self, ref_hz):
@@ -260,7 +283,7 @@ class RX888:
             return False
 
         data = self._rd(0x00, 5)
-        vco_fine = (data[4] & 0x30) >> 4
+        vco_fine = (data[4] & 0x30) >> 4              # reg 0x04 logical b5:4
         if vco_fine > VCO_POWER_REF: div_num -= 1
         elif vco_fine < VCO_POWER_REF: div_num += 1
         self._wr_mask(0x10, div_num << 5, 0xE0)
@@ -283,7 +306,7 @@ class RX888:
         time.sleep(0.002)
         locked = False
         for _ in range(2):
-            if self._rd(0x00, 3)[2] & 0x40:           # lock = reg 0x02 bit 6
+            if self._rd(0x00, 3)[2] & 0x40:           # lock = reg 0x02 logical b6 (reads are logical-order)
                 locked = True; break
             self._wr_mask(0x12, 0x60, 0xE0)           # bump VCO current to max, retry
         self._wr_mask(0x1A, 0x08, 0x08)               # autotune 8 kHz
@@ -418,8 +441,8 @@ def main():
         idv = rx.r828d_probe()
         if idv is None:
             raise TuneError("R828D not reachable over I2C")
-        if idv != 0x69 and not args.force:
-            raise TuneError(f"R828D ID 0x{idv:02X} != 0x69 (override with --force)")
+        if idv != 0x96 and not args.force:
+            raise TuneError(f"R828D ID 0x{idv:02X} != 0x96 (override with --force)")
 
         rx.r828d_init(); print("R828D init + 8 MHz filter (IF 4.57 MHz)")
         if not rx.r828d_set_freq(int(args.rf_hz)) and not args.force:
