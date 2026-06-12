@@ -109,9 +109,12 @@ class Tuner:
         return vals
 
     # ── per-bit settability map ───────────────────────────────────────────
-    def settability(self, lo=0x05, hi=0x1F):
-        """For each register: write 0x00 then 0xFF, read back, classify each bit,
-        restore the original. Re-checks the chip ID after every register."""
+    def settability(self, lo=0x00, hi=0x1F):
+        """Write-probe EVERY register 0x00..0x1f: write 0x00 then 0xFF, read
+        back, classify each bit, restore the original. The read-only status
+        registers 0x00..0x04 should come back F1/F0 (fixed bits) — which also
+        validates that the classifier can actually tell read-only from writable.
+        Re-checks the chip ID after each register and stops if it changes."""
         print(f"\n=== settability 0x{lo:02X}..0x{hi:02X} "
               f"(RW=writable, F1=forced-1, F0=forced-0, ~=inverted/status) ===")
         for reg in range(lo, hi + 1):
@@ -187,8 +190,6 @@ def main():
                     help="map per-bit writable vs read-only (writes+restores)")
     ap.add_argument("--scan",  action="store_true",
                     help="probe regs 0x20..0x3f for undocumented registers")
-    ap.add_argument("--range", default=None, metavar="LO:HI",
-                    help="hex register range for --dump/--settability (e.g. 0x05:0x1f)")
     ap.add_argument("--all", action="store_true", help="dump + settability + scan")
     ap.add_argument("--no-reinit", action="store_true",
                     help="do not restore init defaults at the end")
@@ -197,10 +198,6 @@ def main():
         sys.exit("pyusb is required: pip install pyusb")
     if not (args.dump or args.settability or args.scan or args.all):
         ap.error("pick at least one of --dump / --settability / --scan / --all")
-
-    lo, hi = (0x05, 0x1F)
-    if args.range:
-        a, b = args.range.split(":"); lo, hi = int(a, 16), int(b, 16)
 
     t = Tuner()
     t.alive()
@@ -211,9 +208,9 @@ def main():
 
     wrote = False
     if args.dump or args.all:
-        t.dump(0x00, max(hi, 0x1F))
+        t.dump(0x00, 0x1F)
     if args.settability or args.all:
-        t.settability(lo, hi); wrote = True
+        t.settability(0x00, 0x1F); wrote = True
     if args.scan or args.all:
         t.scan(); wrote = True
 
