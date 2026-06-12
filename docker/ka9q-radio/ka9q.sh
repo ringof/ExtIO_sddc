@@ -3,7 +3,11 @@
 # ka9q.sh — helper for the ka9q-radio Docker image.
 #
 # Subcommands:
-#   start                  Launch the container detached.
+#   start [--vhf]          Launch the container detached. With --vhf, radiod
+#                          runs the VHF/FM config (rx888-vhf-fm.conf: a WBFM
+#                          receiver at the 4.57 MHz R828D IF) instead of the
+#                          default HF test config. Then tune the front end with
+#                          ../../vhf_fm_tune.sh and listen to fm-pcm.local.
 #   console                Drop into a bash shell inside the running container.
 #   monitor [stream-name]  Run ka9q's `monitor` inside the container with
 #                          host-side ALSA playback.  Default: wwv-pcm.local
@@ -42,6 +46,32 @@ container_running() {
 }
 
 cmd_start() {
+    # Default: use the image's baked CMD (radiod @ rx888-test.conf). With --vhf
+    # (or --conf NAME), override the CMD and bind-mount the local config so it
+    # takes effect without an image rebuild.
+    local conf_name=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --vhf|--fm) conf_name="rx888-vhf-fm" ;;
+            --conf)     shift; conf_name="${1:-}" ;;
+            *) echo "unknown start option: $1" >&2; return 2 ;;
+        esac
+        shift
+    done
+
+    local conf_mount=() cmd_override=()
+    if [ -n "$conf_name" ]; then
+        local local_conf="$SCRIPT_DIR/${conf_name}.conf"
+        if [ ! -f "$local_conf" ]; then
+            echo "config not found: $local_conf" >&2
+            return 2
+        fi
+        local in_container="/etc/radio/radiod@${conf_name}.conf"
+        conf_mount=(-v "$local_conf:$in_container:ro")
+        cmd_override=(radiod "$in_container")
+        echo "Using config: $conf_name (radiod $in_container)"
+    fi
+
     if container_running; then
         echo "Container '$CONTAINER_NAME' is already running."
         return 0
@@ -71,9 +101,10 @@ cmd_start() {
         -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
+        "${conf_mount[@]}" \
         -p 127.0.0.1:8081:8081 \
         -e FFTW_RIGOR="${FFTW_RIGOR:-measure}" \
-        "$IMAGE_NAME" >/dev/null
+        "$IMAGE_NAME" "${cmd_override[@]}" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
     echo "Follow logs:  docker logs -f $CONTAINER_NAME"
 }

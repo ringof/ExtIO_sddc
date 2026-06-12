@@ -162,6 +162,9 @@ COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 
 # Install minimal rx888 config for HF direct-sampling test
 COPY rx888-test.conf /etc/radio/radiod@rx888-test.conf
+# VHF/FM test config (WBFM receiver at the 4.57 MHz R828D IF). ka9q.sh --vhf
+# also bind-mounts this, so it works without a rebuild; baked here for parity.
+COPY rx888-vhf-fm.conf /etc/radio/radiod@rx888-vhf-fm.conf
 
 # Copy entrypoint
 COPY entrypoint.sh /entrypoint.sh
