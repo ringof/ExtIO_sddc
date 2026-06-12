@@ -135,8 +135,24 @@ class Tuner:
 
     # ── scan for registers beyond the documented map ──────────────────────
     def scan(self, start=0x20, end=0x3F):
-        """Probe registers past 0x1f: does the read wrap (= no more regs), and do
-        writes there stick?"""
+        """Probe registers past 0x1f. Only meaningful in 'random' read mode — in
+        'from0' the address space wraps, so reads alias the low map and writes to
+        high addresses would clobber the low registers."""
+        if self.read_mode == "from0":
+            blk = self.i2c_r(0x00, 64) or []
+            win = next((p for p in range(8, len(blk))
+                        if blk[p] == blk[0] and blk[p:p + 8] == blk[0:8]), None)
+            print("\n=== scan (from0 read mode) ===")
+            if win:
+                print(f"  read window = {win} registers (0x00..0x{win - 1:02X}); "
+                      f"reads beyond it wrap back to reg 0 — no extended registers "
+                      f"are reachable by sequential read on this interface.")
+            else:
+                print("  could not determine the wrap window from a 64-byte read.")
+            print("  skipping write-probe: in from0 mode a write to 0x20+ wraps "
+                  "onto the low registers (clobber risk).")
+            return
+
         print(f"\n=== scan 0x{start:02X}..0x{end:02X} for undocumented registers ===")
         base = self.rd_block(0x00, 0x1F)               # for wrap detection
         for reg in range(start, end + 1):
@@ -144,12 +160,14 @@ class Tuner:
             if v is None:
                 print(f"  reg 0x{reg:02X}: no read"); continue
             wraps = base and (reg & 0x1F) < len(base) and v == base[reg & 0x1F]
+            if wraps:
+                print(f"  reg 0x{reg:02X} = 0x{v:02X}  -> wraps to low map"); continue
             orig = v
             self.i2c_w(reg, [orig ^ 0xFF]); rb = self.rd(reg)
             self.i2c_w(reg, [orig])
-            holds = rb is not None and rb != orig       # write changed something
-            note = "wraps to low map" if wraps else ("HOLDS a write!" if holds else "static")
-            print(f"  reg 0x{reg:02X} = 0x{v:02X}  -> {note}")
+            holds = rb is not None and rb != orig
+            print(f"  reg 0x{reg:02X} = 0x{v:02X}  -> "
+                  f"{'HOLDS a write!' if holds else 'static'}")
 
     def reinit(self):
         """Restore the documented init defaults (sane post-probe state)."""
