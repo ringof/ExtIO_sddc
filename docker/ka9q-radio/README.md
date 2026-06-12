@@ -48,31 +48,43 @@ container is Linux-only.
 ### With firmware already loaded on the device
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
 
 ### With firmware upload (radiod handles it)
 
+Bind-mount the directory that contains your built `SDDC_FX3.img` onto
+`/firmware`. That directory is **external to the image** — point it wherever
+your firmware actually lives; the in-repo `SDDC_FX3/` source tree only has an
+`.img` after you build it.
+
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
+  -v /abs/path/to/firmware-dir:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
-  -p 127.0.0.1:8081:8081 \
   ka9q-radio
 ```
 
-> A plain bridge network is used (not `--network host`): radiod, `powers` and
-> ka9q-web all run inside the one container, so ka9q's multicast stays on the
-> container's own `lo`/`eth0` and is deterministic. `--network host` exposes
-> every host interface and `powers` (no `--iface` flag) can pick a different
-> one than radiod on a multi-homed host. ka9q-web is published on localhost
-> (`-p 127.0.0.1:8081:8081`); NAT still provides apt egress for debugging.
+If your firmware file has a different name, mount the file directly instead:
+`-v /abs/path/to/your.img:/firmware/SDDC_FX3.img`. With the `ka9q.sh` helper,
+set `FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start` (defaults to the
+in-repo `SDDC_FX3/`).
+
+> **`--network host` is required** (not bridge). radiod's cold-start path —
+> upload firmware, FX3 re-enumerates `00f3`→`00f1`, re-acquire — depends on a
+> USB **hotplug** event, and hotplug is delivered over a **network-namespace-
+> scoped** netlink socket that a bridge container never receives, so libusb
+> fails with "device could not be found" (see `docs/ka9q-compat-audit.md` §1).
+> Host netns is the only way libusb sees the re-enumeration. Multicast stays
+> deterministic because everything is kept on **loopback**: radiod defaults to
+> `lo` and the harness consumers pin `-I lo` / `,lo` — the multi-homed hazard
+> only affects *un-pinned* consumers. Under host networking ka9q-web binds host
+> `:8081` directly, so no `-p` publish is needed.
 
 The `/run/udev` bind mount is **required** when radiod uploads the
 firmware: after the FX3 re-enumerates from `04b4:00f3` (DFU) to
@@ -93,15 +105,17 @@ Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
 
 | Value        | First-run time           | Runtime FFT performance |
 |--------------|--------------------------|-------------------------|
-| `estimate`   | instant                  | slowest                 |
-| `measure`    | minutes (default)        | near-optimal            |
+| `estimate`   | instant (default)        | slowest                 |
+| `measure`    | minutes                  | near-optimal            |
 | `patient`    | hours (1.62M-point FFT)  | optimal                 |
 | `exhaustive` | many hours to days       | marginally > patient    |
 
-Pass it with `-e FFTW_RIGOR=<value>` on `docker run`, e.g.
-`-e FFTW_RIGOR=estimate` for a quick firmware-validation session, or
-`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term
-and want the most efficient FFT plans.
+The default is **`estimate`** so a cold boot of this test/eval image is
+instant — appropriate for firmware-compatibility checks, where optimal
+runtime FFT plans don't matter. Override with `-e FFTW_RIGOR=<value>` on
+`docker run` (or `FFTW_RIGOR=measure ./ka9q.sh start`), e.g.
+`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term and
+want the most efficient FFT plans.
 
 ### Tuning and listening (helper script)
 
@@ -152,6 +166,26 @@ before this was added — rebuild with `docker build --no-cache`.
 
 To shut down: `./ka9q.sh stop`.
 
+### VHF FM-broadcast mode
+
+The `--vhf` flag starts radiod with the VHF/FM config
+(`rx888-vhf-fm.conf`) instead of the default HF test config:
+
+```
+./ka9q.sh start --vhf
+```
+
+This configures a WBFM receiver at the R828D IF centre (4.570 MHz).
+Tune the R828D front-end separately with the host-side tuner script,
+then listen:
+
+```
+./vhf_fm_tune.sh 100300000            # tune R828D to 100.3 MHz FM
+./ka9q.sh monitor fm-pcm.local        # listen to demodulated audio
+```
+
+See `rx888-vhf-fm.conf` for signal-path details and GPIO caveats.
+
 #### `monitor` keybindings (cheat sheet)
 
 `monitor` is a curses program; press `h` inside it for the full
@@ -197,13 +231,18 @@ documented above.  This section is for debugging the image itself
 binaries, etc.) — it deliberately omits audio passthrough.
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
-  -p 127.0.0.1:8081:8081 \
+  -v /abs/path/to/firmware-dir:/firmware \
+  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio bash
 ```
+
+> The `wisdom` mount + the default `FFTW_RIGOR=estimate` keep this debug
+> shell's cold boot instant; without the wisdom mount you still pay only the
+> instant `estimate` plan. Point `/firmware` at wherever your built
+> `SDDC_FX3.img` lives (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
 
 Then inside the container:
 
@@ -237,7 +276,7 @@ up (`./ka9q.sh start`), run the whole-band smoke test from the repo root:
 tests/ka9q_smoke.sh
 ```
 
-It sweeps `0 .. fs/2` via the patched `powers`, renders a PNG, and PASS/FAILs
+It sweeps `0 .. fs/2` via `powers`, renders a PNG, and PASS/FAILs
 on whether the floor is a live, textured thermal spectrum (~-130 dB with
 natural variance, the ADC DC spike, and the fs/2 alias) versus the
 featureless flat line a frozen / shut-down ADC would produce.  See
@@ -262,12 +301,17 @@ featureless flat line a frozen / shut-down ADC would produce.  See
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **`STARTADC` before `STARTFX3`** — earlier SDDC builds needed it for
-  the GPIF preflight check (handled by container patch 03); the firmware
-  now reports Si5351 CLK0 state truthfully, so the preflight passes with no
-  host workaround and patch 03 is retired (see `patches/README.md`).  The
-  only active container patches are the two `powers` float/double fixes
-  (`01`, `02`).
+- **ka9q-radio pin** — the container builds ka9q-radio `87567fa` (main),
+  whose `rx888.c` does host-side Si5351 clock synthesis (new `si5351.c`
+  module), polls the Si5351 for lock, and logs the rx888 firmware version
+  via `TESTFX3`.  Paired with ka9q-web `91cbfca`.  See
+  `docs/ka9q-compat-audit.md` §12 for the full driver-eval analysis.
+- **Zero active container patches — builds vanilla ka9q-radio.**  Every local
+  ask has been upstreamed: the `powers` float/double fixes (`01`, `02`) and
+  the no-tuner-stdby change (`04`, removed at `87567fa`).  Patch `03`
+  (`STARTADC` before `STARTFX3`) remains retired (the firmware reports Si5351
+  CLK0 state truthfully, so the GPIF preflight passes with no host workaround).
+  See `patches/README.md`.
 - **`/run/udev` bind-mount required** at `docker run` time — libusb
   inside the container needs host udev events to see the FX3
   re-enumerate after firmware upload.  Container-side workaround,
@@ -275,8 +319,9 @@ full analysis.  Summary:
 - `sleep(1)` after firmware upload (`rx888.c:700`) — fragile in
   principle, sufficient on observed hardware with the udev mount.
   Documented in audit §1, no patch.
-- `TUNERSTDBY` (0xB8) calls produce harmless STALLs.  Cosmetic
-  noise, no functional impact.  Documented in audit §2, no patch.
+- `TUNERSTDBY` (0xB8) calls STALL on this firmware (no tuner) and could
+  intermittently wedge radiod's restart bring-up — removed on the HF path by
+  active patch `04-no-tuner-stdby` (audit §2, `patches/README.md`).
 - GPIO LED bit-mapping differences (cosmetic).
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 
