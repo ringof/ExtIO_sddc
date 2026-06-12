@@ -137,6 +137,8 @@ class Tuner:
 
     def save_snapshot(self, path, label=""):
         regs = self.read_all()
+        if len(regs) != 0x20:
+            sys.exit(f"snapshot failed: captured {len(regs)} registers, expected 32")
         with open(path, "w") as f:
             f.write("# r828d snapshot — WIRE order "
                     "(bit-reversed from Rafael logical numbering; wire b_w = logical b_7-w)\n")
@@ -194,10 +196,11 @@ class Tuner:
                 print("  could not determine the wrap window from a 64-byte read.")
             print("  skipping write-probe: in from0 mode a write to 0x20+ wraps "
                   "onto the low registers (clobber risk).")
-            return
+            return False
 
         print(f"\n=== scan 0x{start:02X}..0x{end:02X} for undocumented registers ===")
         base = self.rd_block(0x00, 0x1F)               # for wrap detection
+        wrote = False
         for reg in range(start, end + 1):
             v = self.rd(reg)
             if v is None:
@@ -206,11 +209,13 @@ class Tuner:
             if wraps:
                 print(f"  reg 0x{reg:02X} = 0x{v:02X}  -> wraps to low map"); continue
             orig = v
+            wrote = True
             self.i2c_w(reg, [orig ^ 0xFF]); rb = self.rd(reg)
             self.i2c_w(reg, [orig])
             holds = rb is not None and rb != orig
             print(f"  reg 0x{reg:02X} = 0x{v:02X}  -> "
                   f"{'HOLDS a write!' if holds else 'static'}")
+        return wrote
 
     def reinit(self):
         """Restore the documented init defaults (sane post-probe state)."""
@@ -323,8 +328,11 @@ def main():
     t = Tuner()
     t.alive()
     t.characterize_reads()
-    if t.rd(0x00) != 0x69:
-        sys.exit(f"reg 0x00 != 0x69 (got 0x{t.rd(0x00):02X}) — not an R828D / not reachable; "
+    idv = t.rd(0x00)
+    if idv is None:
+        sys.exit("reg 0x00 read failed — not an R828D / not reachable; refusing to write")
+    if idv != 0x69:
+        sys.exit(f"reg 0x00 != 0x69 (got 0x{idv:02X}) — not an R828D / not reachable; "
                  "refusing to write")
 
     if args.snapshot:
@@ -336,7 +344,7 @@ def main():
     if args.settability or args.all:
         t.settability(0x00, 0x1F); wrote = True
     if args.scan or args.all:
-        t.scan(); wrote = True
+        wrote = t.scan() or wrote
 
     if wrote and not args.no_reinit:
         t.reinit()
