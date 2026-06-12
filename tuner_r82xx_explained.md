@@ -342,7 +342,7 @@ VHF near strong signals. (GPL-2.0, but fine host-side.)
 
 | Reg | Role | Set by |
 |-----|------|--------|
-| `0x00`–`0x04` | **Read-only status** — PLL lock (`data[2] & 0x40`), VCO fine-tune | read in `set_pll` |
+| `0x00`–`0x04` | **Read-only status** — PLL lock (`data[2] & 0x40`), VCO fine-tune. Reads are bit-reversed from the datasheet's logical order (note below); reg `0x01` is datasheet-"reserved" but carries live status on the bench | read in `set_pll` |
 | `0x05` | LNA / loop-through; R828D **Air-In vs Cable1** input (`0x60`) | `init`, `set_freq64` |
 | `0x07` | **Sideband** select (bit 7) | `set_sideband` |
 | `0x0a`/`0x0b` | **IF channel-filter** bandwidth / corner | `set_bandwidth` |
@@ -357,6 +357,19 @@ VHF near strong signals. (GPL-2.0, but fine host-side.)
 | `0x17` | Open-drain | `set_mux` |
 | `0x08`/`0x09` | IQ trim — image-reject gain / phase | *Linux IMR only (§9)* |
 | `0x18`/`0x19`/`0x1f` | Internal ring-oscillator test tone (cal) | *Linux IMR only (§9)* |
+
+> **Read bit-order (bench fact).** The R828D streams *reads* LSB-first but takes
+> *writes* MSB-first (Rafael "R820T2 Register Description"), so a standard I2C
+> master receives every read byte **bit-reversed** from the datasheet's logical
+> numbering. Proven on RX888 hardware: reg `0x00` reads wire `0x69` =
+> bit-reverse of the datasheet's logical `0x96`, and writing init `0x13` to reg
+> `0x06` reads back `0xC8` (and `0xC0`→`0x03`, `0xBB`→`0xDD`, `0x30`→`0x0C`).
+> librtlsdr and `vhf_tune.py` bit-reverse reads to recover logical order (so the
+> lock test `data[2] & 0x40` is logical reg `0x02` bit 6 = the VCO_INDICATOR
+> MSB); raw tools like `r828d_probe.py` leave reads wire-order and label them.
+> Separately, the datasheet-"reserved" reg `0x01` is **not** static padding — on
+> the bench it changes on lock (`0x01`→`0x61` wire), i.e. a live status register
+> the datasheet doesn't document.
 
 ---
 

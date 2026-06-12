@@ -50,7 +50,8 @@ R828D_INIT = [0x80,0x13,0x70,0xC0,0x40,0xDB,0x6B,0xEB,0x53,0x75,0x68,0x6C,0xBB,
 # table 1-2). Annotations in --diff so a changed bit can be read against the doc.
 DOC_READ_FIELDS = {
     0x00: "R0  chip-id (logical 0x96 / wire 0x69)",
-    0x01: "R1  reserved (undocumented in datasheet)",
+    0x01: "R1  undocumented in datasheet, but LIVE status on the bench "
+          "(0x01->0x61 wire on lock) — not static",
     0x02: "R2  VCO_INDICATOR[6:0] (logical b6:0; logical b7=0)",
     0x03: "R3  RF_INDICATOR[7:0]",
     0x04: "R4  reserved (librtlsdr reads logical b5:4 as vco_fine)",
@@ -273,22 +274,24 @@ def diff_snapshots(a, b, name_a, name_b):
 
 
 def _lock_analysis(a, b):
-    """Resolve the reg-0x02 PLL-lock-bit question: which bit actually transitions.
-
-    vhf_tune.py checks `data[2] & 0x40`. In wire order that mask is wire bit 6 =
-    logical VCO_INDICATOR[1]. The datasheet's lock-ish MSB is VCO_INDICATOR[6] =
-    logical bit 6 = wire bit 1 = mask 0x02. Whichever goes 0->1 on a known-good
-    tune is the real lock indicator."""
+    """Report the reg-0x02 PLL-lock bit. RESOLVED: lock is VCO_INDICATOR[6] =
+    logical bit 6. In this tool's wire order that is wire bit 1 = mask 0x02; in
+    vhf_tune.py (which now reads in logical order) it is mask 0x40. The proof was
+    the write/readback bit-order check (e.g. init 0x13 -> reg 0x06 reads 0xC8),
+    which established reads are LSB-first/bit-reversed, so librtlsdr's logical-b6
+    lock test lands on wire b1 here. Both bits light up going standby->locked
+    (the whole VCO_INDICATOR field zeroes in standby), so to see them diverge
+    diff a *running-but-unlocked* tune against a locked one."""
     va, vb = a.get(0x02), b.get(0x02)
     if va is None or vb is None:
         return
     bit = lambda v, m: 1 if v & m else 0
-    print("\n  PLL-lock bit hypothesis (reg 0x02):")
-    print(f"    script's current check  mask 0x40 (wire b6 = logical VCO_INDICATOR[1]): "
-          f"{bit(va, 0x40)} -> {bit(vb, 0x40)}")
-    print(f"    datasheet lock candidate mask 0x02 (wire b1 = logical VCO_INDICATOR[6]): "
+    print("\n  PLL-lock bit (reg 0x02), wire order:")
+    print(f"    lock = mask 0x02 (wire b1 = logical VCO_INDICATOR[6]): "
           f"{bit(va, 0x02)} -> {bit(vb, 0x02)}")
-    print("    -> the bit that transitions 0->1 on a known-good tune is the real lock bit.")
+    print(f"    (vhf_tune.py reads logical order, so it tests this as mask 0x40)")
+    print(f"    not-lock = mask 0x40 (wire b6 = logical VCO_INDICATOR[1]): "
+          f"{bit(va, 0x40)} -> {bit(vb, 0x40)}")
 
 
 def main():
