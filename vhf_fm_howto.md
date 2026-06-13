@@ -124,5 +124,54 @@ fine; or just stop the container.)
 | Stream name | `fm-pcm.local` |
 | Status group | `hf.local` (`control hf.local`) |
 
-See also: `vhf_host_bringup.md` (front-end bring-up details), `vhf_tune.py`
-(the portable tuner reference), `docker/ka9q-radio/README.md` (the container).
+See also: `tuner_r82xx_explained.md` (R828D chip internals),
+`rx888_vhf.py` (shared driver module), `vhf_tune.py` (CLI reference),
+`vhf_fm_radio.py` (interactive TUI), `docker/ka9q-radio/README.md` (the container).
+
+---
+
+## Appendix: driver-author wire-format reference
+
+Everything below is for writing a C/C++ host driver. The Python tools
+(`rx888_vhf.py`) already implement all of it.
+
+### EP0 commands used
+
+| Need | Command | Notes |
+|---|---|---|
+| HF/VHF switch | `GPIOFX3` (`0xAD`) | 32-bit LE word in data phase (`wLength=4`) |
+| Tuner reference clock | `I2CWFX3` (`0xAE`) to Si5351 (`0xC0`) | Program CLK2/PLL-B = 16 MHz |
+| R828D tune / gain / BW | `I2CWFX3` / `I2CRFX3` (`0xAF`) to `0x74` | `wValue`=addr, `wIndex`=reg, `wLength`=count |
+| Firmware liveness | `TESTFX3` (`0xAC`) | Returns `[hwconfig, fw_hi, fw_lo, rqt_count]` |
+
+### What to do (the four steps)
+
+1. **Select VHF** — `GPIOFX3` with `VHF_EN` (bit 15) set, `BIAS_HF` cleared.
+   It's a whole-word write, so start from your existing HF GPIO word and flip
+   the bits — everything else (ADC settings, etc.) carries over.
+
+2. **Tuner reference** — program Si5351 **CLK2 (CLKB)** to **16 MHz**, exactly
+   as you program CLK0 for the ADC. Disable it in HF mode to keep spurs out.
+
+3. **Tune the R828D** — init the register array (regs 0x05–0x1f), then
+   `set_mux` + `set_pll` with `LO = RF + IF`. Probe first: read reg 0x00,
+   bit-reverse the byte, expect `0x96`.
+
+4. **Stream and look** — the station lands at **IF = 4.57 MHz** in the ADC
+   spectrum. That's the proof.
+
+### Read-back checks (don't fly blind)
+
+- **Firmware alive:** `TESTFX3` → `hwconfig = 0x04`
+- **CLKB on:** Si5351 CLK2_CONTROL (reg 18), bit 7 clear = enabled
+- **Tuner reachable:** reg 0x00 bit-reversed == `0x96`
+- **PLL locked:** reg 0x02 bit-reversed, `& 0x40` = lock
+
+### Tuner code — use clean upstream
+
+The firmware's `tuner_r82xx.c` is an FX3-mangled fork (Cypress types,
+embedded sleeps) — use **upstream librtlsdr** (`steve-m/librtlsdr` →
+`src/tuner_r82xx.c`) as the porting base. Board specifics: R828D at `0x74`;
+reference is **Si5351 CLKB, not a fixed crystal** — set `cfg->xtal` to
+whatever you program CLK2 to; and the IF is **4.57 MHz** with the 8 MHz
+filter.

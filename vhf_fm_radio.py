@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""
+vhf_fm_radio.py — Interactive TUI for RX888 VHF FM-broadcast operation.
+
+A Textual terminal UI for live frequency hopping, gain control, and bandwidth
+cycling on the RX888 mk2 VHF front-end. Self-contained: does the full init
+on launch (enter VHF, CLKB on, R828D init, initial tune) and standby on quit.
+No prior vhf_tune.py run required.
+
+Requires: textual (pip install textual), pyusb (pip install pyusb)
+"""
+
+import argparse, sys
+try:
+    import usb.core
+except ImportError:
+    usb = None
+try:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Static, Rule
+    from textual.containers import Container
+except ImportError:
+    sys.exit("textual is required: pip install textual")
+
+from rx888_vhf import (
+    RX888, TuneError, firmware_load,
+    IF_CARRIER, R828D_REF_HZ, BW_CYCLE,
+)
+
+# ── Tuning limits ──────────────────────────────────────────────────────
+R828D_MIN_HZ = 24_000_000       # ~24 MHz
+R828D_MAX_HZ = 1_766_000_000    # ~1.766 GHz
+FM_LO_HZ     = 88_100_000
+FM_HI_HZ     = 107_900_000
+
+HELP_TEXT = """\
+[dim]\u2190 \u2192[/]  freq \u00b1100 kHz    [dim]PgUp/Dn[/]  \u00b11 MHz
+[dim]Home/End[/]  FM band edges (88.1 / 107.9 MHz)
+[dim]b / B[/]  cycle bandwidth (narrower / wider)
+[dim]l / L[/]  LNA \u00b11          [dim]m / M[/]  mixer \u00b11
+[dim]v / V[/]  VGA \u00b11          [dim]a / A[/]  LNA / mixer AGC
+[dim]q[/]  quit"""
+
+
+class VHFRadioApp(App):
+    CSS = """
+    Screen {
+        align: center middle;
+    }
+    #panel {
+        width: 54;
+        border: solid green;
+        padding: 1 2;
+    }
+    #title {
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    #status {
+        margin-top: 1;
+    }
+    #help {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, freq_hz, ref_hz, bias_tee, base, force):
+        super().__init__()
+        self._start_freq = freq_hz
+        self._ref_hz = ref_hz
+        self._bias_tee = bias_tee
+        self._arg_base = base
+        self._force = force
+        self._rx = None
+        self._base = None
+        self._hw_ready = False
+        self._freq_hz = freq_hz
+        self._bw_mhz = 8
+        self._if_hz = IF_CARRIER
+        self._lna = 0
+        self._mixer = 0
+        self._vga = 11
+        self._locked = False
+        self._lna_agc = False
+        self._mixer_agc = False
+        self._status_msg = ""
+
+    def compose(self) -> ComposeResult:
+        with Container(id="panel"):
+            yield Static("RX888 VHF FM Radio", id="title")
+            yield Static("", id="freq")
+            yield Static("", id="bw")
+            yield Static("", id="lna_bar")
+            yield Static("", id="mixer_bar")
+            yield Static("", id="vga_bar")
+            yield Static("", id="status")
+            yield Rule()
+            yield Static(HELP_TEXT, id="help")
+
+    def on_mount(self) -> None:
+        self._update_display()
+        self.run_worker(self._hw_init, thread=True)
+
+    def _hw_init(self) -> None:
+        try:
+            self._rx = RX888()
+            self._rx.check_alive()
+            if self._arg_base is not None:
+                self._base = self._arg_base
+            else:
+                base = self._rx.read_gpio_state()
+                if base is None:
+                    raise TuneError(
+                        "GETSTATS does not expose GPIO state; pass --base")
+                self._base = base
+            self._rx.enter_vhf(self._base, self._bias_tee)
+            self._rx.clkb_on(self._ref_hz)
+            if not self._rx.clkb_verify() and not self._force:
+                raise TuneError("CLKB reads back as OFF (use --force)")
+            idv = self._rx.r828d_probe()
+            if idv is None:
+                raise TuneError("R828D not reachable over I2C")
+            if idv != 0x96 and not self._force:
+                raise TuneError(f"R828D ID 0x{idv:02X} != 0x96 (use --force)")
+            self._rx.r828d_init()
+            self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+            gains = self._rx.get_gains()
+            self._lna = gains['lna']
+            self._mixer = gains['mixer']
+            self._vga = gains['vga']
+            agc = self._rx.get_agc()
+            self._lna_agc = agc['lna']
+            self._mixer_agc = agc['mixer']
+            self._hw_ready = True
+            self.call_from_thread(self._update_display)
+        except (TuneError, SystemExit) as e:
+            if self._rx and self._base is not None:
+                try:
+                    self._rx.standby(self._base)
+                except Exception:
+                    pass
+            self.call_from_thread(self._show_fatal, str(e))
+
+    def _show_fatal(self, msg: str) -> None:
+        self._status_msg = f"[red]FATAL: {msg}[/]"
+        self._update_display()
+
+    def _update_display(self) -> None:
+        lock_str = ("[green]● LOCKED[/]" if self._locked
+                    else "[red]○ unlocked[/]")
+        self.query_one("#freq", Static).update(
+            f"  Frequency   [bold]{self._freq_hz / 1e6:.3f}[/] MHz"
+            f"         {lock_str}")
+        bw_str = (f"{self._bw_mhz:g} MHz" if self._bw_mhz >= 1
+                  else f"{int(self._bw_mhz * 1000)} kHz")
+        self.query_one("#bw", Static).update(
+            f"  Bandwidth   {bw_str}"
+            f"    IF {self._if_hz / 1e6:.3f} MHz")
+
+        def bar(label, val, agc=False, max_val=15):
+            filled = "\u2588" * val + "\u2591" * (max_val - val)
+            agc_tag = "  [green]AGC[/]" if agc else ""
+            return f"  {label:6s} {filled} {val:2d} / {max_val}{agc_tag}"
+
+        self.query_one("#lna_bar", Static).update(
+            bar("LNA", self._lna, self._lna_agc))
+        self.query_one("#mixer_bar", Static).update(
+            bar("Mixer", self._mixer, self._mixer_agc))
+        self.query_one("#vga_bar", Static).update(bar("VGA", self._vga))
+
+        status = self.query_one("#status", Static)
+        if self._status_msg:
+            status.update(self._status_msg)
+        elif not self._hw_ready:
+            status.update("[dim]Initializing...[/]")
+        else:
+            status.update("")
+
+    # ── key handling ──────────────────────────────────────────────────────
+    def on_key(self, event) -> None:
+        char = event.character
+        key = event.key
+
+        # quit is always available
+        if char == "q":
+            self._cleanup_and_exit()
+            return
+
+        if not self._hw_ready:
+            return
+
+        if key == "left":
+            self._change_freq(-100_000)
+        elif key == "right":
+            self._change_freq(100_000)
+        elif key in ("pageup", "page_up"):
+            self._change_freq(1_000_000)
+        elif key in ("pagedown", "page_down"):
+            self._change_freq(-1_000_000)
+        elif key == "home":
+            self._set_freq(FM_LO_HZ)
+        elif key == "end":
+            self._set_freq(FM_HI_HZ)
+        elif char == "b":
+            self._cycle_bw(1)
+        elif char == "B":
+            self._cycle_bw(-1)
+        elif char == "a":
+            self._toggle_agc("lna")
+        elif char == "A":
+            self._toggle_agc("mixer")
+        elif char == "l":
+            self._adj_gain("lna", 1)
+        elif char == "L":
+            self._adj_gain("lna", -1)
+        elif char == "m":
+            self._adj_gain("mixer", 1)
+        elif char == "M":
+            self._adj_gain("mixer", -1)
+        elif char == "v":
+            self._adj_gain("vga", 1)
+        elif char == "V":
+            self._adj_gain("vga", -1)
+
+    def _change_freq(self, delta_hz: int) -> None:
+        self._set_freq(self._freq_hz + delta_hz)
+
+    def _set_freq(self, hz: int) -> None:
+        hz = max(R828D_MIN_HZ, min(R828D_MAX_HZ, hz))
+        if hz == self._freq_hz:
+            return
+        self._freq_hz = hz
+        self._status_msg = ""
+        self._locked = self._rx.r828d_set_freq(int(hz))
+        self._update_display()
+
+    def _adj_gain(self, stage: str, delta: int) -> None:
+        attr = f"_{stage}"
+        val = getattr(self, attr) + delta
+        if not 0 <= val <= 15:
+            return
+        setattr(self, attr, val)
+        getattr(self._rx, f"set_{stage}_gain")(val)
+        self._update_display()
+
+    def _cycle_bw(self, direction: int = 1) -> None:
+        idx = (BW_CYCLE.index(self._bw_mhz) + direction) % len(BW_CYCLE)
+        new_bw = BW_CYCLE[idx]
+        old_if = self._if_hz
+        new_if = self._rx.set_bandwidth(new_bw)
+        self._bw_mhz = new_bw
+        self._if_hz = new_if
+        if new_if != old_if:
+            self._status_msg = (
+                f"[yellow]IF shifted: ka9q channel "
+                f"{old_if // 1000}k \u2192 {new_if // 1000}k[/]")
+            self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        else:
+            self._status_msg = ""
+        self._update_display()
+
+    def _toggle_agc(self, stage: str) -> None:
+        attr = f"_{stage}_agc"
+        now = not getattr(self, attr)
+        setattr(self, attr, now)
+        getattr(self._rx, f"set_{stage}_agc")(now)
+        self._update_display()
+
+    def _cleanup_and_exit(self) -> None:
+        if self._rx and self._base is not None:
+            try:
+                self._rx.standby(self._base)
+            except Exception:
+                pass
+        self.exit()
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="RX888 VHF FM Radio — interactive TUI")
+    ap.add_argument("--freq", type=float, default=FM_LO_HZ,
+                    help=f"initial frequency in Hz (default {FM_LO_HZ/1e6:.1f} MHz)")
+    ap.add_argument("--ref", type=float, default=R828D_REF_HZ,
+                    help=f"R828D reference via Si5351 CLKB, Hz (default {R828D_REF_HZ})")
+    ap.add_argument("--bias-tee", action="store_true",
+                    help="enable VHF-port DC bias")
+    ap.add_argument("--base", type=lambda s: int(s, 0), default=None,
+                    help="HF GPIO control word (hex); default: read live from GETSTATS")
+    ap.add_argument("--force", action="store_true",
+                    help="proceed despite CLKB-off / ID-mismatch (debug)")
+    ap.add_argument("--load", metavar="IMG",
+                    help="load firmware if in bootloader (via fx3_cmd load IMG)")
+    ap.add_argument("--fx3-cmd", default="fx3_cmd",
+                    help="fx3_cmd binary for --load")
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    if usb is None:
+        sys.exit("pyusb is required: pip install pyusb")
+    if args.load:
+        firmware_load(args.load, args.fx3_cmd)
+    app = VHFRadioApp(
+        freq_hz=int(args.freq),
+        ref_hz=int(args.ref),
+        bias_tee=args.bias_tee,
+        base=args.base,
+        force=args.force,
+    )
+    app.run()
+
+
+if __name__ == "__main__":
+    main()

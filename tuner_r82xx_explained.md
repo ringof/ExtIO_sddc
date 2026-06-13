@@ -270,6 +270,24 @@ flowchart LR
 Each can run in auto (AGC) or manual mode; `set_all_gains` / `set_vga_gain`
 walk gain-index tables to register values.
 
+### Register map (bench-confirmed on RX888 mk2)
+
+| Stage | Reg | Gain bits | Range | AGC bit | Init default |
+|-------|-----|-----------|-------|---------|-------------|
+| LNA   | `0x05` | `[3:0]` | 0–15 | bit 4 (1 = auto) | gain = 0, AGC **off** |
+| Mixer | `0x07` | `[3:0]` | 0–15 | bit 4 (1 = auto) | gain = 0, AGC **on** |
+| IF VGA | `0x0C` | `[3:0]` | 0–15 | — | gain = 11 |
+
+> **Note:** the init array (`r82xx_init_array`, reg `0x07` = `0x70`) sets mixer
+> AGC **on** by default — the chip controls mixer gain itself until the host
+> explicitly clears bit 4. LNA AGC is off (reg `0x05` = `0x80`, bit 4 = 0).
+> VGA has no AGC bit; its gain is always manual.
+>
+> Other bits in these registers have unrelated roles: `0x05` bits `[6:5]`
+> select Air-In vs Cable1 (switched at 345 MHz by `set_freq64`), and `0x07`
+> bit 7 is the sideband select (§5). The gain and AGC bits do not collide
+> with those — masked writes (`_wr_mask`) keep them independent.
+
 ---
 
 ## 8. Boot / init
@@ -338,14 +356,49 @@ VHF near strong signals. (GPL-2.0, but fine host-side.)
 
 ---
 
+## 10. Standby — power-down sequence (`r82xx_standby`)
+
+`r82xx_standby` (librtlsdr) writes 11 registers to power down every major
+block, front-to-back. The order matters: the PLL / LO goes first (so the
+mixer stops producing IF), then the signal-path blocks shut down from
+antenna to output, then auxiliary circuits (ring oscillator, open drains).
+
+| Order | Reg | Value | What it powers down |
+|:-----:|-----|:-----:|---------------------|
+| 1 | `0x06` | `0xB1` | **PLL / LDO** — kills the local oscillator and internal power rails |
+| 2 | `0x05` | `0xA0` | **LNA** — bit 5 added to init `0x80` powers down the low-noise amp |
+| 3 | `0x07` | `0x3A` | **Mixer** — mixer power-down, gain zeroed |
+| 4 | `0x08` | `0x40` | **Image-reject gain** — I/Q amplitude trim amplifier off |
+| 5 | `0x09` | `0xC0` | **Image-reject phase** — I/Q phase trim amplifier off |
+| 6 | `0x0A` | `0x36` | **IF channel filter** — filter power-down |
+| 7 | `0x0C` | `0x35` | **IF VGA** — variable-gain amplifier stages off (upper bits cleared) |
+| 8 | `0x0F` | `0x68` | **Ring osc power** — same as init; ensures known state after IMR cal |
+| 9 | `0x11` | `0x03` | **Loop-through / ring power** — nearly all bits cleared |
+| 10 | `0x17` | `0xF4` | **Open-drain outputs** — tracking-filter outputs to safe / high-Z |
+| 11 | `0x19` | `0x0C` | **Ring osc clock** — bits 7,6,5 cleared, ring oscillator clock off |
+
+Bring-up is the reverse: `r82xx_init` blasts the init array (§8), which
+restores power to all blocks, then `set_bandwidth` and `set_freq` configure
+the signal path. Teardown order mirrors this — you wouldn't want the VGA
+amplifying noise from a mixer whose LO just went dark.
+
+> In `rx888_vhf.py` / `vhf_tune.py`, the `standby()` lifecycle method goes
+> further: after the R828D register sequence it also turns CLKB off (Si5351
+> CLK2 power-down) and restores the HF GPIO (clear `VHF_EN`, set `BIAS_HF`).
+> Each step is best-effort so a failure in one doesn't prevent the others.
+
+---
+
 ## Register cheat-sheet (the load-bearing ones)
 
 | Reg | Role | Set by |
 |-----|------|--------|
 | `0x00`–`0x04` | **Read-only status** — PLL lock (`data[2] & 0x40`), VCO fine-tune. Reads are bit-reversed from the datasheet's logical order (note below); reg `0x01` is datasheet-"reserved" but carries live status on the bench | read in `set_pll` |
-| `0x05` | LNA / loop-through; R828D **Air-In vs Cable1** input (`0x60`) | `init`, `set_freq64` |
-| `0x07` | **Sideband** select (bit 7) | `set_sideband` |
-| `0x0a`/`0x0b` | **IF channel-filter** bandwidth / corner | `set_bandwidth` |
+| `0x05` | **LNA**: gain `[3:0]` (0–15), AGC bit 4, Air-In/Cable1 `[6:5]` | `init`, `set_freq64`, `set_all_gains`, `standby` |
+| `0x06` | PLL / LDO power control | `init`, `standby` |
+| `0x07` | **Mixer**: gain `[3:0]` (0–15), AGC bit 4, sideband bit 7 | `init`, `set_sideband`, `set_all_gains`, `standby` |
+| `0x0a`/`0x0b` | **IF channel-filter** bandwidth / corner | `set_bandwidth`, `standby` |
+| `0x0c` | **IF VGA** gain `[3:0]` (0–15); upper bits power stages | `init`, `set_vga_gain`, `standby` |
 | `0x0e` | mixer AGC threshold | `set_bandwidth` |
 | `0x1e` | IF filter extension "on weak signal" (`0x60`) | `set_bandwidth` |
 | `0x10` | Reference divider, crystal cap, PLL divider (`div_num`) | `set_mux`, `set_pll` |
