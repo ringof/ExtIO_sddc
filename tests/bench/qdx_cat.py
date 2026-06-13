@@ -10,8 +10,8 @@ Protocol notes (manual_operation_1_08.pdf pp 35-40):
   - USB CDC — baud rate is irrelevant but pyserial requires one.
 """
 
-import re
 import sys
+import time
 import serial
 
 
@@ -57,6 +57,21 @@ class QdxCat:
             raise QdxCatError(f"QDX returned ?; for command {cmd!r}")
         return resp
 
+    def send_set(self, cmd: str) -> None:
+        """Send a set-only *cmd* that produces no response from the QDX.
+
+        Kenwood CAT set commands (FA<freq>;, TX;, RX;) are fire-and-forget.
+        We write the command and give the QDX a brief settling time.
+        """
+        if not cmd.endswith(";"):
+            cmd += ";"
+        tx = cmd.encode("ascii")
+        self._ser.reset_input_buffer()
+        self._ser.write(tx)
+        self._ser.flush()
+        self._log(f"  TX {tx!r}  (set, no response expected)")
+        time.sleep(0.05)  # let firmware process before next query
+
     def _read_until_semi(self) -> bytes:
         """Read bytes until ``;`` or timeout."""
         buf = bytearray()
@@ -91,7 +106,7 @@ class QdxCat:
     def set_freq(self, hz: int) -> int:
         """Set VFO-A to *hz* and return the read-back frequency."""
         padded = f"{hz:011d}"
-        self.send(f"FA{padded};")
+        self.send_set(f"FA{padded};")
         return self.get_freq()
 
     def get_tx_state(self) -> bool:
@@ -101,11 +116,11 @@ class QdxCat:
 
     def tx_on(self) -> None:
         """Key PTT (TX;)."""
-        self.send("TX;")
+        self.send_set("TX;")
 
     def tx_off(self) -> None:
         """Unkey PTT (RX;)."""
-        self.send("RX;")
+        self.send_set("RX;")
 
     def get_info(self) -> dict:
         """Parse the IF; response into a dict.
