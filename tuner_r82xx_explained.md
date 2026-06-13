@@ -1,9 +1,10 @@
 # How the R820T2 / R828D Tuner Works
 
 A walk-through of the Rafael Micro **R820T2 / R828D** silicon tuner as actually
-driven by `SDDC_FX3/driver/tuner_r82xx.c` (recoverable from commit `0ffa512`).
-Every register and constant below is cited to a line in that file so it can be
-checked against the source.
+driven by the old `SDDC_FX3/driver/tuner_r82xx.c` driver (first added in
+commit `74253a4`, with the same LO logic still present in commit `0ffa512`).
+The line numbers below refer to that historical driver, not to files currently
+checked out in this repo.
 
 The chip is a **superheterodyne front-end on a die**: it slides any RF signal
 down to one fixed intermediate frequency (IF) that the ADC then samples.
@@ -36,8 +37,9 @@ The two highlighted blocks are **off the tuner die**: the reference clock comes
 from the Si5351 (CLKB), and the IF lands in the RX888's ADC. Everything between
 is on-chip and set over I2C.
 
-Key fact: the mixer produces `|RF − LO| = IF`, so the ADC always sees a **fixed
-IF** regardless of what you tune. The IF value is whatever the channel filter
+Key fact: the mixer output contains the difference product, so the wanted RF
+lands at the IF when either `LO = RF + IF` (default/high-side injection) or
+`LO = RF - IF` (low-side injection). The IF value is whatever the channel filter
 selects (§5): the chip default is `R82XX_IF_FREQ = 3.57 MHz`, but **this
 firmware's 8 MHz filter setting puts it at 4.57 MHz**.
 
@@ -54,23 +56,32 @@ flowchart LR
         LOc["LO<br/>103.57 MHz"]
         IMG["IMAGE<br/>107.14 MHz<br/>(LO + IF)"]
     end
-    RF -->|"mixer: RF − LO"| IFc
+    RF -->|"mixer: LO − RF"| IFc
     LOc -.->|"sets the offset"| RF
     IMG -.->|"rejected by<br/>tracking filter"| TFnote["§4"]
 ```
 
-You never tell the chip the RF directly — you place the **LO**, and the mixer
-does the subtraction. From `r82xx_set_freq64` (line 1992):
+The caller passes an RF frequency into `r82xx_set_freq64`, but the tuner PLL is
+programmed with a computed **LO**. From `r82xx_set_freq64` (line 1992):
 
 ```c
-lo_freq = freq + priv->int_freq + priv->if_band_center_freq;  // or − for other sideband
+if (priv->sideband ^ harm_sideband_xor[priv->tuner_harmonic])
+    lo_freq = freq - priv->int_freq + priv->if_band_center_freq;
+else  // sideband flips on odd harmonics
+    lo_freq = freq + priv->int_freq + priv->if_band_center_freq;
 ```
 
 - `priv->int_freq` = the IF (3.57 MHz default; **4.57 MHz** with this
   firmware's 8 MHz filter — §5). The worked numbers above use the 3.57 default.
 - `priv->sideband` chooses high-side vs low-side LO injection (flips the spectrum).
-- The **image** at `LO + IF` would also mix down to the IF — that is what the
-  tracking filter (§4) exists to suppress.
+  In the default path (`sideband == 0`, non-harmonic), the LO is **above** RF.
+  In the other path, the LO is **below** RF.
+- `priv->if_band_center_freq` is an additional center-offset term and is added
+  in both branches; it is not independently signed by the sideband setting.
+- The **image** is on the opposite side of the LO from the wanted signal. For
+  default high-side injection (`LO = RF + IF`), the image is at `LO + IF`; for
+  low-side injection (`LO = RF - IF`), the image is at `LO - IF`. The tracking
+  filter (§4) exists to suppress that opposite-side response.
 
 ---
 
@@ -80,7 +91,7 @@ What happens on one `r82xx_set_freq64()` call (line 1992):
 
 ```mermaid
 flowchart TD
-    A["Desired RF freq"] --> B["Compute LO<br/>LO = RF ± IF ± if_center<br/>(line 2013-2016)"]
+    A["Desired RF freq"] --> B["Compute LO<br/>default: RF + IF + if_center<br/>sideband: RF - IF + if_center<br/>(line 2012-2015)"]
     B --> C["r82xx_set_mux(LO)<br/>tracking filter + RF mux<br/>(line 730)"]
     C --> D["r82xx_set_pll(LO)<br/>program fractional-N PLL<br/>(line 931)"]
     D --> E{"PLL locked?<br/>reg 0x00, data[2] & 0x40"}
@@ -99,7 +110,8 @@ of the mixer (`lo_freqHarm = lo_freq / harm`, line 2022).
 
 ## 4. The tracking filter — why `freq_ranges[]` exists
 
-A mixer also responds to the **image** (`LO + IF`) and to strong out-of-band
+A mixer also responds to the opposite-side **image** (`LO + IF` for the default
+high-side case, `LO - IF` for low-side) and to strong out-of-band
 signals, so the chip carries an on-chip bandpass that must **move with the
 tuning**. `r82xx_set_mux` (line 730) looks the LO up in `freq_ranges[]`
 (line 370) and programs the band:
