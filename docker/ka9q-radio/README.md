@@ -180,7 +180,7 @@ Tune the R828D front-end separately with the host-side tuner script,
 then listen:
 
 ```
-./vhf_fm_tune.sh 100300000            # tune R828D to 100.3 MHz FM
+./vhf/vhf_fm_tune.sh 100300000        # tune R828D to 100.3 MHz FM
 ./ka9q.sh monitor fm-pcm.local        # listen to demodulated audio
 ```
 

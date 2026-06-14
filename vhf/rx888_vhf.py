@@ -77,9 +77,11 @@ R828D_INIT = [
     0xEB,  # 0x0C       IF VGA on, gain by code, VGA_CODE=0x0B (~26.5 dB)
     0x53,  # 0x0D       LNA AGC detector thresholds (hi 5, lo 3)
     0x75,  # 0x0E       mixer AGC detector thresholds (hi 7, lo 5)
-    0x68,  # 0x0F       ring/cali clk off, AGC clk on, FLT_EXT_WIDEST off
+    #0x68,  # 0x0F       librtlsdr: bit6=1, CLK_OUT_ENB=0
+    0x38,  # 0x0F       ka9q: bit6=0, CLK_OUT_ENB=1
     0x6C,  # 0x10       [tune] PLL divider/refdiv/xtal-cap (set_mux+set_pll)
-    0xBB,  # 0x11       PLL analog LDO 2.0 V, charge-pump auto
+    #0xBB,  # 0x11       librtlsdr: CP_CUR=7 (auto)
+    0xAB,  # 0x11       ka9q: CP_CUR=5 (fixed)
     0x80,  # 0x12       [tune] VCO current/dither (set_pll)
     0x31,  # 0x13       VCO auto mode; low 6 bits = version tag (ignored in auto)
     0x0F,  # 0x14       [tune] PLL nint (set_pll)
@@ -91,7 +93,8 @@ R828D_INIT = [
     0x60,  # 0x1A       [tune] RF mux/autotune (set_mux+set_pll)
     0x00,  # 0x1B       [tune] tracking-filter band tf_c (set_mux)
     0x24,  # 0x1C       mixer power-detector TOP
-    0xDD,  # 0x1D       LNA power-detector TOP, PDET2 gain
+    #0xDD,  # 0x1D       librtlsdr: PDET1_GAIN=3
+    0xED,  # 0x1D       ka9q: PDET1_GAIN=5 (more aggressive LNA AGC)
     0x0E,  # 0x1E       [bw] filter-extension bit (set_bandwidth)
     0x40,  # 0x1F       loop-through-att / ring-osc power (both unused — idle)
 ]
@@ -380,14 +383,18 @@ class RX888:
         # Power-down sequence: detectors/LNA, mixer, buffers, IF & channel
         # filters, VGA, then the PLL LDOs and RF filter last.
         for reg, val in (
-            (0x06, 0xB1),  # power-detector 1 off, LNA power -> min
+            #(0x06, 0xB1),  # power-detector 1 off, LNA power -> min (R6_FIXED set)
+            (0x06, 0xA1),  # ka9q: same but R6_FIXED omitted
             (0x05, 0xA0),  # LNA power DOWN
             (0x07, 0x3A),  # mixer power DOWN (PWD_MIX=0)
             (0x08, 0x40),  # mixer buffer / image-gain amp OFF
-            (0x09, 0xC0),  # IF filter / image-phase amp OFF
-            (0x0A, 0x36),  # channel filter power DOWN (PWD_FILT=0)
-            (0x0C, 0x35),  # IF VGA OFF (PWD_VGA=0)
-            (0x0F, 0x68),  # clk state (same as init)
+            (0x09, 0xC0),  # IF filter / image-phase amp OFF (NOT ka9q 0x41 — that's the 1<7 bug)
+            #(0x0A, 0x36),  # channel filter power DOWN (R10_FIXED set)
+            (0x0A, 0x26),  # ka9q: R10_FIXED omitted
+            #(0x0C, 0x35),  # IF VGA OFF (R12_FIXED set)
+            (0x0C, 0x15),  # ka9q: R12_FIXED omitted
+            #(0x0F, 0x68),  # clk state (librtlsdr: bit6=1, CLK_OUT_ENB=0, RING_CLK=1)
+            (0x0F, 0x30),  # ka9q: CLK_OUT_ENB=1, bit6=0, RING_CLK=0
             (0x11, 0x03),  # PLL analog LDO OFF
             (0x17, 0xF4),  # PLL digital LDO OFF, open-drains safe
             (0x19, 0x0C),  # RF filter OFF, ring-osc clk off
