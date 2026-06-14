@@ -10,17 +10,41 @@ No prior vhf_tune.py run required.
 Requires: textual (pip install textual), pyusb (pip install pyusb)
 """
 
-import argparse, sys
+import argparse, io, queue, sys
 try:
     import usb.core
 except ImportError:
     usb = None
 try:
     from textual.app import App, ComposeResult
-    from textual.widgets import Static, Rule
-    from textual.containers import Container
+    from textual.widgets import Static, Rule, RichLog
+    from textual.containers import Container, Vertical
 except ImportError:
     sys.exit("textual is required: pip install textual")
+
+
+class _StdoutTee(io.TextIOBase):
+    """Intercept stdout into a thread-safe queue for the TUI log panel."""
+    def __init__(self, original):
+        self._orig = original
+        self._q = queue.Queue()
+
+    def write(self, s):
+        if s and s.strip():
+            self._q.put(s)
+        return len(s) if s else 0
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        lines = []
+        while not self._q.empty():
+            try:
+                lines.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        return lines
 
 from rx888_vhf import (
     RX888, TuneError, firmware_load,
@@ -51,8 +75,12 @@ class VHFRadioApp(App):
     Screen {
         align: center middle;
     }
+    #outer {
+        width: 62;
+        height: auto;
+        max-height: 100%;
+    }
     #panel {
-        width: 58;
         border: solid green;
         padding: 1 2;
     }
@@ -67,6 +95,11 @@ class VHFRadioApp(App):
     }
     #help {
         color: $text-muted;
+    }
+    #log {
+        height: 12;
+        border: solid $accent-darken-2;
+        margin-top: 1;
     }
     """
 
@@ -97,22 +130,34 @@ class VHFRadioApp(App):
         self._status_msg = ""
 
     def compose(self) -> ComposeResult:
-        with Container(id="panel"):
-            yield Static("RX888 VHF FM Radio", id="title")
-            yield Static("", id="freq")
-            yield Static("", id="bw")
-            yield Static("", id="lna_bar")
-            yield Static("", id="mixer_bar")
-            yield Static("", id="vga_bar")
-            yield Static("", id="chan_filt")
-            yield Static("", id="filt_ext")
-            yield Static("", id="status")
-            yield Rule()
-            yield Static(HELP_TEXT, id="help")
+        with Vertical(id="outer"):
+            with Container(id="panel"):
+                yield Static("RX888 VHF FM Radio", id="title")
+                yield Static("", id="freq")
+                yield Static("", id="bw")
+                yield Static("", id="lna_bar")
+                yield Static("", id="mixer_bar")
+                yield Static("", id="vga_bar")
+                yield Static("", id="chan_filt")
+                yield Static("", id="filt_ext")
+                yield Static("", id="status")
+                yield Rule()
+                yield Static(HELP_TEXT, id="help")
+            yield RichLog(id="log", max_lines=200, markup=True)
 
     def on_mount(self) -> None:
+        self._tee = _StdoutTee(sys.stdout)
+        sys.stdout = self._tee
+        self.set_interval(0.1, self._drain_log)
         self._update_display()
         self.run_worker(self._hw_init, thread=True)
+
+    def _drain_log(self) -> None:
+        if not hasattr(self, '_tee'):
+            return
+        log = self.query_one("#log", RichLog)
+        for line in self._tee.drain():
+            log.write(line.rstrip())
 
     def _hw_init(self) -> None:
         try:
@@ -383,6 +428,8 @@ class VHFRadioApp(App):
         self._update_display()
 
     def _cleanup_and_exit(self) -> None:
+        if hasattr(self, '_tee'):
+            sys.stdout = self._tee._orig
         if self._rx and self._base is not None:
             try:
                 self._rx.standby(self._base)
