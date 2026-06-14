@@ -237,6 +237,7 @@ class RX888:
         code = 0
         for _ in range(2):
             self._wr_mask(0x0F, 0x04, 0x04)       # cali clk on  (R15 bit 2)
+            self._set_mux(56_000_000)              # sets reg 0x10 xtal/ref bits
             if not self._set_pll(56_000_000):      # park at 56 MHz cal freq
                 return None
             self._wr_mask(0x0B, 0x10, 0x10)        # start trigger (R11 bit 4)
