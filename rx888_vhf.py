@@ -346,6 +346,39 @@ class RX888:
             'mixer': bool(self.regs.get(0x07, 0) & 0x10),
         }
 
+    # ── Channel filter power-down (R10 / 0x0A bit 7) ────────────────────
+    def set_chan_filter(self, on):
+        """Set channel filter power. on=True: filter active (PWD_FILT=1),
+        on=False: filter powered down / bypassed (PWD_FILT=0).
+        Note: powering down dumps raw mixer IF at the ADC — you lose
+        selectivity and anti-alias without gaining clean bandwidth."""
+        self._wr_mask(0x0A, 0x80 if on else 0x00, 0x80)
+
+    def get_chan_filter(self):
+        """Return True if channel filter is powered on (PWD_FILT=1)."""
+        return bool(self.regs.get(0x0A, 0xDB) & 0x80)
+
+    # ── Filter extension bits ─────────────────────────────────────────────
+    def set_filt_ext(self, on):
+        """FILTER_EXT — R30/0x1E bit 6. Extends the channel filter skirt.
+        Note: set_bandwidth() already writes this bit (1 for 8/7 MHz,
+        0 for narrower), so toggling it independently overrides the preset
+        until the next bandwidth change."""
+        self._wr_mask(0x1E, 0x40 if on else 0x00, 0x40)
+
+    def get_filt_ext(self):
+        """Return True if FILTER_EXT (0x1E bit 6) is set."""
+        return bool(self.regs.get(0x1E, 0x0E) & 0x40)
+
+    def set_filt_ext_widest(self, on):
+        """FLT_EXT_WIDEST — R15/0x0F bit 7. Widens the filter skirt further.
+        Never touched by the normal driver — init 0x0F=0x68 leaves it 0."""
+        self._wr_mask(0x0F, 0x80 if on else 0x00, 0x80)
+
+    def get_filt_ext_widest(self):
+        """Return True if FLT_EXT_WIDEST (0x0F bit 7) is set."""
+        return bool(self.regs.get(0x0F, 0x68) & 0x80)
+
     # ── Bandwidth control ─────────────────────────────────────────────────
     def set_bandwidth(self, bw_mhz):
         """Program the R828D channel filter. Returns the new IF center (Hz).

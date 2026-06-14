@@ -39,6 +39,10 @@ HELP_TEXT = """\
 [dim]b / B[/]  cycle bandwidth (narrower / wider)
 [dim]l / L[/]  LNA \u00b11          [dim]m / M[/]  mixer \u00b11
 [dim]v / V[/]  VGA \u00b11          [dim]a / A[/]  LNA / mixer AGC
+[dim]f[/]  toggle channel filter (PWD_FILT)
+[dim]e[/]  toggle FILTER_EXT   [dim]w[/]  toggle FLT_EXT_WIDEST
+[dim]i / I[/]  IF offset \u00b1100 kHz (probe filter edges)
+[dim]0[/]  reset IF offset     [dim]r[/]  toggle ref 16/32 MHz
 [dim]q[/]  quit"""
 
 
@@ -48,7 +52,7 @@ class VHFRadioApp(App):
         align: center middle;
     }
     #panel {
-        width: 54;
+        width: 58;
         border: solid green;
         padding: 1 2;
     }
@@ -85,6 +89,10 @@ class VHFRadioApp(App):
         self._locked = False
         self._lna_agc = False
         self._mixer_agc = False
+        self._chan_filt = True       # PWD_FILT=1 (init 0x0A=0xDB, bit7=1)
+        self._filt_ext = False      # FILTER_EXT (0x1E[6]); set by BW preset
+        self._filt_ext_w = False    # FLT_EXT_WIDEST (0x0F[7]); never touched
+        self._if_offset = 0         # IF probe offset from nominal (Hz)
         self._status_msg = ""
 
     def compose(self) -> ComposeResult:
@@ -95,6 +103,8 @@ class VHFRadioApp(App):
             yield Static("", id="lna_bar")
             yield Static("", id="mixer_bar")
             yield Static("", id="vga_bar")
+            yield Static("", id="chan_filt")
+            yield Static("", id="filt_ext")
             yield Static("", id="status")
             yield Rule()
             yield Static(HELP_TEXT, id="help")
@@ -133,6 +143,9 @@ class VHFRadioApp(App):
             agc = self._rx.get_agc()
             self._lna_agc = agc['lna']
             self._mixer_agc = agc['mixer']
+            self._chan_filt = self._rx.get_chan_filter()
+            self._filt_ext = self._rx.get_filt_ext()
+            self._filt_ext_w = self._rx.get_filt_ext_widest()
             self._hw_ready = True
             self.call_from_thread(self._update_display)
         except (TuneError, SystemExit) as e:
@@ -155,9 +168,18 @@ class VHFRadioApp(App):
             f"         {lock_str}")
         bw_str = (f"{self._bw_mhz:g} MHz" if self._bw_mhz >= 1
                   else f"{int(self._bw_mhz * 1000)} kHz")
+        actual_if = self._if_hz + self._if_offset
+        if self._if_offset:
+            sign = "+" if self._if_offset > 0 else ""
+            off_str = f"  [cyan]{sign}{self._if_offset // 1000}k[/]"
+        else:
+            off_str = ""
+        ref_mhz = self._ref_hz // 1_000_000
+        ref_str = (f"  [cyan]ref {ref_mhz}M[/]"
+                   if ref_mhz != 16 else f"  ref {ref_mhz}M")
         self.query_one("#bw", Static).update(
             f"  Bandwidth   {bw_str}"
-            f"    IF {self._if_hz / 1e6:.3f} MHz")
+            f"    IF {actual_if / 1e6:.3f} MHz{off_str}{ref_str}")
 
         def bar(label, val, agc=False, max_val=15):
             filled = "\u2588" * val + "\u2591" * (max_val - val)
@@ -169,6 +191,21 @@ class VHFRadioApp(App):
         self.query_one("#mixer_bar", Static).update(
             bar("Mixer", self._mixer, self._mixer_agc))
         self.query_one("#vga_bar", Static).update(bar("VGA", self._vga))
+
+        filt_str = ("[green]ON[/]" if self._chan_filt
+                    else "[yellow]OFF (raw mixer IF)[/]")
+        ext_tags = []
+        if self._filt_ext:
+            ext_tags.append("EXT")
+        if self._filt_ext_w:
+            ext_tags.append("WIDEST")
+        ext_str = ("  [cyan]+" + "+".join(ext_tags) + "[/]" if ext_tags
+                   else "")
+        self.query_one("#chan_filt", Static).update(
+            f"  Filter {filt_str}{ext_str}")
+        self.query_one("#filt_ext", Static).update(
+            f"  FILTER_EXT {'[cyan]ON[/]' if self._filt_ext else '[dim]off[/]'}"
+            f"    FLT_EXT_WIDEST {'[cyan]ON[/]' if self._filt_ext_w else '[dim]off[/]'}")
 
         status = self.query_one("#status", Static)
         if self._status_msg:
@@ -223,6 +260,20 @@ class VHFRadioApp(App):
             self._adj_gain("vga", 1)
         elif char == "V":
             self._adj_gain("vga", -1)
+        elif char == "f":
+            self._toggle_chan_filter()
+        elif char == "e":
+            self._toggle_filt_ext()
+        elif char == "w":
+            self._toggle_filt_ext_widest()
+        elif char == "i":
+            self._nudge_if(100_000)
+        elif char == "I":
+            self._nudge_if(-100_000)
+        elif char == "0":
+            self._reset_if_offset()
+        elif char == "r":
+            self._toggle_ref()
 
     def _change_freq(self, delta_hz: int) -> None:
         self._set_freq(self._freq_hz + delta_hz)
@@ -252,6 +303,9 @@ class VHFRadioApp(App):
         new_if = self._rx.set_bandwidth(new_bw)
         self._bw_mhz = new_bw
         self._if_hz = new_if
+        self._if_offset = 0         # new filter shape; reset probe offset
+        # set_bandwidth overwrites 0x1E[6]; resync from shadow
+        self._filt_ext = self._rx.get_filt_ext()
         if new_if != old_if:
             self._status_msg = (
                 f"[yellow]IF shifted: ka9q channel "
@@ -259,6 +313,57 @@ class VHFRadioApp(App):
             self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         else:
             self._status_msg = ""
+        self._update_display()
+
+    def _nudge_if(self, delta_hz: int) -> None:
+        """Shift IF offset (filter stays fixed, LO moves). Probes passband edges."""
+        self._if_offset += delta_hz
+        self._rx.if_hz = self._if_hz + self._if_offset
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        self._status_msg = ""
+        self._update_display()
+
+    def _reset_if_offset(self) -> None:
+        if self._if_offset == 0:
+            return
+        self._if_offset = 0
+        self._rx.if_hz = self._if_hz
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        self._status_msg = ""
+        self._update_display()
+
+    def _toggle_ref(self) -> None:
+        """Toggle CLKB reference between 16 and 32 MHz, reprogram Si5351, retune."""
+        if self._ref_hz == 16_000_000:
+            self._ref_hz = 32_000_000
+        else:
+            self._ref_hz = 16_000_000
+        self._rx.clkb_on(self._ref_hz)
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz[/]"
+        self._update_display()
+
+    def _toggle_chan_filter(self) -> None:
+        self._chan_filt = not self._chan_filt
+        self._rx.set_chan_filter(self._chan_filt)
+        self._status_msg = (
+            "" if self._chan_filt
+            else "[yellow]PWD_FILT=0: filter bypassed (raw mixer IF)[/]")
+        self._update_display()
+
+    def _toggle_filt_ext(self) -> None:
+        self._filt_ext = not self._filt_ext
+        self._rx.set_filt_ext(self._filt_ext)
+        self._status_msg = (
+            "[cyan]FILTER_EXT on (BW change will override)[/]"
+            if self._filt_ext else "")
+        self._update_display()
+
+    def _toggle_filt_ext_widest(self) -> None:
+        self._filt_ext_w = not self._filt_ext_w
+        self._rx.set_filt_ext_widest(self._filt_ext_w)
+        self._status_msg = (
+            "[cyan]FLT_EXT_WIDEST on[/]" if self._filt_ext_w else "")
         self._update_display()
 
     def _toggle_agc(self, stage: str) -> None:
