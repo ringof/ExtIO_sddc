@@ -228,17 +228,22 @@ class RX888:
         # AFTER the bandwidth preset so the cal code isn't clobbered
         self.calibrate_filter()
 
-    def calibrate_filter(self):
+    def calibrate_filter(self, park_lo=100_100_000):
         """Port of r82xx_set_tv_standard's IF-filter cal (tuner_r82xx.c:~1300).
         Trims FILT_CODE (0x0A[3:0]) against a reference-derived cal clock, so
-        the filter corner tracks CLKB.  Parks the PLL at 56 MHz — caller must
+        the filter corner tracks CLKB.  Parks the PLL at park_lo — caller must
         retune after.  Returns fil_cal_code (0..15), or None if cal PLL won't
-        lock."""
+        lock.
+
+        Default 100.1 MHz avoids the two traps that killed 56 MHz:
+        - VCO floor (56×32=1792 MHz, barely above 1770 floor)
+        - Integer-N (sdm=0 at both 16/32 MHz ref → dither off)
+        Callers with a known-good LO can pass it directly."""
         code = 0
         for _ in range(2):
             self._wr_mask(0x0F, 0x04, 0x04)       # cali clk on  (R15 bit 2)
-            self._set_mux(56_000_000)              # sets reg 0x10 xtal/ref bits
-            if not self._set_pll(56_000_000):      # park at 56 MHz cal freq
+            self._set_mux(int(park_lo))            # sets reg 0x10 xtal/ref bits
+            if not self._set_pll(int(park_lo)):    # park PLL for cal clock
                 return None
             self._wr_mask(0x0B, 0x10, 0x10)        # start trigger (R11 bit 4)
             self._wr_mask(0x0B, 0x00, 0x10)        # stop trigger

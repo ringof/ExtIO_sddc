@@ -182,7 +182,7 @@ class VHFRadioApp(App):
                 raise TuneError("R828D not reachable over I2C")
             if idv != 0x96 and not self._force:
                 raise TuneError(f"R828D ID 0x{idv:02X} != 0x96 (use --force)")
-            self._rx.r828d_init()        # includes calibrate_filter(); PLL parked at 56 MHz
+            self._rx.r828d_init()        # includes calibrate_filter(); PLL parked at default
             self._cal_code = self._rx.regs.get(0x0A, 0) & 0x0F
             self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
             gains = self._rx.get_gains()
@@ -358,7 +358,7 @@ class VHFRadioApp(App):
         self._if_offset = 0         # new filter shape; reset probe offset
         # set_bandwidth overwrites 0x1E[6] and FILT_CODE; resync + recal
         self._filt_ext = self._rx.get_filt_ext()
-        self._cal_code = self._rx.calibrate_filter()
+        self._cal_code = self._rx.calibrate_filter(self._freq_hz + self._if_hz)
         if new_if != old_if:
             self._status_msg = (
                 f"[yellow]IF shifted: ka9q channel "
@@ -393,7 +393,7 @@ class VHFRadioApp(App):
         else:
             self._ref_hz = 16_000_000
         self._rx.clkb_on(self._ref_hz)
-        self._cal_code = self._rx.calibrate_filter()  # recal at new reference
+        self._cal_code = self._rx.calibrate_filter(self._freq_hz + self._if_hz)
         self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         cal_str = f" cal={self._cal_code}" if self._cal_code is not None else " cal=FAIL"
         self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz{cal_str}[/]"
