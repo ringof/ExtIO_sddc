@@ -71,12 +71,14 @@ HELP_TEXT = """\
 
 
 class VHFRadioApp(App):
+    ALLOW_SELECT = True
+
     CSS = """
     Screen {
         align: center middle;
     }
     #outer {
-        width: 62;
+        width: 90;
         height: auto;
         max-height: 100%;
     }
