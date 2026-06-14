@@ -93,6 +93,7 @@ class VHFRadioApp(App):
         self._filt_ext = False      # FILTER_EXT (0x1E[6]); set by BW preset
         self._filt_ext_w = False    # FLT_EXT_WIDEST (0x0F[7]); never touched
         self._if_offset = 0         # IF probe offset from nominal (Hz)
+        self._cal_code = None       # FILT_CODE from calibrate_filter()
         self._status_msg = ""
 
     def compose(self) -> ComposeResult:
@@ -134,7 +135,8 @@ class VHFRadioApp(App):
                 raise TuneError("R828D not reachable over I2C")
             if idv != 0x96 and not self._force:
                 raise TuneError(f"R828D ID 0x{idv:02X} != 0x96 (use --force)")
-            self._rx.r828d_init()
+            self._rx.r828d_init()        # includes calibrate_filter(); PLL parked at 56 MHz
+            self._cal_code = self._rx.regs.get(0x0A, 0) & 0x0F
             self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
             gains = self._rx.get_gains()
             self._lna = gains['lna']
@@ -203,9 +205,12 @@ class VHFRadioApp(App):
                    else "")
         self.query_one("#chan_filt", Static).update(
             f"  Filter {filt_str}{ext_str}")
+        cal_str = (f"[dim]cal={self._cal_code}[/]"
+                   if self._cal_code is not None else "[dim]cal=?[/]")
         self.query_one("#filt_ext", Static).update(
             f"  FILTER_EXT {'[cyan]ON[/]' if self._filt_ext else '[dim]off[/]'}"
-            f"    FLT_EXT_WIDEST {'[cyan]ON[/]' if self._filt_ext_w else '[dim]off[/]'}")
+            f"    FLT_EXT_WIDEST {'[cyan]ON[/]' if self._filt_ext_w else '[dim]off[/]'}"
+            f"    {cal_str}")
 
         status = self.query_one("#status", Static)
         if self._status_msg:
@@ -304,15 +309,16 @@ class VHFRadioApp(App):
         self._bw_mhz = new_bw
         self._if_hz = new_if
         self._if_offset = 0         # new filter shape; reset probe offset
-        # set_bandwidth overwrites 0x1E[6]; resync from shadow
+        # set_bandwidth overwrites 0x1E[6] and FILT_CODE; resync + recal
         self._filt_ext = self._rx.get_filt_ext()
+        self._cal_code = self._rx.calibrate_filter()
         if new_if != old_if:
             self._status_msg = (
                 f"[yellow]IF shifted: ka9q channel "
                 f"{old_if // 1000}k \u2192 {new_if // 1000}k[/]")
-            self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         else:
             self._status_msg = ""
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         self._update_display()
 
     def _nudge_if(self, delta_hz: int) -> None:
@@ -333,14 +339,17 @@ class VHFRadioApp(App):
         self._update_display()
 
     def _toggle_ref(self) -> None:
-        """Toggle CLKB reference between 16 and 32 MHz, reprogram Si5351, retune."""
+        """Toggle CLKB reference between 16 and 32 MHz, reprogram Si5351,
+        recalibrate filter against new reference, retune."""
         if self._ref_hz == 16_000_000:
             self._ref_hz = 32_000_000
         else:
             self._ref_hz = 16_000_000
         self._rx.clkb_on(self._ref_hz)
+        self._cal_code = self._rx.calibrate_filter()  # recal at new reference
         self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
-        self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz[/]"
+        cal_str = f" cal={self._cal_code}" if self._cal_code is not None else " cal=FAIL"
+        self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz{cal_str}[/]"
         self._update_display()
 
     def _toggle_chan_filter(self) -> None:

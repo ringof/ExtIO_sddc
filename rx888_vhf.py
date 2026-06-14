@@ -224,6 +224,32 @@ class RX888:
         self._wr_mask(0x0A, 0x10, 0x0F)
         self._wr_mask(0x0B, 0x0B, 0xEF)
         self._wr_mask(0x1E, 0x60, 0x40)
+        # calibrate filter against the current CLKB reference — must run
+        # AFTER the bandwidth preset so the cal code isn't clobbered
+        self.calibrate_filter()
+
+    def calibrate_filter(self):
+        """Port of r82xx_set_tv_standard's IF-filter cal (tuner_r82xx.c:~1300).
+        Trims FILT_CODE (0x0A[3:0]) against a reference-derived cal clock, so
+        the filter corner tracks CLKB.  Parks the PLL at 56 MHz — caller must
+        retune after.  Returns fil_cal_code (0..15), or None if cal PLL won't
+        lock."""
+        code = 0
+        for _ in range(2):
+            self._wr_mask(0x0F, 0x04, 0x04)       # cali clk on  (R15 bit 2)
+            if not self._set_pll(56_000_000):      # park at 56 MHz cal freq
+                return None
+            self._wr_mask(0x0B, 0x10, 0x10)        # start trigger (R11 bit 4)
+            self._wr_mask(0x0B, 0x00, 0x10)        # stop trigger
+            self._wr_mask(0x0F, 0x00, 0x04)        # cali clk off
+            code = self._rd(0x00, 5)[4] & 0x0F     # reg 0x04 low nibble
+            if code and code != 0x0F:
+                break
+        if code == 0x0F:                           # railed -> narrowest fallback
+            code = 0
+        self._wr_mask(0x0A, 0x10 | code, 0x1F)    # FILT_Q | calibrated code
+        print(f"  filter cal: FILT_CODE={code} at ref {self.ref_hz/1e6:.0f} MHz")
+        return code
 
     # ── R828D tune (partial port of set_freq64: set_mux + set_pll + input sw) ─
     def r828d_set_freq(self, rf_hz):
