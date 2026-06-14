@@ -67,6 +67,7 @@ HELP_TEXT = """\
 [dim]e[/]  toggle FILTER_EXT   [dim]w[/]  toggle FLT_EXT_WIDEST
 [dim]i / I[/]  IF offset \u00b1100 kHz (probe filter edges)
 [dim]0[/]  reset IF offset     [dim]r[/]  toggle ref 16/32 MHz
+[dim]p / P[/]  cal park \u00b110 MHz (probe filter corner vs park)
 [dim]q[/]  quit"""
 
 
@@ -129,6 +130,7 @@ class VHFRadioApp(App):
         self._filt_ext_w = False    # FLT_EXT_WIDEST (0x0F[7]); never touched
         self._if_offset = 0         # IF probe offset from nominal (Hz)
         self._cal_code = None       # FILT_CODE from calibrate_filter()
+        self._cal_park = 100_100_000  # cal PLL park freq (non-round → sdm≠0)
         self._status_msg = ""
 
     def compose(self) -> ComposeResult:
@@ -252,12 +254,13 @@ class VHFRadioApp(App):
                    else "")
         self.query_one("#chan_filt", Static).update(
             f"  Filter {filt_str}{ext_str}")
-        cal_str = (f"[dim]cal={self._cal_code}[/]"
-                   if self._cal_code is not None else "[dim]cal=?[/]")
+        cal_str = (f"cal={self._cal_code}"
+                   if self._cal_code is not None else "cal=?")
+        park_str = f"@{self._cal_park / 1e6:.1f}M"
         self.query_one("#filt_ext", Static).update(
             f"  FILTER_EXT {'[cyan]ON[/]' if self._filt_ext else '[dim]off[/]'}"
             f"    FLT_EXT_WIDEST {'[cyan]ON[/]' if self._filt_ext_w else '[dim]off[/]'}"
-            f"    {cal_str}")
+            f"    [dim]{cal_str} {park_str}[/]")
 
         status = self.query_one("#status", Static)
         if self._status_msg:
@@ -326,6 +329,10 @@ class VHFRadioApp(App):
             self._reset_if_offset()
         elif char == "r":
             self._toggle_ref()
+        elif char == "p":
+            self._nudge_cal_park(10_000_000)
+        elif char == "P":
+            self._nudge_cal_park(-10_000_000)
 
     def _change_freq(self, delta_hz: int) -> None:
         self._set_freq(self._freq_hz + delta_hz)
@@ -358,7 +365,7 @@ class VHFRadioApp(App):
         self._if_offset = 0         # new filter shape; reset probe offset
         # set_bandwidth overwrites 0x1E[6] and FILT_CODE; resync + recal
         self._filt_ext = self._rx.get_filt_ext()
-        self._cal_code = self._rx.calibrate_filter(self._freq_hz + self._if_hz)
+        self._cal_code = self._rx.calibrate_filter(self._cal_park)
         if new_if != old_if:
             self._status_msg = (
                 f"[yellow]IF shifted: ka9q channel "
@@ -385,6 +392,18 @@ class VHFRadioApp(App):
         self._status_msg = ""
         self._update_display()
 
+    def _nudge_cal_park(self, delta_hz: int) -> None:
+        """Shift cal park ±10 MHz (70.1–110.1 MHz, all mix_div=32, non-integer)."""
+        new = self._cal_park + delta_hz
+        if not (70_100_000 <= new <= 110_100_000):
+            return
+        self._cal_park = new
+        self._cal_code = self._rx.calibrate_filter(self._cal_park)
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        cs = f"cal={self._cal_code}" if self._cal_code is not None else "cal=FAIL"
+        self._status_msg = f"[cyan]cal park \u2192 {self._cal_park/1e6:.1f} MHz  {cs}[/]"
+        self._update_display()
+
     def _toggle_ref(self) -> None:
         """Toggle CLKB reference between 16 and 32 MHz, reprogram Si5351,
         recalibrate filter against new reference, retune."""
@@ -393,7 +412,7 @@ class VHFRadioApp(App):
         else:
             self._ref_hz = 16_000_000
         self._rx.clkb_on(self._ref_hz)
-        self._cal_code = self._rx.calibrate_filter(self._freq_hz + self._if_hz)
+        self._cal_code = self._rx.calibrate_filter(self._cal_park)
         self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         cal_str = f" cal={self._cal_code}" if self._cal_code is not None else " cal=FAIL"
         self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz{cal_str}[/]"
