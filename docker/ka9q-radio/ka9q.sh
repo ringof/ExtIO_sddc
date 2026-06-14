@@ -7,7 +7,7 @@
 #                          runs the VHF/FM config (rx888-vhf-fm.conf: a WBFM
 #                          receiver at the 4.57 MHz R828D IF) instead of the
 #                          default HF test config. Then tune the front end with
-#                          ../../vhf/vhf_fm_tune.sh and listen to fm-pcm.local.
+#                          ../../vhf/vhf_tune.py --persist and listen to fm-pcm.local.
 #   console                Drop into a bash shell inside the running container.
 #   monitor [stream-name]  Run ka9q's `monitor` inside the container with
 #                          host-side ALSA playback.  Default: wwv-pcm.local

@@ -441,9 +441,9 @@ class RX888:
     # ── Channel filter power-down (R10 / 0x0A bit 7) ────────────────────
     def set_chan_filter(self, on):
         """Set channel filter power. on=True: filter active (PWD_FILT=1),
-        on=False: filter powered down / bypassed (PWD_FILT=0).
-        Note: powering down dumps raw mixer IF at the ADC — you lose
-        selectivity and anti-alias without gaining clean bandwidth."""
+        on=False: filter powered down (PWD_FILT=0).
+        The filter is in-line — powering it down disconnects the signal
+        path entirely (no signal, not bypass)."""
         self._wr_mask(0x0A, 0x80 if on else 0x00, 0x80)
 
     def get_chan_filter(self):
