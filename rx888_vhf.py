@@ -54,10 +54,46 @@ SI_PLL_RESET = 177
 SI_CLK2      = 18                # CLK2 control (bit7 = power-down)
 
 # ── R828D init register block, regs 0x05..0x1f ─────────────────────────
+# [tune]/[bw] = a runtime function (set_freq/set_pll/set_mux/set_bandwidth)
+# rewrites this register before it's used, so the seed only fixes the bits
+# those masked writes leave untouched; the rest are set-once config.
+# AGC polarity (bench-confirmed on RX888 mk2): 0x05[4] and 0x07[4] are both
+# 1=auto / 0=manual, so init leaves LNA AGC off (0x05 bit4=0) and mixer AGC
+# on (0x07 bit4=1).
 R828D_INIT_BASE = 0x05
+# Old opaque form, kept for reference:
+# R828D_INIT = [
+#     0x80,0x13,0x70,0xC0,0x40,0xDB,0x6B,0xEB,0x53,0x75,0x68,0x6C,0xBB,
+#     0x80,0x31,0x0F,0x00,0xC0,0x30,0x48,0xEC,0x60,0x00,0x24,0xDD,0x0E,0x40,
+# ]
 R828D_INIT = [
-    0x80,0x13,0x70,0xC0,0x40,0xDB,0x6B,0xEB,0x53,0x75,0x68,0x6C,0xBB,
-    0x80,0x31,0x0F,0x00,0xC0,0x30,0x48,0xEC,0x60,0x00,0x24,0xDD,0x0E,0x40,
+    0x80,  # 0x05 LNA   [tune] gain/mode + Air/Cable; loop-through off, manual, AGC off
+    0x13,  # 0x06       power-det1 on, det3 off, filter-gain 0 dB, LNA power 3
+    0x70,  # 0x07 Mixer [tune] gain/sideband; mixer on, AGC auto (on)
+    0xC0,  # 0x08       mixer buffer on, low current, image-gain trim 0
+    0x40,  # 0x09       IF filter on, low current, image-phase trim 0
+    0xDB,  # 0x0A       [bw] channel-filter fine BW   (set_bandwidth + cal)
+    0x6B,  # 0x0B       [bw] channel-filter coarse BW (set_bandwidth)
+    0xEB,  # 0x0C       IF VGA on, gain by code, VGA_CODE=0x0B (~26.5 dB)
+    0x53,  # 0x0D       LNA AGC detector thresholds (hi 5, lo 3)
+    0x75,  # 0x0E       mixer AGC detector thresholds (hi 7, lo 5)
+    0x68,  # 0x0F       ring/cali clk off, AGC clk on, FLT_EXT_WIDEST off
+    0x6C,  # 0x10       [tune] PLL divider/refdiv/xtal-cap (set_mux+set_pll)
+    0xBB,  # 0x11       PLL analog LDO 2.0 V, charge-pump auto
+    0x80,  # 0x12       [tune] VCO current/dither (set_pll)
+    0x31,  # 0x13       VCO auto mode; low 6 bits = version tag (ignored in auto)
+    0x0F,  # 0x14       [tune] PLL nint (set_pll)
+    0x00,  # 0x15       [tune] PLL sdm lo (set_pll)
+    0xC0,  # 0x16       [tune] PLL sdm hi (set_pll)
+    0x30,  # 0x17       [partial] open-drain set by set_mux; rest = PLL dig LDO 1.8V/8mA
+    0x48,  # 0x18       ring oscillator OFF
+    0xEC,  # 0x19       RF tracking filter ON, poly-filter current
+    0x60,  # 0x1A       [tune] RF mux/autotune (set_mux+set_pll)
+    0x00,  # 0x1B       [tune] tracking-filter band tf_c (set_mux)
+    0x24,  # 0x1C       mixer power-detector TOP
+    0xDD,  # 0x1D       LNA power-detector TOP, PDET2 gain
+    0x0E,  # 0x1E       [bw] filter-extension bit (set_bandwidth)
+    0x40,  # 0x1F       loop-through-att / ring-osc power (both unused — idle)
 ]
 
 # ── R828D tracking-filter bands: (LO_start_MHz, open_d, rf_mux_ploy, tf_c)
@@ -336,9 +372,26 @@ class RX888:
 
     # ── R828D standby (port of r82xx_standby) ─────────────────────────────
     def r828d_standby(self):
-        for reg, val in ((0x06,0xB1),(0x05,0xA0),(0x07,0x3A),(0x08,0x40),(0x09,0xC0),
-                         (0x0A,0x36),(0x0C,0x35),(0x0F,0x68),(0x11,0x03),(0x17,0xF4),
-                         (0x19,0x0C)):
+        # Old opaque form, kept for reference:
+        # for reg, val in ((0x06,0xB1),(0x05,0xA0),(0x07,0x3A),(0x08,0x40),(0x09,0xC0),
+        #                  (0x0A,0x36),(0x0C,0x35),(0x0F,0x68),(0x11,0x03),(0x17,0xF4),
+        #                  (0x19,0x0C)):
+        #     self._wr(reg, val)
+        # Power-down sequence: detectors/LNA, mixer, buffers, IF & channel
+        # filters, VGA, then the PLL LDOs and RF filter last.
+        for reg, val in (
+            (0x06, 0xB1),  # power-detector 1 off, LNA power -> min
+            (0x05, 0xA0),  # LNA power DOWN
+            (0x07, 0x3A),  # mixer power DOWN (PWD_MIX=0)
+            (0x08, 0x40),  # mixer buffer / image-gain amp OFF
+            (0x09, 0xC0),  # IF filter / image-phase amp OFF
+            (0x0A, 0x36),  # channel filter power DOWN (PWD_FILT=0)
+            (0x0C, 0x35),  # IF VGA OFF (PWD_VGA=0)
+            (0x0F, 0x68),  # clk state (same as init)
+            (0x11, 0x03),  # PLL analog LDO OFF
+            (0x17, 0xF4),  # PLL digital LDO OFF, open-drains safe
+            (0x19, 0x0C),  # RF filter OFF, ring-osc clk off
+        ):
             self._wr(reg, val)
 
     # ── Gain control ──────────────────────────────────────────────────────
