@@ -54,16 +54,17 @@ def qdx_hw_device(card: int) -> str:
 
 def generate_tone(path: str, freq_hz: int = 1500, duration_s: float = 2.0,
                   sample_rate: int = 48000) -> None:
-    """Use sox to generate a sine tone WAV file.
+    """Use sox to generate a sine tone WAV in the QDX's native format.
 
-    Generates mono S16 WAV — aplay with plughw: handles format conversion
-    to the QDX's native S24_3LE stereo.
+    Generates S24 stereo 48 kHz — playable directly via hw: with no
+    silent format conversion.  ALSA maps S24 (4-byte padded) WAV to
+    the QDX's S24_3LE (3-byte packed) on hw: devices.
 
     Raises QdxAudioError on failure.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     cmd = [
-        "sox", "-n", "-r", str(sample_rate), "-b", "16", "-c", "1",
+        "sox", "-n", "-r", str(sample_rate), "-b", "24", "-c", "2",
         path, "synth", str(duration_s), "sine", str(freq_hz),
     ]
     try:
@@ -80,14 +81,13 @@ def generate_tone(path: str, freq_hz: int = 1500, duration_s: float = 2.0,
 def play_to_qdx(wav_path: str, hw_device: str, timeout: int = 10) -> bool:
     """Play a WAV file to the QDX via aplay. Returns True on success.
 
-    Uses plughw: so ALSA handles format conversion from the WAV's format
-    to the QDX's native S24_3LE stereo.
+    Uses hw: directly — the WAV must be in a format the QDX accepts
+    (S24 stereo 48 kHz).  Format mismatches fail loud instead of being
+    silently converted by plughw:.
 
     Raises QdxAudioError on failure.
     """
-    # plughw: converts format automatically; hw: would require exact match.
-    plug_device = hw_device.replace("hw:", "plughw:")
-    cmd = ["aplay", "-D", plug_device, wav_path]
+    cmd = ["aplay", "-D", hw_device, wav_path]
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
     except FileNotFoundError:

@@ -94,8 +94,8 @@ class QdxCat:
         return resp[2:-1]                 # strip 'ID' and ';'
 
     def get_firmware(self) -> str:
-        """Return firmware version string, e.g. ``'1_08'``."""
-        resp = self.send("VN;")           # -> 'VN1_08;'
+        """Return firmware version string, e.g. ``'1_09'``."""
+        resp = self.send("VN;")           # -> 'VN1_09;'
         return resp[2:-1]
 
     def get_freq(self) -> int:
@@ -160,9 +160,13 @@ class QdxCat:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Safety: always unkey PTT so a crash never leaves the QDX keyed.
+        # Safety: best-effort unkey so a crash doesn't leave the QDX keyed.
+        # Bypass send_set() — its reset_input_buffer() throws I/O errors
+        # on a wedged port, which is exactly when we most need to unkey.
         try:
-            self.tx_off()
+            if self._ser and self._ser.is_open:
+                self._ser.write(b"RX;")
+                self._ser.flush()
         except Exception:
             pass
         self.close()
