@@ -14,15 +14,9 @@ What this proves:
 What this does NOT prove (requires manual verification):
   - That the played audio actually modulates onto an RF carrier
   - Use bench_rf_test.py + a separate receiver to verify RF output
-
-Env vars:
-  QDX_PORT       serial port path (required, for PTT control)
-  QDX_BAUD       baud rate (default 9600)
-  QDX_CARD       override ALSA card number (default: auto-discover)
-  QDX_TONE_FREQ  tone frequency in Hz (default 1500)
-  QDX_TONE_DUR   tone duration in seconds (default 2)
 """
 
+import argparse
 import os
 import struct
 import sys
@@ -68,23 +62,24 @@ def wav_has_energy(path: str, threshold: int = 100) -> bool:
 
 
 def main():
-    port = os.environ.get("QDX_PORT")
-    if not port:
-        print("RUNG2B AUDIO FAIL — QDX_PORT not set", file=sys.stderr)
-        sys.exit(1)
-
-    baud = int(os.environ.get("QDX_BAUD", "9600"))
-    tone_freq = int(os.environ.get("QDX_TONE_FREQ", "1500"))
-    tone_dur = float(os.environ.get("QDX_TONE_DUR", "2"))
+    p = argparse.ArgumentParser(description="Rung 2b: QDX USB audio path test")
+    p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
+    p.add_argument("--baud", type=int, default=9600, help="baud rate")
+    p.add_argument("--card", type=int, default=None,
+                   help="ALSA card number (default: auto-discover)")
+    p.add_argument("--tone", type=int, default=1500,
+                   help="tone frequency in Hz (default: 1500)")
+    p.add_argument("--duration", type=float, default=2,
+                   help="tone duration in seconds (default: 2)")
+    args = p.parse_args()
 
     os.makedirs(OUT_DIR, exist_ok=True)
     checks = 0
 
     try:
         # --- 1. Device discovery ------------------------------------------
-        card_override = os.environ.get("QDX_CARD")
-        if card_override is not None:
-            card = int(card_override)
+        if args.card is not None:
+            card = args.card
         else:
             card = find_qdx_card()
 
@@ -94,7 +89,7 @@ def main():
 
         # --- 2. Capture test (RX noise) -----------------------------------
         capture_path = os.path.join(OUT_DIR, "rung2b_capture.wav")
-        capture_from_qdx(capture_path, hw, duration_s=tone_dur)
+        capture_from_qdx(capture_path, hw, duration_s=args.duration)
         fsize = os.path.getsize(capture_path)
         if fsize == 0:
             print("RUNG2B AUDIO FAIL — captured WAV is empty (0 bytes)")
@@ -108,9 +103,9 @@ def main():
 
         # --- 3. Tone generation (QDX native format) -----------------------
         tone_path = os.path.join(OUT_DIR, "rung2b_tone.wav")
-        generate_tone(tone_path, freq_hz=tone_freq, duration_s=tone_dur)
+        generate_tone(tone_path, freq_hz=args.tone, duration_s=args.duration)
         print(f"RUNG2B: tone -> {tone_path} "
-              f"({tone_freq} Hz, {tone_dur} s, S24 stereo 48 kHz)")
+              f"({args.tone} Hz, {args.duration} s, S24 stereo 48 kHz)")
 
         # --- 4. Playback via hw: (no plughw: conversion) ------------------
         play_to_qdx(tone_path, hw)
@@ -118,7 +113,10 @@ def main():
         checks += 1
 
         # --- 5. PTT + playback -------------------------------------------
-        with QdxCat(port, baudrate=baud) as qdx:
+        with QdxCat(args.port, baudrate=args.baud) as qdx:
+            dial = qdx.get_freq()
+            print(f"RUNG2B: dial {dial} Hz, carrier {dial + args.tone} Hz")
+
             pre = qdx.get_tx_state()
             if pre:
                 print("RUNG2B AUDIO FAIL — QDX already in TX before PTT test")

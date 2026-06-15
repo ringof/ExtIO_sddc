@@ -24,8 +24,18 @@ Independent operator verification (optional) uses WSJT-X tools (`jt9`,
 | `run_g0_wspr.sh` | **G0 (WSPR)** — off-hardware audio encode→decode self-test | none |
 | `gen_ft8_wav.sh` | generate a known-content FT8 audio WAV | none |
 | `gen_wspr_wav.sh` | generate a known-content WSPR audio WAV | none |
+| `rung2a_cat_test.py` | **2a** — QDX CAT serial: freq set/read, PTT cycle, IF cross-check | QDX |
+| `rung2b_audio_test.py` | **2b** — QDX USB audio: capture, playback via hw:, PTT+play | QDX |
+| `bench_rf_test.py` | Manual RF verification: tone + PTT for external receiver/powers | QDX |
 
-(Rungs 1–7 are added as the ladder is climbed; see the plan doc.)
+### Helpers (imported by rung scripts)
+
+| Module | Purpose |
+|---|---|
+| `qdx_cat.py` | QDX Kenwood CAT serial control (FA, TX, RX, TQ, IF, ID, VN) |
+| `qdx_audio.py` | QDX ALSA device discovery, tone generation (S24 stereo 48 kHz), play/capture |
+
+(Rungs 3–7 are added as the ladder is climbed; see the plan doc.)
 
 ## Encoders, decoders, and sox's role
 
@@ -77,6 +87,23 @@ work without trusting the harness's own verdict:
 out/g0_ft8_selfloop.wav        # jt9 -8 out/g0_ft8_selfloop.wav
 out/g0_wspr_selfloop_48k.wav   # 48 kHz, the QDX TX rate
 out/g0_wspr_selfloop_12k.wav   # wsprd out/g0_wspr_selfloop_12k.wav
+```
+
+## QDX rungs (2a, 2b) and manual RF test
+
+All QDX scripts take `--port` (default `/dev/ttyACM0`) and `--help`.
+
+```sh
+# Rung 2a — CAT serial control
+python tests/bench/rung2a_cat_test.py
+python tests/bench/rung2a_cat_test.py --port /dev/ttyACM1 --freq-offset 500
+
+# Rung 2b — USB audio path (capture, playback, PTT)
+python tests/bench/rung2b_audio_test.py
+python tests/bench/rung2b_audio_test.py --port /dev/ttyACM0 --tone 1000 --duration 3
+
+# Manual RF verification — long tone for powers / external receiver
+python tests/bench/bench_rf_test.py --freq 10000000 --duration 30
 ```
 
 ## Generating audio (TX stimulus / fixtures)

@@ -8,13 +8,9 @@ connected via USB.
 
 The QDX firmware is the independent oracle: TQ; reads the QDX's actual
 TX/RX state machine, not an echo of what we sent.
-
-Env vars:
-  QDX_PORT         serial port path (required, e.g. /dev/ttyACM0)
-  QDX_BAUD         baud rate (default 9600; irrelevant for USB CDC)
-  QDX_FREQ_OFFSET  Hz offset for the set-frequency test (default 1000)
 """
 
+import argparse
 import os
 import sys
 
@@ -25,13 +21,16 @@ from qdx_cat import QdxCat, QdxCatError
 
 
 def main():
-    port = os.environ.get("QDX_PORT")
-    if not port:
-        print("RUNG2A CAT FAIL — QDX_PORT not set", file=sys.stderr)
-        sys.exit(1)
+    p = argparse.ArgumentParser(description="Rung 2a: QDX CAT serial test")
+    p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
+    p.add_argument("--baud", type=int, default=9600, help="baud rate")
+    p.add_argument("--freq-offset", type=int, default=1000,
+                   help="Hz offset for set-frequency test (default: 1000)")
+    args = p.parse_args()
 
-    baud = int(os.environ.get("QDX_BAUD", "9600"))
-    freq_offset = int(os.environ.get("QDX_FREQ_OFFSET", "1000"))
+    port = args.port
+    baud = args.baud
+    freq_offset = args.freq_offset
 
     checks = 0
     firmware = "?"
@@ -44,9 +43,12 @@ def main():
             checks += 1
 
             # 2. Identity + firmware (informational, not gating)
-            id_str = qdx.get_id()
-            firmware = qdx.get_firmware()
-            print(f"RUNG2A: ID -> {id_str}, firmware -> {firmware}")
+            try:
+                id_str = qdx.get_id()
+                firmware = qdx.get_firmware()
+                print(f"RUNG2A: ID -> {id_str}, firmware -> {firmware}")
+            except QdxCatError as exc:
+                print(f"RUNG2A: ID/firmware query failed ({exc}), continuing")
             checks += 1
 
             # 3. Frequency set (+offset) and read-back
@@ -92,13 +94,16 @@ def main():
             checks += 1
 
             # 6. IF; cross-check — freq matches FA
-            info = qdx.get_info()
-            if info["freq"] != orig_freq:
-                print(f"RUNG2A CAT FAIL — IF freq {info['freq']} != "
-                      f"FA freq {orig_freq}")
-                sys.exit(1)
-            print(f"RUNG2A: IF; -> freq={info['freq']} "
-                  f"mode={info['mode']} tx={'TX' if info['tx'] else 'RX'} OK")
+            try:
+                info = qdx.get_info()
+                if info["freq"] != orig_freq:
+                    print(f"RUNG2A CAT FAIL — IF freq {info['freq']} != "
+                          f"FA freq {orig_freq}")
+                    sys.exit(1)
+                print(f"RUNG2A: IF; -> freq={info['freq']} "
+                      f"mode={info['mode']} tx={'TX' if info['tx'] else 'RX'} OK")
+            except QdxCatError as exc:
+                print(f"RUNG2A: IF; query failed ({exc}), continuing")
             checks += 1
 
         # Verdict

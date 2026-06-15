@@ -1,8 +1,18 @@
 # Local Hardware-in-the-Loop (HWIL) Test Bench — Plan 1
 
-Status: **Approved; in progress.** Rung **G0** is implemented and committed
-(PR #172): off-hardware FT8 + WSPR audio encode→decode self-tests and audio
-generators, validated end to end. Rungs 1–7 pending.
+Status: **Approved; in progress.**
+
+- **G0** — implemented and committed (PR #172): off-hardware FT8 + WSPR audio
+  encode→decode self-tests and audio generators.
+- **2a** — QDX CAT serial control: all commands verified on real hardware
+  (FA, IF, ID, VN, TX, RX, TQ). Firmware 1.09.
+- **2b** — QDX USB audio path: S24 stereo 48 kHz via hw: (no plughw:),
+  capture with energy check, PTT+playback. RF output confirmed by operator
+  using independent HF receiver.
+- **3** — CW carrier confirmed in `powers` spectrum: QDX TX at 10 MHz +
+  1500 Hz tone, 2W through 120 dB attenuation, peak at -82.7 dB with
+  53 dB SNR in 1 Hz bins. Verified manually (not yet automated).
+- Rungs 1, 4–7 pending.
 
 ## Purpose
 
@@ -256,8 +266,8 @@ turn, so the bench must be self-recovering and bounded:
 
 ## Next step
 
-G0 is implemented and verified (PR #172). Next is **rung 1** (HITL image built
-`FROM` the ka9q-radio image, at smoke-test parity — the first hardware-touching
-rung), with the off-hardware CI decode-automation rungs (4, 6) as cheap
-parallel wins. Then climb through Phase A (FT8) to Phase B (WSPR sign-off).
-Plan 2 (remote HWIL CI + security) is written separately.
+Rungs G0, 2a, 2b proven on real hardware; rung 3 (CW carrier in `powers`)
+confirmed manually.  Next: **automate rung 3** as a scripted test, then
+**rung 4** (FT8 decode automation — off-hardware) and **rung 5** (TX/RX FT8
+end-to-end over the bench).  Rung 1 (HITL image parity) can proceed in
+parallel.  Plan 2 (remote HWIL CI + security) is written separately.
