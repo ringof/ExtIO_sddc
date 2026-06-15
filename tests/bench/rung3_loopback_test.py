@@ -85,30 +85,31 @@ def run_powers(freq_hz: int, group: str, ssrc: int,
 
 
 def parse_powers_csv(csv_text: str) -> list[tuple[float, float]]:
-    """Parse powers CSV output into [(freq_hz, power_dbm), ...].
+    """Parse powers output into [(freq_hz, power_dbm), ...].
 
-    powers outputs lines like:
-        # Time, SSRC, ...
-        freq_hz, power_dbm
-    or CSV with frequency and power columns.  We skip comment/header lines
-    and extract (frequency, power) pairs.
+    powers outputs one line per snapshot:
+        timestamp, low_freq, high_freq, binwidth, num_bins, p0, p1, p2, ...
+    Bin frequencies are implicit: bin[i] = low_freq + i * binwidth.
     """
     bins = []
     for line in csv_text.strip().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # powers CSV: each data line has comma-separated fields.
-        # The format is: freq_hz,power_dBFS (or similar).
-        parts = line.split(",")
-        if len(parts) < 2:
+        parts = [p.strip() for p in line.split(",")]
+        # Need at least: timestamp, low, high, binwidth, nbins, + 1 power
+        if len(parts) < 6:
             continue
         try:
-            freq = float(parts[0])
-            power = float(parts[1])
-            bins.append((freq, power))
+            low_freq = float(parts[1])
+            binwidth = float(parts[3])
+            powers = [float(p) for p in parts[5:]]
         except ValueError:
-            continue  # skip header or non-numeric lines
+            continue
+        for i, pwr in enumerate(powers):
+            freq = low_freq + i * binwidth
+            bins.append((freq, pwr))
+        break  # use first valid data line only
 
     return bins
 
@@ -200,20 +201,32 @@ def main():
                 stderr=subprocess.PIPE,
             )
 
-            # Run powers in foreground (captures spectrum while tone plays)
-            try:
-                powers_csv = run_powers(
-                    freq_hz=expected_carrier_hz,
-                    group=args.group,
-                    ssrc=args.ssrc,
-                )
-            except RuntimeError as exc:
-                # Kill aplay, unkey, then fail
-                aplay_proc.terminate()
-                aplay_proc.wait(timeout=5)
-                qdx.tx_off()
-                print(f"RUNG3 LOOPBACK FAIL — powers: {exc}")
-                sys.exit(1)
+            # Run powers in foreground (captures spectrum while tone plays).
+            # First invocation after container start sometimes returns garbage;
+            # retry once if no bins are parsed.
+            powers_csv = None
+            for attempt in range(2):
+                try:
+                    powers_csv = run_powers(
+                        freq_hz=expected_carrier_hz,
+                        group=args.group,
+                        ssrc=args.ssrc,
+                    )
+                except RuntimeError as exc:
+                    if attempt == 0:
+                        print(f"RUNG3: powers attempt 1 failed ({exc}), retrying")
+                        continue
+                    # Second attempt failed — bail
+                    aplay_proc.terminate()
+                    aplay_proc.wait(timeout=5)
+                    qdx.tx_off()
+                    print(f"RUNG3 LOOPBACK FAIL — powers: {exc}")
+                    sys.exit(1)
+
+                if parse_powers_csv(powers_csv):
+                    break  # got usable data
+                if attempt == 0:
+                    print("RUNG3: powers attempt 1 returned no bins, retrying")
 
             # Wait for aplay to finish
             try:
