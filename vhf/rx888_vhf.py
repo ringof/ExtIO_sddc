@@ -9,6 +9,19 @@ interactive TUI (vhf_fm_radio.py).
 See vhf_tune.py docstring for porting notes, bit-order gotchas, and the
 bench-learned lessons that shaped this driver.
 
+R820T2 / R828D references (Rafael Micro never published a full datasheet):
+  - Closest register descriptions:
+      https://www.rtl-sdr.com/wp-content/uploads/2016/12/R820T2_Register_Description.pdf
+  - Closest datasheet:
+      https://datasheet4u.com/download/1469947/R820T2.html
+  - Reference driver code:
+      osmocom rtl-sdr  https://github.com/osmocom/rtl-sdr/blob/master/src/tuner_r82xx.c
+      Linux kernel     https://github.com/torvalds/linux/blob/master/drivers/media/tuners/r820t.c
+  These describe the R820T2 — the closest available docs/code for the R828D. In
+  practice that's sufficient: the drivers appear to operate the R828D just as
+  well as the R820T (same register map and tuning core; chip-specific
+  differences are a few registers, e.g. Air-In/Cable1 select at 0x05[6:5]).
+
 Requires: pyusb  (pip install pyusb)
 """
 

@@ -11,6 +11,24 @@ down to one fixed intermediate frequency (IF) that the ADC then samples.
 Everything is configured over I2C through ~32 registers (`0x00`–`0x1f`);
 `0x00`–`0x04` are read-only status (PLL lock, VCO fine-tune), the rest control.
 
+## References
+
+The register names and bit fields used throughout this document are reconstructed
+from the sources below — Rafael Micro never published a full official datasheet:
+
+- **Closest register descriptions:** [R820T2 Register Description (PDF)](https://www.rtl-sdr.com/wp-content/uploads/2016/12/R820T2_Register_Description.pdf)
+- **Closest datasheet:** [R820T2 datasheet](https://datasheet4u.com/download/1469947/R820T2.html)
+- **Reference driver code:**
+  - osmocom rtl-sdr — [`src/tuner_r82xx.c`](https://github.com/osmocom/rtl-sdr/blob/master/src/tuner_r82xx.c)
+  - Linux kernel — [`drivers/media/tuners/r820t.c`](https://github.com/torvalds/linux/blob/master/drivers/media/tuners/r820t.c) (source of the IMR image-rejection cal in §9, which the librtlsdr lineage omits)
+
+All of the above describe the **R820T2**. It is the closest available documentation
+and reference code for the **R828D** — and in practice that's good enough: these
+drivers appear to operate the R828D just as well as they do the R820T. The two
+share the same register map and tuning core, with chip-specific differences confined
+to a few registers (e.g. the Air-In / Cable1 input switch at `0x05[6:5]`, flagged
+"only R828D" in the register map).
+
 ---
 
 ## 1. Signal path
