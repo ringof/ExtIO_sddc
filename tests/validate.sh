@@ -106,7 +106,7 @@ fi
 if want_stage 3; then
     docker image inspect "$IMAGE" >/dev/null 2>&1 || {
         echo "Bail out! docker image '$IMAGE' not found — build it:"
-        echo "    docker build -t $IMAGE docker/ka9q-radio/"; summary; exit 1; }
+        echo "    docker build -f docker/ka9q-radio/Dockerfile -t $IMAGE ."; summary; exit 1; }
 
     # 3A — runs + produces real output
     echo "### Stage 3A — ka9q_smoke.sh (runs under ka9q-radio + real output)"

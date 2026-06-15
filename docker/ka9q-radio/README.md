@@ -7,7 +7,7 @@ Docker container for testing SDDC_FX3 firmware compatibility with
 ## Build
 
 ```
-docker build -t ka9q-radio docker/ka9q-radio/
+docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .
 ```
 
 ## Find your USB device

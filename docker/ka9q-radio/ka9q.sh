@@ -3,6 +3,7 @@
 # ka9q.sh — helper for the ka9q-radio Docker image.
 #
 # Subcommands:
+#   build                  Build the image (run from project root).
 #   start                  Launch the container detached.
 #   console                Drop into a bash shell inside the running container.
 #   monitor [stream-name]  Run ka9q's `monitor` inside the container with
@@ -50,6 +51,11 @@ container_running() {
     docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
 }
 
+cmd_build() {
+    echo "Building image '$IMAGE_NAME' from project root..."
+    docker build -f docker/ka9q-radio/Dockerfile -t "$IMAGE_NAME" "$PROJECT_ROOT"
+}
+
 cmd_start() {
     if container_running; then
         echo "Container '$CONTAINER_NAME' is already running."
@@ -69,6 +75,11 @@ cmd_start() {
     if [ -e /dev/snd ]; then
         snd_args+=(--device /dev/snd --group-add audio)
     fi
+    # QDX serial passthrough (bench tools use /dev/ttyACM0 for CAT control)
+    local qdx_args=()
+    if [ -e /dev/ttyACM0 ]; then
+        qdx_args+=(--device /dev/ttyACM0)
+    fi
     # --network host is REQUIRED for radiod's in-container cold start. After it
     # uploads firmware the FX3 re-enumerates (00f3->00f1); that re-acquire is a
     # USB *hotplug* event, and hotplug is delivered over a netlink socket that is
@@ -86,6 +97,7 @@ cmd_start() {
         -v "$FIRMWARE_DIR:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
+        "${qdx_args[@]}" \
         -e FFTW_RIGOR="$FFTW_RIGOR" \
         "$IMAGE_NAME" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
@@ -150,6 +162,7 @@ cmd_stop() {
 }
 
 case "${1:-help}" in
+    build)          shift; cmd_build "$@" ;;
     start)          shift; cmd_start "$@" ;;
     console)        shift; cmd_console "$@" ;;
     monitor)        shift; cmd_monitor "$@" ;;

@@ -1,6 +1,7 @@
 # ka9q-radio test environment for RX888mk2 firmware validation
 #
-# Build:   docker build -t ka9q-radio docker/ka9q-radio/
+# Build (from project root):
+#          docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .
 # Run:     docker run --rm -it --privileged --network host \
 #            -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro ka9q-radio
 #
@@ -80,7 +81,7 @@ WORKDIR /build/ka9q-radio
 # COPY the whole patches/ tree (not just *.patch) so the build succeeds
 # even when zero active patches exist — disabled/historical patches kept
 # in-tree under *.patch.disabled are intentionally skipped by the glob.
-COPY patches/ /tmp/patches/
+COPY docker/ka9q-radio/patches/ /tmp/patches/
 RUN applied=0; \
     for p in /tmp/patches/*.patch; do \
         [ -e "$p" ] || break; \
@@ -158,6 +159,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     usbutils \
     libgnutls30 \
     libgcrypt20 \
+    python3 \
+    python3-serial \
+    sox \
+    alsa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
@@ -186,10 +191,17 @@ RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio /usr/local
 COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 
 # Install minimal rx888 config for HF direct-sampling test
-COPY rx888-test.conf /etc/radio/radiod@rx888-test.conf
+COPY docker/ka9q-radio/rx888-test.conf /etc/radio/radiod@rx888-test.conf
+
+# Copy bench tools (QDX CAT, audio, RF test, rung scripts)
+COPY tests/bench/qdx_cat.py         /usr/local/lib/bench/
+COPY tests/bench/qdx_audio.py       /usr/local/lib/bench/
+COPY tests/bench/bench_rf_test.py   /usr/local/lib/bench/
+COPY tests/bench/rung2a_cat_test.py /usr/local/lib/bench/
+COPY tests/bench/rung2b_audio_test.py /usr/local/lib/bench/
 
 # Copy entrypoint
-COPY entrypoint.sh /entrypoint.sh
+COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
