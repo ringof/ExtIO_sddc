@@ -199,6 +199,7 @@ COPY tests/bench/qdx_audio.py       /usr/local/lib/bench/
 COPY tests/bench/bench_rf_test.py   /usr/local/lib/bench/
 COPY tests/bench/rung2a_cat_test.py /usr/local/lib/bench/
 COPY tests/bench/rung2b_audio_test.py /usr/local/lib/bench/
+COPY tests/bench/rung3_loopback_test.py /usr/local/lib/bench/
 
 # Copy entrypoint
 COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh
