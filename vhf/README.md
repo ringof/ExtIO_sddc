@@ -4,6 +4,23 @@ Host-side control of the RX888 mk2's **R828D** VHF/UHF tuner, used as a
 **downconverter** for a direct-sampling receiver (e.g. ka9q-radio): the tuner
 slides a chunk of VHF/UHF spectrum down to a fixed IF that the ADC samples.
 
+## Quick start (hear FM in ~4 commands)
+
+**Prereqs:** RX888 mk2 plugged in (app-mode), `pip install pyusb textual`,
+ka9q-radio image built (`docker build -t ka9q-radio docker/ka9q-radio/`).
+
+```
+./docker/ka9q-radio/ka9q.sh start --vhf           # 1. ADC streamer; parks a WBFM rx at 4.57 MHz
+python3 vhf/vhf_fm_radio.py                        # 2. the tuner TUI — tune with the arrow keys
+./docker/ka9q-radio/ka9q.sh monitor fm-pcm.local  # 3. audio out (needs /dev/snd)
+```
+
+**✅ It works when:** the TUI header shows `LOCKED` and you hear the station as
+you tune with `← →`. Press `q` in the TUI to standby back to HF.
+
+Full walkthrough, the CLI path, and troubleshooting: **`vhf_fm_howto.md`**. New to
+the design? Read the next section first.
+
 ## What this is — and what the firmware does *not* do
 
 The RX888 firmware does **no tuner control**. With respect to the tuner it is
@@ -82,8 +99,27 @@ bit-reversed** (see the gotchas below); the Si5351 reads normally.
 `rx888_vhf.py` is the reference implementation used to validate tuner
 init/standby, register writes, PLL-lock behavior, and tracking-filter
 configuration on real RX888 mk2 hardware. Diff your implementation against it and
-use it to track down differences. Read the **bench-learned gotchas** in the
-`vhf_tune.py` docstring first — they are what trips people up:
+use it to track down differences.
+
+### Bring-up sequence
+
+1. **Reference clock** — `I2CW` Si5351 (`0xC0`): CLK2/PLL-B = 16 MHz (CLKB).
+2. **Probe (verify)** — `I2CR` R828D (`0x74`) reg `0x00` → bit-reverse → expect `0x96`.
+3. **Init tuner** — write the init array (`0x05`–`0x1F`), run the IF-filter cal.
+4. **Tune** — `set_mux` + `set_pll`, `LO = RF + 4.57 MHz`; lock = reg `0x02` bit 6 (bit-reversed).
+5. **GPIO → VHF** \* — `GPIOFX3`: set `VHF_EN` (bit 15), clear `BIAS_HF`, starting from the live GPIO word.
+
+Teardown: R828D standby → CLKB off → GPIO back to HF.
+
+> \* The demo driver (`vhf_tune.py` / `vhf_fm_radio.py`) actually sets the VHF
+> GPIO **first**, before the clock and tuner. `VHF_EN` is the antenna-path switch
+> and rides an independent bus from the I2C tuner config, so the order does **not**
+> significantly change demo performance — doing it last (as shown) just avoids a
+> brief transient of unlocked VHF output reaching the ADC while the tuner settles.
+
+### Gotchas (read these first — they're what trips people up)
+
+The full set is in the `vhf_tune.py` docstring; the load-bearing ones:
 
 - R828D **reads are bit-reversed** (LSB-first) vs writes (MSB-first) — recover
   logical order on every read.
