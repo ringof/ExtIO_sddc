@@ -58,17 +58,14 @@ The tuner mixes `LO = RF + 4.57 MHz`, so the station you tune to lands at
 **4.570 MHz** in the ADC spectrum — park your receiver there. Tuner control (EP0)
 and streaming (EP1 bulk) run **concurrently**; EP0 needs no interface claim.
 
-## Run the demo
+## Implementing your own driver
 
-```
-python vhf/vhf_fm_radio.py        # needs: pip install pyusb textual
-```
+`rx888_vhf.py` is the reference implementation used to validate tuner
+init/standby, register writes, PLL-lock behavior, and tracking-filter
+configuration on real RX888 mk2 hardware. Diff your implementation against it and
+use it to track down differences.
 
-Run your ADC streamer/receiver alongside it — that side owns the sample clock —
-and park it at **4.57 MHz**. See `vhf_fm_howto.md` for the full ka9q-radio
-walk-through.
-
-## Firmware EP0 contract (what you build on)
+### Firmware EP0 contract
 
 Everything the host does goes through EP0 vendor requests. The tuner-relevant ones:
 
@@ -93,13 +90,6 @@ phase (it issues the repeated-START). So:
 Do **not** pass a 7-bit address and do **not** set the R/W bit yourself — either
 gives silent no-ACKs with no obvious cause. And note that R828D **reads come back
 bit-reversed** (see the gotchas below); the Si5351 reads normally.
-
-## Implementing your own driver
-
-`rx888_vhf.py` is the reference implementation used to validate tuner
-init/standby, register writes, PLL-lock behavior, and tracking-filter
-configuration on real RX888 mk2 hardware. Diff your implementation against it and
-use it to track down differences.
 
 ### Bring-up sequence
 
