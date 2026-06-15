@@ -2,7 +2,9 @@
 
 A worked, end-to-end procedure for testing the RX888's VHF front end (R828D
 tuner) by listening to the FM broadcast band through ka9q-radio. radiod streams
-the ADC; a small host-side script tunes the tuner. They run **concurrently**.
+the ADC; a host-side driver tunes the tuner — interactively via the
+`vhf_fm_radio.py` **TUI (preferred)** or one-shot via the `vhf_tune.py` CLI. The
+tuner driver and radiod run **concurrently**.
 
 ## The mental model (read this first)
 
@@ -12,7 +14,7 @@ whole trick:
 ```
             Si5351
    CLKA (CLK0/PLL-A) ── ADC sample clock ──────────►  radiod  (owns this)
-   CLKB (CLK2/PLL-B) ── R828D reference ───────────►  vhf_tune.py (owns this)
+   CLKB (CLK2/PLL-B) ── R828D reference ───────────►  TUI / vhf_tune.py (owns this)
 
    FM station @ RF ──[R828D: LO = RF + 4.57 MHz]──► IF 4.570 MHz ──► ADC ──► radiod
 ```
@@ -20,9 +22,10 @@ whole trick:
 - **radiod** drives the RX888 over its normal direct-sampling path and owns the
   **ADC sample clock (CLKA)**. It has no idea the R828D exists — it just sees the
   ADC baseband spectrum.
-- **`vhf_tune.py --persist`** tunes only the **VHF front end** over EP0 (flips
-  `VHF_EN`, programs **CLKB** = 16 MHz tuner reference, sets the R828D PLL). It
-  never touches CLKA, so it runs alongside radiod (the two-actor EP0/EP1 model).
+- **The tuner driver** (the `vhf_fm_radio.py` TUI, or `vhf_tune.py --persist`)
+  tunes only the **VHF front end** over EP0 (flips `VHF_EN`, programs **CLKB** =
+  16 MHz tuner reference, sets the R828D PLL). It never touches CLKA, so it runs
+  alongside radiod (the two-actor EP0/EP1 model).
 - Because the tuner uses `LO = RF + 4.57 MHz`, the station you tune to always
   lands at **4.570 MHz** in the ADC spectrum. The WBFM receiver in
   `rx888-vhf-fm.conf` is parked exactly there.
@@ -37,6 +40,13 @@ whole trick:
   word). Older firmware (release 0.1.0) needs `--base` — see Troubleshooting.
 
 ## Procedure
+
+You drive the tuner two ways, both as the EP0 actor alongside radiod — pick one:
+
+- **`vhf_fm_radio.py` — the interactive TUI (preferred).** A live front panel:
+  tune with the arrow keys (the selected station always lands at radiod's
+  4.57 MHz, so audio follows automatically) plus live gain / AGC / filter control.
+- **`vhf_tune.py` — the CLI.** One-shot / scripted tuning; re-run it per station.
 
 ### 1. Start radiod with the VHF/FM config
 
@@ -55,7 +65,28 @@ First launch regenerates FFTW wisdom for the 384 kHz WBFM channel (cached in the
 `wisdom/` volume afterward, so subsequent starts are fast). Wait for radiod to
 report the stream is established before tuning.
 
-### 2. Tune the front end to a station
+### 2a. Drive the tuner — interactive TUI (preferred)
+
+```
+python3 vhf/vhf_fm_radio.py            # needs: pip install pyusb textual
+```
+
+It powers up the VHF front end, tunes an initial FM station, and shows a live
+panel with lock state, gains, filter, and IF. Keys:
+
+- **← / →** ±100 kHz, **PgUp / PgDn** ±1 MHz, **Home / End** band edges — retune;
+  the selected station always lands at 4.57 MHz, so radiod follows.
+- **l/L  m/M  v/V** — LNA / mixer / VGA gain ±1;  **a / A** — LNA / mixer AGC.
+- **b / B** — bandwidth;  **f** — channel filter on/off;  **e / w** — filter
+  extension bits.
+- **q** — quit and standby the front end (back to HF).
+
+The in-app help panel lists the full keymap (including IF-offset, reference, and
+cal-park probes for exploration). Leave it running and listen in another terminal
+(step 3); the audio tracks whatever you tune to. Use `--freq <hz>` to pick the
+starting station.
+
+### 2b. Drive the tuner — CLI (scripted / one-shot)
 
 Pick a strong local FM station and give its frequency **in Hz**:
 
@@ -74,22 +105,27 @@ Expect the tuner's checkpoints: `reg0=0x96 ... OK`, `CLKB ... enabled`, and
 
 (Needs `/dev/snd` on the host for audio — see the ka9q.sh start notes.)
 
-### 4. Hop stations — two ways
+### 4. Hop stations
 
-- **Fine (within the captured window):** the R828D's 8 MHz IF filter also passes
-  neighbours (~4.57 MHz ± 4 MHz). Retune the *receiver* without touching the
-  front end:
+- **With the TUI (easiest):** just use the arrow keys — radiod stays parked at
+  4.57 MHz and follows whatever you tune to.
+- **CLI, fine (within the captured window):** the R828D's 8 MHz IF filter also
+  passes neighbours (~4.57 MHz ± 4 MHz). Retune the *receiver* without touching
+  the front end:
   ```
   ./docker/ka9q-radio/ka9q.sh console
   control hf.local                  # curses tuner; move the FM-BCB channel
   ```
-- **Coarse (move the whole window):** re-run the tuner for a station outside the
-  current window:
+- **CLI, coarse (move the whole window):** re-run the tuner for a station outside
+  the current window:
   ```
   python3 vhf/vhf_tune.py 88500000 --persist
   ```
 
 ## Back to HF / cleanup
+
+The TUI standbys the front end automatically when you quit with **`q`**. For the
+CLI path, standby explicitly:
 
 ```
 python3 vhf/vhf_tune.py --standby    # R828D off, CLKB off, GPIO back to HF
@@ -117,7 +153,8 @@ fine; or just stop the container.)
 |---|---|
 | Config | `docker/ka9q-radio/rx888-vhf-fm.conf` |
 | Launcher | `./docker/ka9q-radio/ka9q.sh start --vhf` |
-| Tuner | `python3 vhf/vhf_tune.py <fm_hz> --persist` |
+| Tuner (TUI, preferred) | `python3 vhf/vhf_fm_radio.py` |
+| Tuner (CLI) | `python3 vhf/vhf_tune.py <fm_hz> --persist` |
 | Receiver park frequency | 4.570 MHz (`IF_CARRIER`); `LO = RF + 4.57 MHz` |
 | Tuner reference (CLKB) | 16 MHz |
 | ADC sample rate | 64.8 MHz (`samprate = 64m8`) |
