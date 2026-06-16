@@ -66,7 +66,6 @@ docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
-  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio
 ```
 
@@ -96,26 +95,13 @@ with "Error or device could not be found".  The mount is harmless
 (read-only) for the firmware-already-loaded case, so it is shown in
 both examples.
 
-The `wisdom` bind mount persists FFTW wisdom across runs.  On first
-run the entrypoint generates wisdom for the host CPU (FFTW wisdom is
-CPU-specific — it cannot be baked into a portable image).  Subsequent
-runs reuse the saved file.
+The ADC sample rate defaults to **64.8 Msps** (`64m8`).  To test at
+full rate (129.6 Msps), pass `-e ADC_SAMPRATE=129m6` on `docker run`
+(or `ADC_SAMPRATE=129m6 ./ka9q.sh start`).  Not every host can sustain
+129.6 Msps — the stock RX888mk2 may overheat without improved thermal pads.
 
-Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
-
-| Value        | First-run time           | Runtime FFT performance |
-|--------------|--------------------------|-------------------------|
-| `estimate`   | instant (default)        | slowest                 |
-| `measure`    | minutes                  | near-optimal            |
-| `patient`    | hours (1.62M-point FFT)  | optimal                 |
-| `exhaustive` | many hours to days       | marginally > patient    |
-
-The default is **`estimate`** so a cold boot of this test/eval image is
-instant — appropriate for firmware-compatibility checks, where optimal
-runtime FFT plans don't matter. Override with `-e FFTW_RIGOR=<value>` on
-`docker run` (or `FFTW_RIGOR=measure ./ka9q.sh start`), e.g.
-`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term and
-want the most efficient FFT plans.
+FFTW wisdom generation is skipped; radiod uses `FFTW_ESTIMATE` for
+instant startup.  This is appropriate for a firmware test/eval image.
 
 ### Tuning and listening (helper script)
 
@@ -215,14 +201,11 @@ docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
-  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio bash
 ```
 
-> The `wisdom` mount + the default `FFTW_RIGOR=estimate` keep this debug
-> shell's cold boot instant; without the wisdom mount you still pay only the
-> instant `estimate` plan. Point `/firmware` at wherever your built
-> `SDDC_FX3.img` lives (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
+> Point `/firmware` at wherever your built `SDDC_FX3.img` lives
+> (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
 
 Then inside the container:
 
