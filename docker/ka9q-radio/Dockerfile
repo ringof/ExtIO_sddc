@@ -96,7 +96,7 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so sig_gen.so control tune monitor powers
+    radiod rx888.so sig_gen.so control tune monitor powers pcmrecord
 
 # Build libonion (web framework ka9q-web links against) from source — not
 # packaged in Debian. SSL/gnutls left at default (on) to match the reference
@@ -161,6 +161,7 @@ COPY --from=builder /build/ka9q-radio/src/control /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/tune /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/monitor /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/powers /usr/local/bin/
+COPY --from=builder /build/ka9q-radio/src/pcmrecord /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 
