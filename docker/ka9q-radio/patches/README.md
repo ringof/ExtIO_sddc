@@ -1,7 +1,7 @@
 # ka9q-radio patches applied in this container
 
 These patches are applied during the Docker build (see Dockerfile)
-against the pinned `KA9Q_RADIO_SHA` (currently `87567fa`).  Each patch is a
+against the pinned `KA9Q_RADIO_SHA` (currently `b4388d87`).  Each patch is a
 deliberate ask of the upstream maintainer; the set is kept minimal so that
 asks are focused on real, irreducible incompatibilities — not noise.
 
@@ -11,7 +11,7 @@ match, so the build also succeeds with zero patches applied.  Files with a
 
 ## Active
 
-**None.** As of `87567fa` the container builds **vanilla ka9q-radio** — every
+**None.** As of `b4388d87` the container builds **vanilla ka9q-radio** — every
 local compatibility ask has been upstreamed (see below).  This is the goal
 state: no host-side patches needed for ka9q-radio to drive this firmware.
 
