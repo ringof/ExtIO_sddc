@@ -98,6 +98,12 @@ RUN make -C src -j$(nproc) \
     ARCHOPTS="" \
     radiod rx888.so sig_gen.so control tune monitor powers pcmrecord
 
+# Build ft8_lib encode/decode tools (pinned for reproducibility).
+ARG FT8_LIB_SHA=9fec6ca39886edbf96f4f5e71edc76da5074e871
+RUN git clone https://github.com/kgoba/ft8_lib.git /build/ft8_lib \
+    && git -C /build/ft8_lib checkout "${FT8_LIB_SHA}" \
+    && make -C /build/ft8_lib gen_ft8 decode_ft8
+
 # Build libonion (web framework ka9q-web links against) from source — not
 # packaged in Debian. SSL/gnutls left at default (on) to match the reference
 # deployment's binary; other optional backends disabled to avoid extra deps.
@@ -164,6 +170,8 @@ COPY --from=builder /build/ka9q-radio/src/powers /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/pcmrecord /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
+COPY --from=builder /build/ft8_lib/gen_ft8 /usr/local/bin/
+COPY --from=builder /build/ft8_lib/decode_ft8 /usr/local/bin/
 
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
@@ -191,6 +199,7 @@ COPY tests/bench/bench_rf_test.py   /usr/local/lib/bench/
 COPY tests/bench/rung2a_cat_test.py /usr/local/lib/bench/
 COPY tests/bench/rung2b_audio_test.py /usr/local/lib/bench/
 COPY tests/bench/rung3_loopback_test.py /usr/local/lib/bench/
+COPY tests/bench/rung4_ft8_test.py     /usr/local/lib/bench/
 
 # Copy entrypoint
 COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh
