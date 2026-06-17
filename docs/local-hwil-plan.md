@@ -9,10 +9,20 @@ Status: **Approved; in progress.**
 - **2b** — QDX USB audio path: S24 stereo 48 kHz via hw: (no plughw:),
   capture with energy check, PTT+playback. RF output confirmed by operator
   using independent HF receiver.
-- **3** — CW carrier confirmed in `powers` spectrum: QDX TX at 10 MHz +
-  1500 Hz tone, 2W through 120 dB attenuation, peak at -82.7 dB with
-  53 dB SNR in 1 Hz bins. Verified manually (not yet automated).
-- Rungs 1, 4–7 pending.
+- **3** — Automated RF loopback: QDX TX tone → attenuator → RX888 → radiod →
+  `powers` spectrum. Script validates peak within ±500 Hz, ≥10 dB above
+  median. CW carrier confirmed manually at 10 MHz + 1500 Hz, 53 dB SNR.
+- **4 (FT8)** — End-to-end FT8 decode across 80/40/30/20m. Random message
+  per run, gen_ft8 → QDX TX → pcmrecord (-8, 15s slot-aligned) → decode_ft8.
+  All 4 bands decoded. (`rung4_ft8_test.py`)
+- **5 (WSPR)** — End-to-end WSPR decode on 40m (7.0386 MHz). wsprsimwav →
+  QDX TX → pcmrecord (-w, 120s slot-aligned) → wsprd. Reports SNR for
+  attenuation calibration (-10 to -15 dB target). Docker image now builds
+  wspr-cui (wsprsimwav + wsprd) with gfortran. (`wspr_roundtrip_test.py`)
+- **Awaiting hardware validation:** WSPR roundtrip test is committed but not
+  yet run on real hardware. Needs operator to confirm decode + calibrate
+  attenuation.
+- Rung 1 (HITL image parity) not yet started.
 
 ## Purpose
 
@@ -266,8 +276,14 @@ turn, so the bench must be self-recovering and bounded:
 
 ## Next step
 
-Rungs G0, 2a, 2b proven on real hardware; rung 3 (CW carrier in `powers`)
-confirmed manually.  Next: **automate rung 3** as a scripted test, then
-**rung 4** (FT8 decode automation — off-hardware) and **rung 5** (TX/RX FT8
-end-to-end over the bench).  Rung 1 (HITL image parity) can proceed in
-parallel.  Plan 2 (remote HWIL CI + security) is written separately.
+Rungs G0 through 5 (WSPR) are implemented and committed.  FT8 rung 4
+is proven on real hardware (all 4 bands decode).  WSPR rung 5 is committed
+but **awaiting first hardware run** — operator needs to confirm decode and
+calibrate attenuation to -10 to -15 dB SNR.
+
+Remaining:
+- **WSPR hardware validation** — run `wspr_roundtrip_test.py` on the bench.
+- **Rung 1** (HITL image parity) — not yet started.
+- **Test suite hardening** — see GitHub issues for: G0/health tests in CI,
+  WSPR fixture, bench aggregate runner, multi-device test infrastructure.
+- Plan 2 (remote HWIL CI + security) is written separately.
