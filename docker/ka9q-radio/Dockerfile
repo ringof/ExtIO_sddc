@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     git \
     ca-certificates \
+    gfortran \
     libavahi-client-dev \
     libbsd-dev \
     libfftw3-dev \
@@ -104,6 +105,14 @@ RUN git clone https://github.com/kgoba/ft8_lib.git /build/ft8_lib \
     && git -C /build/ft8_lib checkout "${FT8_LIB_SHA}" \
     && make -C /build/ft8_lib gen_ft8 decode_ft8
 
+# Build wspr-cui encode/decode tools (pinned for reproducibility).
+# wsprsimwav renders WSPR audio (48 kHz S16_LE mono); wsprd decodes (12 kHz input).
+# wsprsimwav returns exit code 1 on success (upstream bug), so validate by output files.
+ARG WSPR_CUI_SHA=839b86fd9d81a9f1d23ac8b70de6817b8c053305
+RUN git clone https://github.com/jj1bdx/wspr-cui.git /build/wspr-cui \
+    && git -C /build/wspr-cui checkout "${WSPR_CUI_SHA}" \
+    && make -C /build/wspr-cui/wsprd wsprsimwav wsprd
+
 # Build libonion (web framework ka9q-web links against) from source — not
 # packaged in Debian. SSL/gnutls left at default (on) to match the reference
 # deployment's binary; other optional backends disabled to avoid extra deps.
@@ -139,6 +148,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavahi-client3 \
     libbsd0 \
     libfftw3-single3 \
+    libgfortran5 \
     libiniparser1 \
     libncursesw6 \
     libopus0 \
@@ -172,6 +182,8 @@ COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ft8_lib/gen_ft8 /usr/local/bin/
 COPY --from=builder /build/ft8_lib/decode_ft8 /usr/local/bin/
+COPY --from=builder /build/wspr-cui/wsprd/wsprsimwav /usr/local/bin/
+COPY --from=builder /build/wspr-cui/wsprd/wsprd /usr/local/bin/
 
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
@@ -200,6 +212,7 @@ COPY tests/bench/rung2a_cat_test.py /usr/local/lib/bench/
 COPY tests/bench/rung2b_audio_test.py /usr/local/lib/bench/
 COPY tests/bench/rung3_loopback_test.py /usr/local/lib/bench/
 COPY tests/bench/rung4_ft8_test.py     /usr/local/lib/bench/
+COPY tests/bench/wspr_roundtrip_test.py /usr/local/lib/bench/
 
 # Copy entrypoint
 COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh
