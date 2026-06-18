@@ -18,10 +18,14 @@ body:
         - **Scope it to the firmware.** Demodulation, channelization, audio,
           waterfalls, and UI belong in the host (ka9q-radio, rx888_tools).
           If it can be done host-side, it should be.
-        - **"Add VHF / R828D tuning" is out of scope.** The firmware is HF
-          direct-sampling only and the GPL R82xx driver was removed for a
-          license conflict (see README "Limitations"). VHF belongs in a
-          host-side driver over the I2C passthrough.
+        - **R828D / VHF requests are limited, not banned.** The firmware is
+          HF direct-sampling and the GPL R82xx driver was removed for a license
+          conflict (see README "Limitations"). **Simple, bounded R828D control
+          — e.g. init and standby/power-down — may be accepted if you make a
+          good case.** Full VHF tuning, gain-stage control, channel filtering,
+          and anything resembling a tuner driver are refused — that belongs in
+          a host-side driver over the I2C passthrough. Tell us which side of
+          that line your request is on, and why.
         - **Justify it.** A feature is a maintenance and recoverability
           liability forever. Tell us the problem, not just the solution.
         - Every required field below must be answered. Requests that gut
@@ -37,7 +41,7 @@ body:
           required: true
         - label: This genuinely belongs in the FIRMWARE — it cannot reasonably be done host-side (ka9q-radio / rx888_tools).
           required: true
-        - label: This is not a request for R828D / VHF tuner support (HF direct-sampling only — see README "Limitations").
+        - label: If this involves the R828D / VHF tuner, it is limited to simple bounded control (e.g. init / standby) — I am NOT asking for VHF tuning, gain-stage, or channel-filter control in firmware (those belong host-side; see README "Limitations").
           required: true
         - label: I have read the relevant docs (`README.md`, `docs/architecture.md`, `docs/vendor-protocol-plan.md`) and this does not already exist.
           required: true

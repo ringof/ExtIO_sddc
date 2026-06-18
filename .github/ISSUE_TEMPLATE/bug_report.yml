@@ -37,7 +37,7 @@ body:
           required: true
         - label: I confirmed the failure is in THIS firmware, not the host app, RF front-end, power supply, or USB cabling/hub.
           required: true
-        - label: I am not asking for R828D / VHF tuner support — the firmware is HF direct-sampling only (see README "Limitations").
+        - label: This is a defect report, not a request for VHF tuning — the firmware is HF direct-sampling (R828D control, if any, is limited to simple init/standby; see README "Limitations").
           required: true
 
   - type: input

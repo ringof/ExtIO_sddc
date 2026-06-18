@@ -7,8 +7,10 @@ contact_links:
     about: >
       Not sure it's a firmware defect? Tuning, antenna, host-app, clocking,
       or power questions belong in Discussions, not the bug tracker.
-  - name: R828D / VHF tuner support
+  - name: R828D / VHF tuner scope
     url: https://github.com/ringof/rx888-firmware#limitations
     about: >
-      This firmware is HF direct-sampling only. The R828D VHF tuner is not
-      driven by the firmware — read the README "Limitations" section first.
+      The firmware is HF direct-sampling. Simple bounded R828D control (init,
+      standby) can be proposed as a feature request with a good argument; full
+      VHF tuning belongs in a host-side driver. Read the README "Limitations"
+      first.
