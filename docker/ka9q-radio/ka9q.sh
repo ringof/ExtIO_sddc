@@ -3,6 +3,7 @@
 # ka9q.sh — helper for the ka9q-radio Docker image.
 #
 # Subcommands:
+#   build                  Build the image (run from project root).
 #   start                  Launch the container detached.
 #   console                Drop into a bash shell inside the running container.
 #   monitor [stream-name]  Run ka9q's `monitor` inside the container with
@@ -38,9 +39,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # the repo, e.g.  FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start
 FIRMWARE_DIR="${FIRMWARE_DIR:-$PROJECT_ROOT/SDDC_FX3}"
 
-# FFTW planning rigor. Default "estimate" for an instant cold boot on this
-# test/eval image; set FFTW_RIGOR=measure|patient for long-term operation.
-FFTW_RIGOR="${FFTW_RIGOR:-estimate}"
+# ADC sample rate. Default 64m8 (64.8 Msps); set ADC_SAMPRATE=129m6 for
+# full-rate (129.6 Msps) if the RX888's thermal headroom allows it.
+ADC_SAMPRATE="${ADC_SAMPRATE:-64m8}"
 
 usage() {
     sed -n '3,/^$/s/^# \?//p' "$0"
@@ -48,6 +49,11 @@ usage() {
 
 container_running() {
     docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+}
+
+cmd_build() {
+    echo "Building image '$IMAGE_NAME' from project root..."
+    docker build -f docker/ka9q-radio/Dockerfile -t "$IMAGE_NAME" "$PROJECT_ROOT"
 }
 
 cmd_start() {
@@ -61,13 +67,17 @@ cmd_start() {
         echo "         external firmware. Upload will fail unless the device is"
         echo "         already loaded (PID 0x00F1)."
     fi
-    mkdir -p "$PROJECT_ROOT/wisdom"
     # /dev/snd + audio group give the in-container `monitor` access to host
     # ALSA so audio actually plays.  Harmless on hosts without sound — the
     # device simply isn't bound and `monitor` falls back to silent operation.
     local snd_args=()
     if [ -e /dev/snd ]; then
         snd_args+=(--device /dev/snd --group-add audio)
+    fi
+    # QDX serial passthrough (bench tools use /dev/ttyACM0 for CAT control)
+    local qdx_args=()
+    if [ -e /dev/ttyACM0 ]; then
+        qdx_args+=(--device /dev/ttyACM0)
     fi
     # --network host is REQUIRED for radiod's in-container cold start. After it
     # uploads firmware the FX3 re-enumerates (00f3->00f1); that re-acquire is a
@@ -84,9 +94,9 @@ cmd_start() {
         -v /dev/bus/usb:/dev/bus/usb \
         -v /run/udev:/run/udev:ro \
         -v "$FIRMWARE_DIR:/firmware" \
-        -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
         "${snd_args[@]}" \
-        -e FFTW_RIGOR="$FFTW_RIGOR" \
+        "${qdx_args[@]}" \
+        -e ADC_SAMPRATE="$ADC_SAMPRATE" \
         "$IMAGE_NAME" >/dev/null
     echo "Container '$CONTAINER_NAME' started."
     echo "Follow logs:  docker logs -f $CONTAINER_NAME"
@@ -150,6 +160,7 @@ cmd_stop() {
 }
 
 case "${1:-help}" in
+    build)          shift; cmd_build "$@" ;;
     start)          shift; cmd_start "$@" ;;
     console)        shift; cmd_console "$@" ;;
     monitor)        shift; cmd_monitor "$@" ;;

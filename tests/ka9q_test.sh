@@ -340,7 +340,7 @@ if [[ ! -f "$FIRMWARE" ]]; then
 fi
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "Bail out! docker image '$IMAGE' not found — build it:"
-    echo "#   docker build -t $IMAGE docker/ka9q-radio/"
+    echo "#   docker build -f docker/ka9q-radio/Dockerfile -t $IMAGE ."
     exit 1
 fi
 if ! dev_present_app && ! dev_present_boot; then

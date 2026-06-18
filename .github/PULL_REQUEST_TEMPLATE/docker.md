@@ -10,7 +10,7 @@ scripts, ka9q-radio patches, container READMEs).
 ## Author self-check
 
 - [ ] CI is green.
-- [ ] Image builds cleanly from scratch: `docker build --no-cache -t ka9q-radio docker/ka9q-radio/` (or the equivalent for the touched container).
+- [ ] Image builds cleanly from scratch: `docker build --no-cache -f docker/ka9q-radio/Dockerfile -t ka9q-radio .` (or the equivalent for the touched container).
 - [ ] If a `patches/` file was added or removed, `docker/ka9q-radio/patches/README.md` is updated and `docker/ka9q-radio/README.md` "Known compatibility notes" is consistent.
 - [ ] No firmware-side fix exists that would supersede a new container patch — if it does, fix the firmware instead.
 

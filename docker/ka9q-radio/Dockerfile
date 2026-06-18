@@ -1,6 +1,7 @@
 # ka9q-radio test environment for RX888mk2 firmware validation
 #
-# Build:   docker build -t ka9q-radio docker/ka9q-radio/
+# Build (from project root):
+#          docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .
 # Run:     docker run --rm -it --privileged --network host \
 #            -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro ka9q-radio
 #
@@ -23,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     git \
     ca-certificates \
+    gfortran \
     libavahi-client-dev \
     libbsd-dev \
     libfftw3-dev \
@@ -43,32 +45,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Pin to a specific commit so audit results are reproducible. Bump
 # this SHA when intentionally retesting against newer ka9q-radio.
 #
-# Pinned to 87567fa (main, 2026-06). This is the host-side-Si5351 rx888 driver
-# (si5351.c: si5351_solve computes the PLL/MultiSynth solution and writes it
-# over I2CWFX3), plus a round of fixes that landed after our first eval at
-# 21d51fac — and which retire the last local patch:
-#  - Both TUNERSTDBY sends removed/#if 0'd (no tuner on RX888mk2) — this is
-#    exactly what container patch 04 did, so 04 is now upstream and retired.
-#    With 01/02 (powers float/double) already upstream, ZERO local patches
-#    remain: this builds vanilla ka9q-radio.
-#  - ~10 microsleeps removed; the blind post-clock sleep replaced by a real
-#    Si5351 lock poll (reg0 LOL_A + reg16 CLK0_PDN, ~50 ms) — reads CLK0 state
-#    back, dovetailing with this firmware's GPIF preflight.
-#  - Reads + logs the rx888 firmware version via TESTFX3 at startup (first time
-#    ka9q actually sends TESTFX3 — see compat-audit §9).
-# Paired with ka9q-web 91cbfca below (newest-with-newest). See
-# docs/ka9q-compat-audit.md and docker/ka9q-radio/patches/README.md.
+# Pinned to b4388d87 (main, 2026-06-15). Host-side Si5351 rx888 driver
+# (si5351.c), zero local patches — builds vanilla ka9q-radio.
 #
-# Carried over from the 21d51fac eval (still true here):
-#  - Init-time USB reset defaults OFF (config key `reset`) — no DFU flip, so the
-#    old `hack_no_usb_reset` workaround stays retired (see rx888-test.conf).
-#  - rx888_usb_init() acquires + NULL-checks the device handle before any
-#    control transfer (addresses the 6a5094ac command_send segfault, audit §10).
-#  - Cold start (radiod uploads firmware) requires --network host: the
-#    re-enumeration is a netns-scoped USB hotplug event a bridge container can't
-#    see (audit §1). Validated on the bench: hot start, cold start, restart
-#    soak, and the live spectrum all pass at 21d51fac.
-ARG KA9Q_RADIO_SHA=87567fa85fa508de813446613c176ed5bd34d601
+# Key changes since the previous pin (87567fa):
+#  - Watchdog: 5s timer resets only after a successful USB transfer (780882fa).
+#  - Globals (usb_device_gone, Power_smooth, Reset) moved into struct sdrstate.
+#  - isfinite() guarded with !isnan() to prevent float exceptions under debug.
+#  - TESTFX3 firmware-query failure is now non-fatal (won't skip init).
+#  - -march=native OFF by default (af511009); use `make NATIVE=1` to opt in.
+#
+# Still true (inherited from 87567fa / 21d51fac):
+#  - Si5351 lock poll replaces blind sleep; TUNERSTDBY removed; firmware
+#    version logged via TESTFX3; USB reset defaults OFF (config key `reset`).
+#  - Cold start requires --network host (audit §1). See
+#    docs/ka9q-compat-audit.md §12 and docker/ka9q-radio/patches/README.md.
+ARG KA9Q_RADIO_SHA=b4388d8733fd49698848948bd9bac82a828374dc
 WORKDIR /build
 RUN git clone https://github.com/ka9q/ka9q-radio.git \
     && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
@@ -80,7 +72,7 @@ WORKDIR /build/ka9q-radio
 # COPY the whole patches/ tree (not just *.patch) so the build succeeds
 # even when zero active patches exist — disabled/historical patches kept
 # in-tree under *.patch.disabled are intentionally skipped by the glob.
-COPY patches/ /tmp/patches/
+COPY docker/ka9q-radio/patches/ /tmp/patches/
 RUN applied=0; \
     for p in /tmp/patches/*.patch; do \
         [ -e "$p" ] || break; \
@@ -105,7 +97,21 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so sig_gen.so control tune monitor powers
+    radiod rx888.so sig_gen.so control tune monitor powers pcmrecord
+
+# Build ft8_lib encode/decode tools (pinned for reproducibility).
+ARG FT8_LIB_SHA=9fec6ca39886edbf96f4f5e71edc76da5074e871
+RUN git clone https://github.com/kgoba/ft8_lib.git /build/ft8_lib \
+    && git -C /build/ft8_lib checkout "${FT8_LIB_SHA}" \
+    && make -C /build/ft8_lib gen_ft8 decode_ft8
+
+# Build wspr-cui encode/decode tools (pinned for reproducibility).
+# wsprsimwav renders WSPR audio (48 kHz S16_LE mono); wsprd decodes (12 kHz input).
+# wsprsimwav returns exit code 1 on success (upstream bug), so validate by output files.
+ARG WSPR_CUI_SHA=839b86fd9d81a9f1d23ac8b70de6817b8c053305
+RUN git clone https://github.com/jj1bdx/wspr-cui.git /build/wspr-cui \
+    && git -C /build/wspr-cui checkout "${WSPR_CUI_SHA}" \
+    && make -C /build/wspr-cui/wsprd wsprsimwav wsprd
 
 # Build libonion (web framework ka9q-web links against) from source — not
 # packaged in Debian. SSL/gnutls left at default (on) to match the reference
@@ -123,14 +129,14 @@ RUN git clone --depth 1 https://github.com/davidmoreno/onion.git /build/onion \
 
 # Build ka9q-web as a sibling of the ka9q-radio tree (its Makefile uses
 # KA9Q_RADIO_DIR=../ka9q-radio/src and links that tree's multicast.o/
-# status.o/misc.o/decode_status.o/rtp.o). Pinned to 91cbfca (HEAD, 2026-06)
+# status.o/misc.o/decode_status.o/rtp.o). Pinned to aba3ab4 (HEAD, 2026-06-15)
 # to pair newest-with-newest against the ka9q-radio SHA above. ka9q-web is an
 # independent moving part: this link step is the decisive compatibility check.
 # If it fails to build, the firmware smoke test does NOT need ka9q-web — pin a
 # ka9q-web commit known to pair with this ka9q-radio SHA, or drop this step.
 ENV LIBRARY_PATH=/usr/local/lib C_INCLUDE_PATH=/usr/local/include
 RUN git clone https://github.com/wa2n-code/ka9q-web.git /build/ka9q-web \
-    && git -C /build/ka9q-web checkout 91cbfca25eef7b60923eebec120595dbbba5053d \
+    && git -C /build/ka9q-web checkout aba3ab4af281f4dcb63c76e1b499dd3c40f7855a \
     && make -C /build/ka9q-web -j"$(nproc)"
 
 # ---- Runtime image ----
@@ -142,6 +148,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavahi-client3 \
     libbsd0 \
     libfftw3-single3 \
+    libgfortran5 \
     libiniparser1 \
     libncursesw6 \
     libopus0 \
@@ -158,6 +165,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     usbutils \
     libgnutls30 \
     libgcrypt20 \
+    python3 \
+    python3-serial \
+    sox \
+    alsa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
@@ -166,8 +177,13 @@ COPY --from=builder /build/ka9q-radio/src/control /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/tune /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/monitor /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/powers /usr/local/bin/
+COPY --from=builder /build/ka9q-radio/src/pcmrecord /usr/local/bin/
 COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
+COPY --from=builder /build/ft8_lib/gen_ft8 /usr/local/bin/
+COPY --from=builder /build/ft8_lib/decode_ft8 /usr/local/bin/
+COPY --from=builder /build/wspr-cui/wsprd/wsprsimwav /usr/local/bin/
+COPY --from=builder /build/wspr-cui/wsprd/wsprd /usr/local/bin/
 
 # ka9q-web (web spectrum/waterfall viewer) + its libonion dependency.
 # Run inside the container, e.g.:
@@ -186,10 +202,20 @@ RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio /usr/local
 COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 
 # Install minimal rx888 config for HF direct-sampling test
-COPY rx888-test.conf /etc/radio/radiod@rx888-test.conf
+COPY docker/ka9q-radio/rx888-test.conf /etc/radio/radiod@rx888-test.conf
+
+# Copy bench tools (QDX CAT, audio, RF test, test scripts)
+COPY tests/bench/qdx_cat.py            /usr/local/lib/bench/
+COPY tests/bench/qdx_audio.py          /usr/local/lib/bench/
+COPY tests/bench/rf_test.py            /usr/local/lib/bench/
+COPY tests/bench/cat_test.py           /usr/local/lib/bench/
+COPY tests/bench/audio_test.py         /usr/local/lib/bench/
+COPY tests/bench/loopback_test.py      /usr/local/lib/bench/
+COPY tests/bench/ft8_test.py           /usr/local/lib/bench/
+COPY tests/bench/wspr_test.py          /usr/local/lib/bench/
 
 # Copy entrypoint
-COPY entrypoint.sh /entrypoint.sh
+COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

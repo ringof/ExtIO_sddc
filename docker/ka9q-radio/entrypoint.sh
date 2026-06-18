@@ -33,44 +33,25 @@ else
     echo "Make sure to run with: --privileged -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro"
 fi
 
-# Pre-generate FFTW wisdom on first run.  Wisdom is CPU-specific
-# (encodes which SIMD instruction set to use), so it cannot be baked
-# into a portable image — it must be generated on the host CPU that
-# will run the container.  Persist /var/lib/ka9q-radio across runs
-# (e.g. -v $(pwd)/wisdom:/var/lib/ka9q-radio) to skip this on every
-# start.  Sizes match the default rx888-test.conf (64.8 MHz, 20 ms
-# blocks → rof1620000; 12 kHz output → cob240).
-#
-# Planning rigor is configurable via FFTW_RIGOR (estimate|measure|
-# patient|exhaustive).  Default here is "estimate": instant cold boot,
-# which is what you want for a firmware-compatibility test/eval image
-# (you rarely care about optimal runtime FFT plans during a bring-up
-# check).  Set FFTW_RIGOR=measure (minutes, near-optimal) or =patient
-# (hours for the 1.62M-point FFT, optimal) if you intend to operate the
-# radio long-term.
-WISDOM_FILE="/var/lib/ka9q-radio/wisdom"
-FFTW_RIGOR="${FFTW_RIGOR:-estimate}"
-case "$FFTW_RIGOR" in
-    estimate)   WISDOM_FLAG="-e" ;;
-    measure)    WISDOM_FLAG="-m" ;;
-    patient)    WISDOM_FLAG="-p" ;;
-    exhaustive) WISDOM_FLAG="-x" ;;
+# ADC sample rate — substituted into the radiod config at startup.
+# Default 64m8 (64.8 Msps). Set ADC_SAMPRATE=129m6 for full-rate
+# (129.6 Msps) if the RX888's thermal headroom allows it.
+ADC_SAMPRATE="${ADC_SAMPRATE:-64m8}"
+CONF="/etc/radio/radiod@rx888-test.conf"
+case "$ADC_SAMPRATE" in
+    64m8|64800000)  ADC_SAMPRATE="64m8" ;;
+    129m6|129600000) ADC_SAMPRATE="129m6" ;;
     *)
-        echo "WARNING: unknown FFTW_RIGOR='$FFTW_RIGOR'; using 'measure'."
-        FFTW_RIGOR="measure"
-        WISDOM_FLAG="-m"
+        echo "WARNING: unknown ADC_SAMPRATE='$ADC_SAMPRATE'; using 64m8."
+        ADC_SAMPRATE="64m8"
         ;;
 esac
-if [ ! -s "$WISDOM_FILE" ]; then
-    echo "Generating FFTW wisdom (rigor=$FFTW_RIGOR) for this host..."
-    echo "  (override with -e FFTW_RIGOR=estimate|measure|patient|exhaustive)"
-    mkdir -p "$(dirname "$WISDOM_FILE")" /etc/fftw
-    if fftwf-wisdom -v "$WISDOM_FLAG" -T "$(nproc)" -o "$WISDOM_FILE" rof1620000 cob240; then
-        cp -f "$WISDOM_FILE" /etc/fftw/wisdomf 2>/dev/null || true
-        echo "Wisdom saved to $WISDOM_FILE."
-    else
-        echo "WARNING: wisdom generation failed; radiod will fall back to FFTW_ESTIMATE."
-    fi
-fi
+sed -i "s/^samprate = 64m8$/samprate = $ADC_SAMPRATE/" "$CONF"
+echo "ADC sample rate: $ADC_SAMPRATE"
+
+# FFTW wisdom — skip generation, just use ESTIMATE.  Generating wisdom
+# inside a container is impractical (the large FFT sizes take forever
+# and the result is CPU-specific anyway).  ESTIMATE is fine for a
+# firmware test/eval image.
 
 exec "$@"

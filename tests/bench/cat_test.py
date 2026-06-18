@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""tests/bench/cat_test.py — QDX CAT serial control test.
+
+Proves that the bench host can set frequency, key/unkey PTT, and read
+responses from the QDX over its USB Virtual COM Port using the Kenwood
+TS-480/TS-440 CAT command subset.  No RX888, no RF — just the QDX
+connected via USB.
+
+The QDX firmware is the independent oracle: TQ; reads the QDX's actual
+TX/RX state machine, not an echo of what we sent.
+"""
+
+import argparse
+import os
+import sys
+
+# Allow importing qdx_cat from the same directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from qdx_cat import QdxCat, QdxCatError
+
+
+def main():
+    p = argparse.ArgumentParser(description="QDX CAT serial test")
+    p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
+    p.add_argument("--baud", type=int, default=9600, help="baud rate")
+    p.add_argument("--freq-offset", type=int, default=1000,
+                   help="Hz offset for set-frequency test (default: 1000)")
+    args = p.parse_args()
+
+    port = args.port
+    baud = args.baud
+    freq_offset = args.freq_offset
+
+    checks = 0
+    firmware = "?"
+
+    try:
+        with QdxCat(port, baudrate=baud) as qdx:
+            # 1. Liveness — FA; query (proven on hardware)
+            orig_freq = qdx.get_freq()
+            print(f"CAT: freq read -> {orig_freq} Hz")
+            checks += 1
+
+            # 2. Identity + firmware (informational, not gating)
+            try:
+                id_str = qdx.get_id()
+                firmware = qdx.get_firmware()
+                print(f"CAT: ID -> {id_str}, firmware -> {firmware}")
+            except QdxCatError as exc:
+                print(f"CAT: ID/firmware query failed ({exc}), continuing")
+            checks += 1
+
+            # 3. Frequency set (+offset) and read-back
+            target = orig_freq + freq_offset
+            readback = qdx.set_freq(target)
+            if readback != target:
+                print(f"CAT FAIL — freq set: expected {target}, "
+                      f"read back {readback}")
+                sys.exit(1)
+            print(f"CAT: freq set {target} Hz, read-back matches OK")
+            checks += 1
+
+            # 4. Frequency restore
+            restored = qdx.set_freq(orig_freq)
+            if restored != orig_freq:
+                print(f"CAT FAIL — freq restore: expected {orig_freq}, "
+                      f"read back {restored}")
+                sys.exit(1)
+            print(f"CAT: freq restore -> {restored} Hz OK")
+            checks += 1
+
+            # 5. PTT cycle: TX; -> TQ1 -> RX; -> TQ0
+            pre = qdx.get_tx_state()
+            if pre:
+                print("CAT FAIL — QDX already in TX before PTT test")
+                sys.exit(1)
+            print("CAT: TQ -> RX (pre-PTT) OK")
+            checks += 1
+
+            qdx.tx_on()
+            tx_state = qdx.get_tx_state()
+            if not tx_state:
+                print("CAT FAIL — TQ not TX after TX;")
+                sys.exit(1)
+            print("CAT: TX; -> TQ1 OK")
+
+            qdx.tx_off()
+            rx_state = qdx.get_tx_state()
+            if rx_state:
+                print("CAT FAIL — TQ not RX after RX;")
+                sys.exit(1)
+            print("CAT: RX; -> TQ0 OK")
+            checks += 1
+
+            # 6. IF; cross-check — freq matches FA
+            try:
+                info = qdx.get_info()
+                if info["freq"] != orig_freq:
+                    print(f"CAT FAIL — IF freq {info['freq']} != "
+                          f"FA freq {orig_freq}")
+                    sys.exit(1)
+                print(f"CAT: IF; -> freq={info['freq']} "
+                      f"mode={info['mode']} tx={'TX' if info['tx'] else 'RX'} OK")
+            except QdxCatError as exc:
+                print(f"CAT: IF; query failed ({exc}), continuing")
+            checks += 1
+
+        # Verdict
+        print(f"CAT OK ({checks} checks, fw {firmware})")
+
+    except QdxCatError as exc:
+        print(f"CAT FAIL — {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"CAT FAIL — unexpected: {exc}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

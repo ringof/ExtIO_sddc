@@ -204,7 +204,7 @@ This plan is ready to execute pending OK on this document.  Once approved, work 
 - **Current `main`:** includes PR #91 merge (`f9077f7` and predecessors).  All work below targets a fresh branch off `main`.
 - **Suggested branch name:** `claude/vendor-protocol-v1` (or similar; the executing instance picks).
 - **Build the firmware:** `cd SDDC_FX3 && make clean && make all` → produces `SDDC_FX3.img`.
-- **Build the test-harness image:** `docker build -t ka9q-radio docker/ka9q-radio/`.
+- **Build the test-harness image:** `docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .`.
 - **End-to-end validation requires real RX888mk2 hardware.**  An instance running headlessly can build, syntax-check, run static patch-apply, and run unit-style tests, but cannot exercise the streaming path.  When end-to-end testing is required, ask the user to run the helper script.
 
 ## Files in scope per commit
@@ -263,7 +263,7 @@ CyBool_t si5351_clk0_enabled(void)
   - "What this tests" bullet 2 — revert to: *"Si5351 clock programming via `I2CWFX3` (host-side direct programming, validated by SDDC firmware's chip-level preflight check)."*
   - "Known compatibility notes" — remove the "Missing STARTADC" bullet entirely.
 
-**Validation:** rebuild image with `docker build --no-cache -t ka9q-radio docker/ka9q-radio/`; re-run the three-terminal flow; confirm `rx888 running` and audible output via `./ka9q.sh monitor`.
+**Validation:** rebuild image with `docker build --no-cache -f docker/ka9q-radio/Dockerfile -t ka9q-radio .`; re-run the three-terminal flow; confirm `rx888 running` and audible output via `./ka9q.sh monitor`.
 
 ### Commit 3 — `feat(USBHandler): add GETCAPABILITIES and GETSTATE`
 

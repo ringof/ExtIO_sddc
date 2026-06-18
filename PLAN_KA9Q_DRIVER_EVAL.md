@@ -148,7 +148,7 @@ Sections (the "several systems we need to run our harnessing"):
 
 ## Validation (bench)
 
-- `docker build -t ka9q-radio docker/ka9q-radio/` must succeed (compiles new
+- `docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .` must succeed (compiles new
   `rx888.c` + `si5351.o` into `rx888.so`; builds ka9q-web).
 - Run container; `radiod` must reach `rx888 running` without the §10 segfault
   and without dropping to DFU.

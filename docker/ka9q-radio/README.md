@@ -7,7 +7,7 @@ Docker container for testing SDDC_FX3 firmware compatibility with
 ## Build
 
 ```
-docker build -t ka9q-radio docker/ka9q-radio/
+docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .
 ```
 
 ## Find your USB device
@@ -66,7 +66,6 @@ docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
-  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio
 ```
 
@@ -96,26 +95,13 @@ with "Error or device could not be found".  The mount is harmless
 (read-only) for the firmware-already-loaded case, so it is shown in
 both examples.
 
-The `wisdom` bind mount persists FFTW wisdom across runs.  On first
-run the entrypoint generates wisdom for the host CPU (FFTW wisdom is
-CPU-specific — it cannot be baked into a portable image).  Subsequent
-runs reuse the saved file.
+The ADC sample rate defaults to **64.8 Msps** (`64m8`).  To test at
+full rate (129.6 Msps), pass `-e ADC_SAMPRATE=129m6` on `docker run`
+(or `ADC_SAMPRATE=129m6 ./ka9q.sh start`).  Not every host can sustain
+129.6 Msps — the stock RX888mk2 may overheat without improved thermal pads.
 
-Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
-
-| Value        | First-run time           | Runtime FFT performance |
-|--------------|--------------------------|-------------------------|
-| `estimate`   | instant (default)        | slowest                 |
-| `measure`    | minutes                  | near-optimal            |
-| `patient`    | hours (1.62M-point FFT)  | optimal                 |
-| `exhaustive` | many hours to days       | marginally > patient    |
-
-The default is **`estimate`** so a cold boot of this test/eval image is
-instant — appropriate for firmware-compatibility checks, where optimal
-runtime FFT plans don't matter. Override with `-e FFTW_RIGOR=<value>` on
-`docker run` (or `FFTW_RIGOR=measure ./ka9q.sh start`), e.g.
-`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term and
-want the most efficient FFT plans.
+FFTW wisdom generation is skipped; radiod uses `FFTW_ESTIMATE` for
+instant startup.  This is appropriate for a firmware test/eval image.
 
 ### Tuning and listening (helper script)
 
@@ -215,14 +201,11 @@ docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
   -v /abs/path/to/firmware-dir:/firmware \
-  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio bash
 ```
 
-> The `wisdom` mount + the default `FFTW_RIGOR=estimate` keep this debug
-> shell's cold boot instant; without the wisdom mount you still pay only the
-> instant `estimate` plan. Point `/firmware` at wherever your built
-> `SDDC_FX3.img` lives (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
+> Point `/firmware` at wherever your built `SDDC_FX3.img` lives
+> (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
 
 Then inside the container:
 
@@ -281,10 +264,10 @@ featureless flat line a frozen / shut-down ADC would produce.  See
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **ka9q-radio pin** — the container builds ka9q-radio `87567fa` (main),
+- **ka9q-radio pin** — the container builds ka9q-radio `b4388d87` (main),
   whose `rx888.c` does host-side Si5351 clock synthesis (new `si5351.c`
   module), polls the Si5351 for lock, and logs the rx888 firmware version
-  via `TESTFX3`.  Paired with ka9q-web `91cbfca`.  See
+  via `TESTFX3`.  Paired with ka9q-web `aba3ab4`.  See
   `docs/ka9q-compat-audit.md` §12 for the full driver-eval analysis.
 - **Zero active container patches — builds vanilla ka9q-radio.**  Every local
   ask has been upstreamed: the `powers` float/double fixes (`01`, `02`) and
@@ -300,8 +283,9 @@ full analysis.  Summary:
   principle, sufficient on observed hardware with the udev mount.
   Documented in audit §1, no patch.
 - `TUNERSTDBY` (0xB8) calls STALL on this firmware (no tuner) and could
-  intermittently wedge radiod's restart bring-up — removed on the HF path by
-  active patch `04-no-tuner-stdby` (audit §2, `patches/README.md`).
+  intermittently wedge radiod's restart bring-up — removed upstream at
+  `87567fa` (formerly local patch `04-no-tuner-stdby`; audit §2,
+  `patches/README.md`).
 - GPIO LED bit-mapping differences (cosmetic).
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 

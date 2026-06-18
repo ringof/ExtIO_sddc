@@ -273,7 +273,7 @@ changes USB PID during firmware upload) and `--network host` (for
 ka9q-radio's multicast output).
 
 ```
-docker build -t ka9q-radio docker/ka9q-radio/
+docker build -f docker/ka9q-radio/Dockerfile -t ka9q-radio .
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
