@@ -158,11 +158,13 @@ def decode_and_check(wav_path, expected_message):
 
     pcmrecord writes WAV with WAVE_FORMAT_EXTENSIBLE headers that
     ft8_lib's simple parser cannot read.  Normalize through sox first.
+    Also trim to exactly 15.000 s — pcmrecord occasionally emits a few
+    extra samples, and decode_ft8 crashes (exit 255) on >180000 samples.
     """
     norm_path = wav_path + ".norm.wav"
     try:
         subprocess.run(
-            ["sox", wav_path, norm_path],
+            ["sox", wav_path, norm_path, "trim", "0", "15.0"],
             check=True, capture_output=True, timeout=10,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
