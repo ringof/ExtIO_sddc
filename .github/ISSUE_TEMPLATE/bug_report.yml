@@ -1,0 +1,181 @@
+name: Bug report
+description: Report a reproducible firmware defect. Required fields must be filled before the issue can be filed.
+title: "[BUG] <short, specific summary>"
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Read this first
+
+        This is **FX3 firmware for the RX888 mk2**, not a host application,
+        not an antenna, and not your USB cable. Before you file:
+
+        - **"It doesn't work" is not a bug report.** Tell us what you did,
+          what you expected, and what actually happened — separately.
+        - **Reproduce it.** If it happened once and never again, open a
+          Discussion, not an issue.
+        - **Isolate the firmware.** A lot of "firmware bugs" are host
+          config, RF front-end, clocking, or power. The fields below exist
+          so we don't spend a week discovering it was your hub.
+        - Every required field below must be answered. Forms with the
+          required fields blank cannot be submitted, and issues that gut
+          the template will be closed without triage.
+
+        If you can build the firmware, the maintainers expect you to have
+        already read `README.md` and `docs/`.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      description: All of these must be true. Tick each one only after you have actually done it.
+      options:
+        - label: I searched existing open AND closed issues and this is not a duplicate.
+          required: true
+        - label: I have reproduced this deterministically (I can make it happen on demand).
+          required: true
+        - label: I confirmed the failure is in THIS firmware, not the host app, RF front-end, power supply, or USB cabling/hub.
+          required: true
+        - label: I am not asking for R828D / VHF tuner support — the firmware is HF direct-sampling only (see README "Limitations").
+          required: true
+
+  - type: input
+    id: firmware-version
+    attributes:
+      label: Firmware version
+      description: >
+        The version REPORTED BY THE DEVICE via the `TESTFX3` vendor command
+        (FIRMWARE_VER_MAJOR.FIRMWARE_VER_MINOR), e.g. `2.6`. Not the repo tag,
+        not "latest", not "the one from the website". If you cannot read it,
+        say so and explain why.
+      placeholder: "e.g. 2.6 (TESTFX3 reported)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: firmware-provenance
+    attributes:
+      label: Where did this firmware come from?
+      options:
+        - Official release artifact (SDDC_FX3.img from the Releases page)
+        - Built from this repo with arm-none-eabi-gcc (give commit + toolchain version below)
+        - Built from a fork / patched source (you must link it below)
+        - I don't know
+      default: 0
+    validations:
+      required: true
+
+  - type: input
+    id: build-provenance
+    attributes:
+      label: Commit / release tag / toolchain
+      description: >
+        If you built it: the exact commit SHA and `arm-none-eabi-gcc --version`.
+        If it's a release: the release tag. "main" is not an answer; give the SHA.
+      placeholder: "e.g. release v2.6.1  —  or  —  commit a1b2c3d, arm-none-eabi-gcc 13.2.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: usb-state
+    attributes:
+      label: USB enumeration state when the bug occurs
+      description: Check with `lsusb`. This tells us whether the FX3 is in bootloader, app, or wedged.
+      options:
+        - "04b4:00f3 — bootloader (firmware not yet loaded)"
+        - "04b4:00f1 — application (firmware running)"
+        - "Device disappears / not enumerated at all"
+        - "Other VID:PID (paste it in the logs section)"
+        - "I did not check"
+      default: 4
+    validations:
+      required: true
+
+  - type: textarea
+    id: host-environment
+    attributes:
+      label: Host environment
+      description: >
+        OS + version, host application + version (ka9q-radio, rx888_tools/rx888_stream,
+        ExtIO host, etc.), and how the device is connected (direct port vs hub,
+        USB 2 vs 3). If you're using ka9q-radio, include the relevant radiod config.
+      placeholder: |
+        OS: Debian 12 (kernel 6.x)
+        Host app: ka9q-radio <commit/version>, or rx888_stream from rx888_tools <version>
+        Connection: rear USB3 port, no hub
+        radiod config (if relevant): ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact, numbered, copy-pasteable. Include the actual commands you ran.
+      placeholder: |
+        1. Flash SDDC_FX3.img with `rx888_stream ...`
+        2. Start `radiod ...` (or `rx888_stream ...`)
+        3. Tune to X MHz at Y Msps
+        4. After ~Z seconds ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened. Be precise — "no signal" vs "stream stalls" vs "device drops off the bus" are completely different bugs.
+      placeholder: What actually happened, including any error messages verbatim.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and evidence
+      description: >
+        Paste `dmesg` USB output, host-app logs, `lsusb -v` if relevant, and any
+        TESTFX3 device-info dump. Use code fences. Screenshots of a terminal are
+        not logs — paste the text.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: recoverable
+    attributes:
+      label: Does the device recover without a power cycle?
+      description: >
+        A core design principle is that no state should require a power cycle to
+        recover (RESETFX3 / STOPFX3 should always work). This answer matters.
+      options:
+        - "Yes — RESETFX3/STOPFX3 or re-enumeration recovers it"
+        - "No — it requires a physical power cycle"
+        - "Not applicable / didn't try"
+      default: 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you already tried to isolate it?
+      description: >
+        Different cable/port/host? A known-good release artifact vs your build?
+        Lower sample rate? This is where you prove it's the firmware and not
+        your setup. "Nothing" is an acceptable answer only if you explain why.
+      placeholder: |
+        - Swapped to a rear USB3 port directly on the board: still fails
+        - Tried official v2.6.1 release artifact: also fails / works fine
+        - Dropped sample rate from X to Y: ...
+    validations:
+      required: true

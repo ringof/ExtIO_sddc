@@ -1,0 +1,14 @@
+# Force reporters through the structured templates — no blank issues that
+# bypass the required fields.
+blank_issues_enabled: false
+contact_links:
+  - name: Question, "is this a bug?", or RF/host-config help
+    url: https://github.com/ringof/rx888-firmware/discussions
+    about: >
+      Not sure it's a firmware defect? Tuning, antenna, host-app, clocking,
+      or power questions belong in Discussions, not the bug tracker.
+  - name: R828D / VHF tuner support
+    url: https://github.com/ringof/rx888-firmware#limitations
+    about: >
+      This firmware is HF direct-sampling only. The R828D VHF tuner is not
+      driven by the firmware — read the README "Limitations" section first.
