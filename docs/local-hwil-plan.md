@@ -19,9 +19,10 @@ Status: **Approved; in progress.**
   QDX TX → pcmrecord (-w, 120s slot-aligned) → wsprd. Reports SNR for
   attenuation calibration (-10 to -15 dB target). Docker image now builds
   wspr-cui (wsprsimwav + wsprd) with gfortran. (`wspr_roundtrip_test.py`)
-- **Awaiting hardware validation:** WSPR roundtrip test is committed but not
-  yet run on real hardware. Needs operator to confirm decode + calibrate
-  attenuation.
+- **Hardware-validated:** WSPR roundtrip decoded on real hardware (SNR +29 dB).
+  Two bugs fixed during validation: SSRC rounding (truncate→round) and TX
+  audio level (added `--drive` normalization, default -1 dB).  Attenuation
+  needs increasing to reach -10 to -15 dB SNR target.
 - Rung 1 (HITL image parity) not yet started.
 
 ## Purpose
@@ -276,13 +277,11 @@ turn, so the bench must be self-recovering and bounded:
 
 ## Next step
 
-Rungs G0 through 5 (WSPR) are implemented and committed.  FT8 rung 4
-is proven on real hardware (all 4 bands decode).  WSPR rung 5 is committed
-but **awaiting first hardware run** — operator needs to confirm decode and
-calibrate attenuation to -10 to -15 dB SNR.
+Rungs G0 through 5 (WSPR) are implemented, committed, and
+**hardware-validated**.  FT8 rung 4 decodes on all 4 bands; WSPR rung 5
+decoded at SNR +29 dB (attenuation needs increasing for -10 to -15 dB target).
 
 Remaining:
-- **WSPR hardware validation** — run `wspr_roundtrip_test.py` on the bench.
 - **Rung 1** (HITL image parity) — not yet started.
 - **Test suite hardening** — see GitHub issues for: G0/health tests in CI,
   WSPR fixture, bench aggregate runner, multi-device test infrastructure.
