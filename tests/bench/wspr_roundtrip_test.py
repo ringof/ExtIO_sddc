@@ -90,11 +90,13 @@ def wait_for_wspr_slot():
 # Audio generation
 # ---------------------------------------------------------------------------
 
-def generate_wspr_wav(message, tmp_dir):
+def generate_wspr_wav(message, tmp_dir, drive_db=-1):
     """Generate WSPR TX audio (S24 stereo 48 kHz) for the QDX.
 
     wsprsimwav produces 48 kHz S16_LE mono.  sox converts to stereo S24
-    for the QDX hw: device.
+    for the QDX hw: device, normalized to *drive_db* dB.  The QDX needs
+    near-full-scale audio to modulate; wsprsimwav's default level is too
+    quiet.
 
     Returns the path to the 48 kHz stereo WAV file.
     """
@@ -112,9 +114,11 @@ def generate_wspr_wav(message, tmp_dir):
             f"wsprsimwav produced no output (exit {result.returncode}): "
             f"{result.stderr.decode(errors='replace').strip()}")
 
-    # Convert mono S16 -> stereo S24 for QDX hw: device
+    # Convert mono S16 -> stereo S24 for QDX hw: device, normalized to
+    # drive_db so the QDX sees enough level to modulate.
     subprocess.run(
-        ["sox", wav_48k_mono, "-c", "2", "-b", "24", wav_48k_stereo],
+        ["sox", wav_48k_mono, "-c", "2", "-b", "24", wav_48k_stereo,
+         "gain", "-n", str(drive_db)],
         check=True, capture_output=True, timeout=10,
     )
 
@@ -244,12 +248,14 @@ def main():
                    help="override auto-generated WSPR message (CALL GRID DBM)")
     p.add_argument("--freq", type=int, default=DEFAULT_DIAL_HZ,
                    help=f"dial frequency in Hz (default: {DEFAULT_DIAL_HZ})")
+    p.add_argument("--drive", type=float, default=-1,
+                   help="TX audio normalize level in dB (default: -1)")
     args = p.parse_args()
 
     dial_hz = args.freq
     dial_mhz = dial_hz / 1_000_000.0
-    # SSRC is derived from dial freq in kHz (truncated), matching rx888-test.conf
-    ssrc = dial_hz // 1000
+    # SSRC is derived from dial freq in kHz (rounded), matching radiod convention
+    ssrc = round(dial_hz / 1000)
 
     # Generate unique message for this run
     if args.message:
@@ -290,7 +296,7 @@ def main():
 
     # Generate TX audio (once)
     print(f"WSPR: generating WSPR TX audio")
-    tx_wav = generate_wspr_wav(message, TMP_DIR)
+    tx_wav = generate_wspr_wav(message, TMP_DIR, drive_db=args.drive)
     print(f"WSPR: TX audio ready: {tx_wav}")
 
     pcmrec_proc = None
