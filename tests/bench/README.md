@@ -1,8 +1,16 @@
 # tests/bench — local HITL bench harness
 
-Implements the staged goal ladder from `docs/local-hwil-plan.md`. Each rung is
+Implements the staged goal ladder from `docs/local-hwil-plan.md`. Each test is
 a small, independently-verifiable check that prints one grep-stable verdict
 line and exits 0/1 — the contract a local Claude Code `/goal` reads.
+
+## Quick start
+
+```sh
+tests/bench/bench.sh list          # show available tests
+tests/bench/bench.sh g0-ft8       # run a single test
+tests/bench/bench.sh all           # run all in dependency order
+```
 
 ## Prerequisites
 
@@ -16,7 +24,7 @@ sudo apt-get install -y gcc gfortran libfftw3-dev libfftw3-single3 libgfortran5 
 Independent operator verification (optional) uses WSJT-X tools (`jt9`,
 `wsprd`): install the `wsjtx` package.
 
-## Rungs & tools
+## Tests & tools
 
 | Script | Purpose | Hardware |
 |---|---|---|
@@ -24,18 +32,42 @@ Independent operator verification (optional) uses WSJT-X tools (`jt9`,
 | `run_g0_wspr.sh` | **G0 (WSPR)** — off-hardware audio encode→decode self-test | none |
 | `gen_ft8_wav.sh` | generate a known-content FT8 audio WAV | none |
 | `gen_wspr_wav.sh` | generate a known-content WSPR audio WAV | none |
-| `rung2a_cat_test.py` | **2a** — QDX CAT serial: freq set/read, PTT cycle, IF cross-check | QDX |
-| `rung2b_audio_test.py` | **2b** — QDX USB audio: capture, playback via hw:, PTT+play | QDX |
-| `bench_rf_test.py` | Manual RF verification: tone + PTT for external receiver/powers | QDX |
+| `cat_test.py` | **CAT** — QDX CAT serial: freq set/read, PTT cycle, IF cross-check | QDX |
+| `audio_test.py` | **AUDIO** — QDX USB audio: capture, playback via hw:, PTT+play | QDX |
+| `rf_test.py` | Manual RF verification: tone + PTT for external receiver/powers | QDX |
+| `loopback_test.py` | **LOOPBACK** — CW carrier in powers spectrum via RF loopback | QDX + RX888 |
+| `ft8_test.py` | **FT8** — end-to-end FT8 decode across 80/40/30/20m | QDX + RX888 |
+| `wspr_test.py` | **WSPR** — end-to-end WSPR decode on 40m | QDX + RX888 |
 
-### Helpers (imported by rung scripts)
+### Helpers (imported by test scripts)
 
 | Module | Purpose |
 |---|---|
 | `qdx_cat.py` | QDX Kenwood CAT serial control (FA, TX, RX, TQ, IF, ID, VN) |
 | `qdx_audio.py` | QDX ALSA device discovery, tone generation (S24 stereo 48 kHz), play/capture |
 
-(Rungs 3–7 are added as the ladder is climbed; see the plan doc.)
+### Runner
+
+| Script | Purpose |
+|---|---|
+| `bench.sh` | Unified test dispatcher — host vs container, single test or `all` |
+| `run_cat.sh` | Preflight wrapper for `cat_test.py` |
+| `run_audio.sh` | Preflight wrapper for `audio_test.py` |
+
+## bench.sh
+
+The unified runner dispatches tests to the right execution environment:
+
+- **Host tests** (`g0-ft8`, `g0-wspr`, `cat`, `audio`): run directly on the host.
+- **Container tests** (`loopback`, `ft8`, `wspr`): run via `docker exec` in the
+  ka9q-radio container (override with `CONTAINER=` env var).
+
+```sh
+bench.sh cat                       # run CAT test on host
+bench.sh ft8 --message "CQ T1ABC FN20"  # run FT8 in container with args
+CONTAINER=my-radio bench.sh loopback     # override container name
+bench.sh all                       # run everything, print summary
+```
 
 ## Encoders, decoders, and sox's role
 
@@ -89,21 +121,21 @@ out/g0_wspr_selfloop_48k.wav   # 48 kHz, the QDX TX rate
 out/g0_wspr_selfloop_12k.wav   # wsprd out/g0_wspr_selfloop_12k.wav
 ```
 
-## QDX rungs (2a, 2b) and manual RF test
+## QDX tests (CAT, AUDIO) and manual RF test
 
 All QDX scripts take `--port` (default `/dev/ttyACM0`) and `--help`.
 
 ```sh
-# Rung 2a — CAT serial control
-python tests/bench/rung2a_cat_test.py
-python tests/bench/rung2a_cat_test.py --port /dev/ttyACM1 --freq-offset 500
+# CAT — serial control
+python tests/bench/cat_test.py
+python tests/bench/cat_test.py --port /dev/ttyACM1 --freq-offset 500
 
-# Rung 2b — USB audio path (capture, playback, PTT)
-python tests/bench/rung2b_audio_test.py
-python tests/bench/rung2b_audio_test.py --port /dev/ttyACM0 --tone 1000 --duration 3
+# AUDIO — USB audio path (capture, playback, PTT)
+python tests/bench/audio_test.py
+python tests/bench/audio_test.py --port /dev/ttyACM0 --tone 1000 --duration 3
 
 # Manual RF verification — long tone for powers / external receiver
-python tests/bench/bench_rf_test.py --freq 10000000 --duration 30
+python tests/bench/rf_test.py --freq 10000000 --duration 30
 ```
 
 ## Generating audio (TX stimulus / fixtures)
@@ -117,7 +149,7 @@ tests/bench/gen_wspr_wav.sh "T1ABC FN20 30" wspr48.wav          # 48 kHz
 tests/bench/gen_wspr_wav.sh "T1ABC FN20 30" wspr12.wav 12000    # 12 kHz
 ```
 
-These same encoders are the TX stimulus source for the on-bench rungs (5/7).
+These same encoders are the TX stimulus source for the on-bench tests (FT8, WSPR).
 
 ## Adding an authoritative fixture
 

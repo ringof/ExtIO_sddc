@@ -1,8 +1,8 @@
 """tests/bench/qdx_cat.py — Reusable QDX CAT (Kenwood TS-480) serial control.
 
 Provides QdxCat, a context-manager class that speaks the QDX's Kenwood TS-480/
-TS-440 CAT subset over its USB Virtual COM Port.  Used by rung 2a and every
-later QDX-touching rung in the HWIL bench ladder.
+TS-440 CAT subset over its USB Virtual COM Port.  Used by cat_test.py and every
+later QDX-touching test in the HWIL bench ladder.
 
 Protocol notes (manual_operation_1_08.pdf pp 35-40):
   - Commands are 2-char alpha + optional params, terminated by ';'.

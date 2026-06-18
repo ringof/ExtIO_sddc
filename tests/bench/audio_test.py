@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/bench/rung2b_audio_test.py — Rung 2b: QDX USB Audio path test.
+"""tests/bench/audio_test.py — QDX USB Audio path test.
 
 Tests that the bench host can play audio into and capture audio from the
 QDX over its USB Audio Class device, using the QDX's native format
@@ -13,7 +13,7 @@ What this proves:
 
 What this does NOT prove (requires manual verification):
   - That the played audio actually modulates onto an RF carrier
-  - Use bench_rf_test.py + a separate receiver to verify RF output
+  - Use rf_test.py + a separate receiver to verify RF output
 """
 
 import argparse
@@ -62,7 +62,7 @@ def wav_has_energy(path: str, threshold: int = 100) -> bool:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Rung 2b: QDX USB audio path test")
+    p = argparse.ArgumentParser(description="QDX USB audio path test")
     p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
     p.add_argument("--baud", type=int, default=9600, help="baud rate")
     p.add_argument("--card", type=int, default=None,
@@ -84,48 +84,48 @@ def main():
             card = find_qdx_card()
 
         hw = qdx_hw_device(card)
-        print(f"RUNG2B: QDX audio device -> card {card}, {hw}")
+        print(f"AUDIO: QDX audio device -> card {card}, {hw}")
         checks += 1
 
         # --- 2. Capture test (RX noise) -----------------------------------
-        capture_path = os.path.join(OUT_DIR, "rung2b_capture.wav")
+        capture_path = os.path.join(OUT_DIR, "audio_capture.wav")
         capture_from_qdx(capture_path, hw, duration_s=args.duration)
         fsize = os.path.getsize(capture_path)
         if fsize == 0:
-            print("RUNG2B AUDIO FAIL — captured WAV is empty (0 bytes)")
+            print("AUDIO FAIL — captured WAV is empty (0 bytes)")
             sys.exit(1)
         has_energy = wav_has_energy(capture_path)
         if not has_energy:
-            print("RUNG2B AUDIO FAIL — captured WAV is all silence")
+            print("AUDIO FAIL — captured WAV is all silence")
             sys.exit(1)
-        print(f"RUNG2B: capture -> {fsize} bytes, non-silent OK")
+        print(f"AUDIO: capture -> {fsize} bytes, non-silent OK")
         checks += 1
 
         # --- 3. Tone generation (QDX native format) -----------------------
-        tone_path = os.path.join(OUT_DIR, "rung2b_tone.wav")
+        tone_path = os.path.join(OUT_DIR, "audio_tone.wav")
         generate_tone(tone_path, freq_hz=args.tone, duration_s=args.duration)
-        print(f"RUNG2B: tone -> {tone_path} "
+        print(f"AUDIO: tone -> {tone_path} "
               f"({args.tone} Hz, {args.duration} s, S24 stereo 48 kHz)")
 
         # --- 4. Playback via hw: (no plughw: conversion) ------------------
         play_to_qdx(tone_path, hw)
-        print(f"RUNG2B: aplay -D {hw} -> accepted S24 stereo OK")
+        print(f"AUDIO: aplay -D {hw} -> accepted S24 stereo OK")
         checks += 1
 
         # --- 5. PTT + playback -------------------------------------------
         with QdxCat(args.port, baudrate=args.baud) as qdx:
             dial = qdx.get_freq()
-            print(f"RUNG2B: dial {dial} Hz, carrier {dial + args.tone} Hz")
+            print(f"AUDIO: dial {dial} Hz, carrier {dial + args.tone} Hz")
 
             pre = qdx.get_tx_state()
             if pre:
-                print("RUNG2B AUDIO FAIL — QDX already in TX before PTT test")
+                print("AUDIO FAIL — QDX already in TX before PTT test")
                 sys.exit(1)
 
             qdx.tx_on()
             tx_state = qdx.get_tx_state()
             if not tx_state:
-                print("RUNG2B AUDIO FAIL — TQ not TX after TX;")
+                print("AUDIO FAIL — TQ not TX after TX;")
                 sys.exit(1)
 
             play_to_qdx(tone_path, hw)
@@ -133,25 +133,25 @@ def main():
             qdx.tx_off()
             rx_state = qdx.get_tx_state()
             if rx_state:
-                print("RUNG2B AUDIO FAIL — TQ not RX after RX;")
+                print("AUDIO FAIL — TQ not RX after RX;")
                 sys.exit(1)
 
-        print("RUNG2B: PTT + playback -> TX during play, RX after OK")
+        print("AUDIO: PTT + playback -> TX during play, RX after OK")
         checks += 1
 
         # --- Verdict ------------------------------------------------------
-        print(f"RUNG2B AUDIO OK ({checks} checks, card {card} {hw})")
-        print(f"RUNG2B NOTE: RF output NOT verified by this test.")
-        print(f"RUNG2B NOTE: use bench_rf_test.py + a receiver to confirm TX.")
+        print(f"AUDIO OK ({checks} checks, card {card} {hw})")
+        print(f"AUDIO NOTE: RF output NOT verified by this test.")
+        print(f"AUDIO NOTE: use rf_test.py + a receiver to confirm TX.")
 
     except QdxAudioError as exc:
-        print(f"RUNG2B AUDIO FAIL — {exc}")
+        print(f"AUDIO FAIL — {exc}")
         sys.exit(1)
     except QdxCatError as exc:
-        print(f"RUNG2B AUDIO FAIL — CAT error: {exc}")
+        print(f"AUDIO FAIL — CAT error: {exc}")
         sys.exit(1)
     except Exception as exc:
-        print(f"RUNG2B AUDIO FAIL — unexpected: {exc}")
+        print(f"AUDIO FAIL — unexpected: {exc}")
         sys.exit(1)
 
 

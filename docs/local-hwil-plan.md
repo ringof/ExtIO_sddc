@@ -14,11 +14,11 @@ Status: **Approved; in progress.**
   median. CW carrier confirmed manually at 10 MHz + 1500 Hz, 53 dB SNR.
 - **4 (FT8)** — End-to-end FT8 decode across 80/40/30/20m. Random message
   per run, gen_ft8 → QDX TX → pcmrecord (-8, 15s slot-aligned) → decode_ft8.
-  All 4 bands decoded. (`rung4_ft8_test.py`)
+  All 4 bands decoded. (`ft8_test.py`)
 - **5 (WSPR)** — End-to-end WSPR decode on 40m (7.0386 MHz). wsprsimwav →
   QDX TX → pcmrecord (-w, 120s slot-aligned) → wsprd. Reports SNR for
   attenuation calibration (-10 to -15 dB target). Docker image now builds
-  wspr-cui (wsprsimwav + wsprd) with gfortran. (`wspr_roundtrip_test.py`)
+  wspr-cui (wsprsimwav + wsprd) with gfortran. (`wspr_test.py`)
 - **Hardware-validated:** WSPR roundtrip decoded on real hardware (SNR +29 dB).
   Two bugs fixed during validation: SSRC rounding (truncate→round) and TX
   audio level (added `--drive` normalization, default -1 dB).  Attenuation

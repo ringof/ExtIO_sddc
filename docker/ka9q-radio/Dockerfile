@@ -204,15 +204,15 @@ COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 # Install minimal rx888 config for HF direct-sampling test
 COPY docker/ka9q-radio/rx888-test.conf /etc/radio/radiod@rx888-test.conf
 
-# Copy bench tools (QDX CAT, audio, RF test, rung scripts)
-COPY tests/bench/qdx_cat.py         /usr/local/lib/bench/
-COPY tests/bench/qdx_audio.py       /usr/local/lib/bench/
-COPY tests/bench/bench_rf_test.py   /usr/local/lib/bench/
-COPY tests/bench/rung2a_cat_test.py /usr/local/lib/bench/
-COPY tests/bench/rung2b_audio_test.py /usr/local/lib/bench/
-COPY tests/bench/rung3_loopback_test.py /usr/local/lib/bench/
-COPY tests/bench/rung4_ft8_test.py     /usr/local/lib/bench/
-COPY tests/bench/wspr_roundtrip_test.py /usr/local/lib/bench/
+# Copy bench tools (QDX CAT, audio, RF test, test scripts)
+COPY tests/bench/qdx_cat.py            /usr/local/lib/bench/
+COPY tests/bench/qdx_audio.py          /usr/local/lib/bench/
+COPY tests/bench/rf_test.py            /usr/local/lib/bench/
+COPY tests/bench/cat_test.py           /usr/local/lib/bench/
+COPY tests/bench/audio_test.py         /usr/local/lib/bench/
+COPY tests/bench/loopback_test.py      /usr/local/lib/bench/
+COPY tests/bench/ft8_test.py           /usr/local/lib/bench/
+COPY tests/bench/wspr_test.py          /usr/local/lib/bench/
 
 # Copy entrypoint
 COPY docker/ka9q-radio/entrypoint.sh /entrypoint.sh

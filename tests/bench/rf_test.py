@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""tests/bench/bench_rf_test.py — Manual RF verification tool.
+"""tests/bench/rf_test.py — Manual RF verification tool.
 
 Generates a tone, keys PTT, and plays it into the QDX so the operator
 can confirm RF output on a separate receiver or via ka9q powers.
 
-This is a manual tool, not an automated rung.  It transmits for
+This is a manual tool, not an automated test.  It transmits for
 --duration seconds (default 30) to give time for external measurement.
 """
 

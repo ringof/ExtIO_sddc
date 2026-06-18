@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/bench/rung3_loopback_test.py — Rung 3: End-to-end RF loopback test.
+"""tests/bench/loopback_test.py — End-to-end RF loopback test.
 
 QDX transmits a known tone at a known dial frequency; the attenuated RF
 is received by the RX888 via ka9q-radio.  The script uses `powers` to
@@ -128,7 +128,7 @@ def median(values: list[float]) -> float:
 
 def main():
     p = argparse.ArgumentParser(
-        description="Rung 3: End-to-end RF loopback test"
+        description="End-to-end RF loopback test"
     )
     p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
     p.add_argument("--baud", type=int, default=9600, help="baud rate")
@@ -158,7 +158,7 @@ def main():
 
         # powers binary exists?
         if not shutil.which("powers"):
-            print("RUNG3 LOOPBACK FAIL — powers binary not found")
+            print("LOOPBACK FAIL — powers binary not found")
             sys.exit(1)
 
         # QDX audio device
@@ -171,27 +171,27 @@ def main():
         with QdxCat(args.port, baudrate=args.baud) as qdx:
             # QDX alive?
             orig_freq = qdx.get_freq()
-            print(f"RUNG3: QDX alive at {orig_freq} Hz")
+            print(f"LOOPBACK: QDX alive at {orig_freq} Hz")
 
             # --- Set dial frequency ------------------------------------------
             readback = qdx.set_freq(dial_hz)
             if readback != dial_hz:
-                print(f"RUNG3 LOOPBACK FAIL — freq set: expected {dial_hz}, "
+                print(f"LOOPBACK FAIL — freq set: expected {dial_hz}, "
                       f"read back {readback}")
                 sys.exit(1)
-            print(f"RUNG3: set dial -> {dial_hz} Hz")
+            print(f"LOOPBACK: set dial -> {dial_hz} Hz")
 
             # --- Generate tone WAV -------------------------------------------
-            tone_path = os.path.join(OUT_DIR, "rung3_tone.wav")
+            tone_path = os.path.join(OUT_DIR, "loopback_tone.wav")
             generate_tone(tone_path, freq_hz=tone_hz, duration_s=TONE_DURATION_S)
 
             # --- TX + capture (concurrent) -----------------------------------
-            print(f"RUNG3: TX + {tone_hz} Hz tone ({TONE_DURATION_S} s)")
+            print(f"LOOPBACK: TX + {tone_hz} Hz tone ({TONE_DURATION_S} s)")
 
             qdx.tx_on()
             tx_state = qdx.get_tx_state()
             if not tx_state:
-                print("RUNG3 LOOPBACK FAIL — TQ not TX after TX;")
+                print("LOOPBACK FAIL — TQ not TX after TX;")
                 sys.exit(1)
 
             # Start aplay in background
@@ -214,19 +214,19 @@ def main():
                     )
                 except RuntimeError as exc:
                     if attempt == 0:
-                        print(f"RUNG3: powers attempt 1 failed ({exc}), retrying")
+                        print(f"LOOPBACK: powers attempt 1 failed ({exc}), retrying")
                         continue
                     # Second attempt failed — bail
                     aplay_proc.terminate()
                     aplay_proc.wait(timeout=5)
                     qdx.tx_off()
-                    print(f"RUNG3 LOOPBACK FAIL — powers: {exc}")
+                    print(f"LOOPBACK FAIL — powers: {exc}")
                     sys.exit(1)
 
                 if parse_powers_csv(powers_csv):
                     break  # got usable data
                 if attempt == 0:
-                    print("RUNG3: powers attempt 1 returned no bins, retrying")
+                    print("LOOPBACK: powers attempt 1 returned no bins, retrying")
 
             # Wait for aplay to finish
             try:
@@ -247,7 +247,7 @@ def main():
 
         # Check 1: got spectrum
         if len(bins) == 0:
-            print("RUNG3 LOOPBACK FAIL — powers returned no bins")
+            print("LOOPBACK FAIL — powers returned no bins")
             sys.exit(1)
         checks += 1
 
@@ -257,41 +257,41 @@ def main():
         peak_pwr = bins[peak_idx][1]
         med_pwr = median(powers_list)
 
-        print(f"RUNG3: powers capture -> {len(bins)} bins, "
+        print(f"LOOPBACK: powers capture -> {len(bins)} bins, "
               f"peak {peak_pwr:.1f} dB @ {peak_freq:.0f} Hz, "
               f"median {med_pwr:.1f} dB")
 
         # Check 2: peak within ±500 Hz of expected carrier
         freq_error = abs(peak_freq - expected_carrier_hz)
         if freq_error > DEFAULT_FREQ_TOL_HZ:
-            print(f"RUNG3 LOOPBACK FAIL — peak @ {peak_freq:.0f} Hz, "
+            print(f"LOOPBACK FAIL — peak @ {peak_freq:.0f} Hz, "
                   f"expected {expected_carrier_hz} Hz "
                   f"(error {freq_error:.0f} Hz > {DEFAULT_FREQ_TOL_HZ} Hz)")
             sys.exit(1)
-        print(f"RUNG3: peak within +/-{DEFAULT_FREQ_TOL_HZ} Hz "
+        print(f"LOOPBACK: peak within +/-{DEFAULT_FREQ_TOL_HZ} Hz "
               f"of expected carrier OK")
         checks += 1
 
         # Check 3: peak above median by threshold
         margin = peak_pwr - med_pwr
         if margin < args.threshold:
-            print(f"RUNG3 LOOPBACK FAIL — peak {margin:.1f} dB above median, "
+            print(f"LOOPBACK FAIL — peak {margin:.1f} dB above median, "
                   f"need >= {args.threshold:.0f} dB")
             sys.exit(1)
-        print(f"RUNG3: peak {margin:.1f} dB above median OK")
+        print(f"LOOPBACK: peak {margin:.1f} dB above median OK")
         checks += 1
 
         # --- Verdict ---------------------------------------------------------
-        print(f"RUNG3 LOOPBACK OK ({checks} checks)")
+        print(f"LOOPBACK OK ({checks} checks)")
 
     except QdxAudioError as exc:
-        print(f"RUNG3 LOOPBACK FAIL — audio: {exc}")
+        print(f"LOOPBACK FAIL — audio: {exc}")
         sys.exit(1)
     except QdxCatError as exc:
-        print(f"RUNG3 LOOPBACK FAIL — CAT: {exc}")
+        print(f"LOOPBACK FAIL — CAT: {exc}")
         sys.exit(1)
     except Exception as exc:
-        print(f"RUNG3 LOOPBACK FAIL — unexpected: {exc}")
+        print(f"LOOPBACK FAIL — unexpected: {exc}")
         sys.exit(1)
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/bench/wspr_roundtrip_test.py — WSPR roundtrip decode test (40m).
+"""tests/bench/wspr_test.py — WSPR decode test (40m).
 
 QDX transmits a randomly-generated WSPR message on 40m (7.038600 MHz).
 The attenuated RF is received by the RX888 via ka9q-radio.  pcmrecord
@@ -39,7 +39,7 @@ DEFAULT_DIAL_HZ = 7_038_600
 DEFAULT_DIAL_MHZ = 7.0386
 DEFAULT_SSRC = 7039
 
-TMP_DIR = "/tmp/wspr_roundtrip"
+TMP_DIR = "/tmp/bench_wspr"
 CAPS_DIR = os.path.join(TMP_DIR, "caps")
 
 
@@ -236,7 +236,7 @@ def decode_and_check(wav_path, expected_callsign, expected_grid,
 
 def main():
     p = argparse.ArgumentParser(
-        description="WSPR roundtrip decode test (40m)"
+        description="WSPR decode test (40m)"
     )
     p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
     p.add_argument("--baud", type=int, default=9600, help="baud rate")
@@ -410,7 +410,7 @@ def main():
     print()
     if decoded:
         snr_str = f"SNR={best_snr:.0f}" if best_snr is not None else "SNR=?"
-        print(f"WSPR ROUNDTRIP OK — \"{message}\" decoded ({snr_str})")
+        print(f"WSPR OK — \"{message}\" decoded ({snr_str})")
         if best_snr is not None:
             if -15 <= best_snr <= -10:
                 print(f"WSPR: SNR {best_snr:.0f} dB is in the target range "
@@ -423,7 +423,7 @@ def main():
                       f"decrease attenuation for -10 to -15 dB")
         shutil.rmtree(TMP_DIR, ignore_errors=True)
     else:
-        print(f"WSPR ROUNDTRIP FAIL — \"{message}\" not decoded")
+        print(f"WSPR FAIL — \"{message}\" not decoded")
         print(f"(temp files kept in {TMP_DIR} for debugging)")
         sys.exit(1)
 

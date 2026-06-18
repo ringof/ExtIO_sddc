@@ -1,8 +1,8 @@
 """tests/bench/qdx_audio.py — Reusable QDX USB Audio discovery + playback helpers.
 
 Provides functions for finding the QDX's ALSA device, generating test tones,
-and playing/capturing audio via aplay/arecord/sox.  Used by rung 2b and every
-later TX-touching rung in the HWIL bench ladder.
+and playing/capturing audio via aplay/arecord/sox.  Used by audio_test.py and
+every later TX-touching test in the HWIL bench ladder.
 
 Hardware notes (from live enumeration):
   - ALSA card name: "QDX Transceiver"
