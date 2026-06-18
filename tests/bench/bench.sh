@@ -13,6 +13,7 @@
 #
 # Environment:
 #   CONTAINER   docker container name (default: ka9q-radio)
+#   SKIP_AUDIO  set to 1 to skip the audio test (bench has no open audio port)
 
 set -euo pipefail
 
@@ -76,7 +77,7 @@ run_test() {
             if [[ "$command" == *.sh ]]; then
                 exec bash "$HERE/$command" "$@"
             else
-                exec python3 "$HERE/$command" "$@"
+                exec python3 -u "$HERE/$command" "$@"
             fi
             ;;
         container)
@@ -87,7 +88,7 @@ run_test() {
             fi
             # shellcheck disable=SC2086
             exec docker exec $tty_flag "$CONTAINER" \
-                python3 "/usr/local/lib/bench/$command" "$@"
+                python3 -u "/usr/local/lib/bench/$command" "$@"
             ;;
         *)
             die "bad location '$location' for test '$name'"
@@ -122,6 +123,14 @@ cmd_all() {
         local location command
         IFS=: read -r _ location command <<< "$entry"
 
+        # Skip audio test when SKIP_AUDIO=1 (bench has no open audio port)
+        if [[ "$name" == "audio" && "${SKIP_AUDIO:-0}" == "1" ]]; then
+            echo ""
+            echo "=== bench: $name ==="
+            echo "bench: SKIP $name (SKIP_AUDIO=1)"
+            continue
+        fi
+
         echo ""
         echo "=== bench: $name ==="
 
@@ -131,7 +140,7 @@ cmd_all() {
                 if [[ "$command" == *.sh ]]; then
                     bash "$HERE/$command" || rc=$?
                 else
-                    python3 "$HERE/$command" || rc=$?
+                    python3 -u "$HERE/$command" || rc=$?
                 fi
                 ;;
             container)
@@ -141,7 +150,7 @@ cmd_all() {
                     continue
                 fi
                 docker exec "$CONTAINER" \
-                    python3 "/usr/local/lib/bench/$command" || rc=$?
+                    python3 -u "/usr/local/lib/bench/$command" || rc=$?
                 ;;
         esac
 

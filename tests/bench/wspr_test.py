@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""tests/bench/wspr_test.py — WSPR decode test (40m).
+"""tests/bench/wspr_test.py — WSPR decode test (80/40/30/20m).
 
-QDX transmits a randomly-generated WSPR message on 40m (7.038600 MHz).
+QDX transmits a randomly-generated WSPR message on each of four bands.
 The attenuated RF is received by the RX888 via ka9q-radio.  pcmrecord
-captures slot-aligned WAV files from the [WSPR] channel, and wsprd
+captures slot-aligned WAV files from the [WSPR] channels, and wsprd
 asserts the known message was decoded.
 
-WSPR uses 2-minute slots (vs FT8's 15s), so we run a single band by
-default.  The first run establishes signal level; the operator adjusts
-attenuation to target -10 to -15 dB SNR, then re-runs to confirm decode
-at realistic weak-signal levels.
+WSPR uses 2-minute slots (vs FT8's 15s), so 4 bands takes ~10 minutes
+(plus slot alignment waits).
 
 Prerequisites:
   - Container running with radiod streaming (RX888 capturing)
@@ -35,9 +33,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from qdx_cat import QdxCat, QdxCatError
 from qdx_audio import QdxAudioError, find_qdx_card, qdx_hw_device
 
-DEFAULT_DIAL_HZ = 7_038_600
-DEFAULT_DIAL_MHZ = 7.0386
-DEFAULT_SSRC = 7039
+BANDS = [
+    {"name": "80m", "dial_hz": 3_568_600},
+    {"name": "40m", "dial_hz": 7_038_600},
+    {"name": "30m", "dial_hz": 10_138_700},
+    {"name": "20m", "dial_hz": 14_095_600},
+]
 
 TMP_DIR = "/tmp/bench_wspr"
 CAPS_DIR = os.path.join(TMP_DIR, "caps")
@@ -129,13 +130,13 @@ def generate_wspr_wav(message, tmp_dir, drive_db=-1):
 # pcmrecord management
 # ---------------------------------------------------------------------------
 
-def start_pcmrecord(ssrc, group, caps_dir):
+def start_pcmrecord(band_name, ssrc, group, caps_dir):
     """Start pcmrecord in the background for WSPR capture.
 
     Uses -w flag for WSPR mode (120s slot-aligned captures).
     Returns (subprocess.Popen, output_dir).
     """
-    out_dir = os.path.join(caps_dir, "40m")
+    out_dir = os.path.join(caps_dir, band_name)
     os.makedirs(out_dir, exist_ok=True)
 
     cmd = [
@@ -236,7 +237,7 @@ def decode_and_check(wav_path, expected_callsign, expected_grid,
 
 def main():
     p = argparse.ArgumentParser(
-        description="WSPR decode test (40m)"
+        description="WSPR decode test (80/40/30/20m)"
     )
     p.add_argument("--port", default="/dev/ttyACM0", help="QDX serial port")
     p.add_argument("--baud", type=int, default=9600, help="baud rate")
@@ -246,35 +247,9 @@ def main():
                    help="pcmrecord data group (default: wspr-pcm.local)")
     p.add_argument("--message", default=None,
                    help="override auto-generated WSPR message (CALL GRID DBM)")
-    p.add_argument("--freq", type=int, default=DEFAULT_DIAL_HZ,
-                   help=f"dial frequency in Hz (default: {DEFAULT_DIAL_HZ})")
     p.add_argument("--drive", type=float, default=-1,
                    help="TX audio normalize level in dB (default: -1)")
     args = p.parse_args()
-
-    dial_hz = args.freq
-    dial_mhz = dial_hz / 1_000_000.0
-    # SSRC is derived from dial freq in kHz (rounded), matching radiod convention
-    ssrc = round(dial_hz / 1000)
-
-    # Generate unique message for this run
-    if args.message:
-        message = args.message
-    else:
-        call = random_callsign()
-        grid = random_grid()
-        dbm = str(random.choice([23, 27, 30, 33, 37]))
-        message = f"{call} {grid} {dbm}"
-
-    # Parse message components for decode matching
-    msg_parts = message.split()
-    if len(msg_parts) != 3:
-        print(f"WSPR FAIL — message must be 'CALL GRID DBM', got: {message!r}")
-        sys.exit(1)
-    msg_call, msg_grid, msg_dbm = msg_parts
-
-    print(f"WSPR: message = \"{message}\"")
-    print(f"WSPR: dial = {dial_hz} Hz ({dial_mhz} MHz), SSRC = {ssrc}")
 
     # Preflight checks
     for tool in ("wsprsimwav", "wsprd", "sox", "pcmrecord", "aplay"):
@@ -294,11 +269,8 @@ def main():
     os.makedirs(TMP_DIR, exist_ok=True)
     os.makedirs(CAPS_DIR, exist_ok=True)
 
-    # Generate TX audio (once)
-    print(f"WSPR: generating WSPR TX audio")
-    tx_wav = generate_wspr_wav(message, TMP_DIR, drive_db=args.drive)
-    print(f"WSPR: TX audio ready: {tx_wav}")
-
+    passed = []
+    failed = []
     pcmrec_proc = None
 
     try:
@@ -306,92 +278,131 @@ def main():
             orig_freq = qdx.get_freq()
             print(f"WSPR: QDX alive, original freq = {orig_freq} Hz")
 
-            # Set QDX frequency
-            readback = qdx.set_freq(dial_hz)
-            if readback != dial_hz:
-                print(f"WSPR FAIL — freq set: expected {dial_hz}, "
-                      f"got {readback}")
-                sys.exit(1)
-            print(f"WSPR: dial set -> {dial_hz} Hz")
+            for band in BANDS:
+                name = band["name"]
+                dial_hz = band["dial_hz"]
+                dial_mhz = dial_hz / 1_000_000.0
+                ssrc = round(dial_hz / 1000)
 
-            # Clean capture directory
-            cap_dir = os.path.join(CAPS_DIR, "40m")
-            if os.path.exists(cap_dir):
-                shutil.rmtree(cap_dir)
+                # Generate unique message for this band
+                if args.message:
+                    message = args.message
+                else:
+                    call = random_callsign()
+                    grid = random_grid()
+                    dbm = str(random.choice([23, 27, 30, 33, 37]))
+                    message = f"{call} {grid} {dbm}"
 
-            # Start pcmrecord
-            pcmrec_proc, cap_dir = start_pcmrecord(
-                ssrc, args.group, CAPS_DIR)
-            print(f"WSPR: pcmrecord started (pid {pcmrec_proc.pid})")
+                msg_parts = message.split()
+                if len(msg_parts) != 3:
+                    print(f"WSPR FAIL — message must be 'CALL GRID DBM', "
+                          f"got: {message!r}")
+                    sys.exit(1)
+                msg_call, msg_grid, msg_dbm = msg_parts
 
-            # Wait for WSPR slot boundary (even minute)
-            boundary = wait_for_wspr_slot()
+                print(f"\nWSPR: === {name} ({dial_hz} Hz, SSRC {ssrc}) ===")
+                print(f"WSPR:   message = \"{message}\"")
 
-            # TX: key QDX + play audio (~110s)
-            qdx.tx_on()
-            tx_state = qdx.get_tx_state()
-            if not tx_state:
-                print(f"WSPR FAIL — QDX not in TX after TX;")
+                # Generate TX audio for this band
+                tx_wav = generate_wspr_wav(
+                    message, TMP_DIR, drive_db=args.drive)
+
+                # Set QDX frequency
+                readback = qdx.set_freq(dial_hz)
+                if readback != dial_hz:
+                    print(f"WSPR:   FAIL — freq set: expected {dial_hz}, "
+                          f"got {readback}")
+                    failed.append(name)
+                    continue
+                print(f"WSPR:   dial set -> {dial_hz} Hz")
+
+                # Clean capture directory
+                cap_dir = os.path.join(CAPS_DIR, name)
+                if os.path.exists(cap_dir):
+                    shutil.rmtree(cap_dir)
+
+                # Start pcmrecord
+                pcmrec_proc, cap_dir = start_pcmrecord(
+                    name, ssrc, args.group, CAPS_DIR)
+                print(f"WSPR:   pcmrecord started (pid {pcmrec_proc.pid})")
+
+                # Wait for WSPR slot boundary (even minute)
+                boundary = wait_for_wspr_slot()
+
+                # TX: key QDX + play audio (~110s)
+                qdx.tx_on()
+                tx_state = qdx.get_tx_state()
+                if not tx_state:
+                    print(f"WSPR:   FAIL — QDX not in TX after TX;")
+                    stop_pcmrecord(pcmrec_proc)
+                    pcmrec_proc = None
+                    failed.append(name)
+                    continue
+
+                print(f"WSPR:   TX on, playing WSPR audio (~110s)")
+                aplay_proc = subprocess.Popen(
+                    ["aplay", "-D", hw, tx_wav],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                )
+
+                # Wait for aplay to finish (WSPR audio is ~112s)
+                try:
+                    aplay_proc.wait(timeout=130)
+                except subprocess.TimeoutExpired:
+                    aplay_proc.terminate()
+                    aplay_proc.wait(timeout=5)
+                    print(f"WSPR:   WARNING — aplay timed out")
+
+                qdx.tx_off()
+                print(f"WSPR:   TX off")
+
+                # Wait for pcmrecord to close the slot file.
+                # The slot started at `boundary`; pcmrecord closes at
+                # boundary + 120s. Add 3s grace.
+                now = time.time()
+                wait_until = boundary + 120.0 + 3.0
+                if wait_until > now:
+                    remaining = wait_until - now
+                    print(f"WSPR:   waiting {remaining:.1f}s for slot closure")
+                    time.sleep(remaining)
+
+                # Stop pcmrecord
                 stop_pcmrecord(pcmrec_proc)
                 pcmrec_proc = None
-                sys.exit(1)
 
-            print(f"WSPR: TX on, playing WSPR audio (~110s)")
-            aplay_proc = subprocess.Popen(
-                ["aplay", "-D", hw, tx_wav],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            )
+                # Find captured WAVs
+                wavs = sorted(glob.glob(os.path.join(cap_dir, "*.wav")))
+                if not wavs:
+                    print(f"WSPR:   FAIL — no WAV captured in {cap_dir}")
+                    failed.append(name)
+                    continue
+                print(f"WSPR:   {len(wavs)} capture(s): "
+                      + " ".join(os.path.basename(w) for w in wavs))
 
-            # Wait for aplay to finish (WSPR audio is ~112s)
-            try:
-                aplay_proc.wait(timeout=130)
-            except subprocess.TimeoutExpired:
-                aplay_proc.terminate()
-                aplay_proc.wait(timeout=5)
-                print(f"WSPR: WARNING — aplay timed out")
+                # Decode
+                band_decoded = False
+                best_snr = None
+                for cap_wav in wavs:
+                    ok, snr = decode_and_check(
+                        cap_wav, msg_call, msg_grid, msg_dbm, dial_mhz)
+                    if ok:
+                        band_decoded = True
+                        best_snr = snr
+                        snr_str = (f"SNR={snr:.0f}"
+                                   if snr is not None else "SNR=?")
+                        print(f"WSPR:   {name} PASS — \"{message}\" decoded "
+                              f"({snr_str})")
+                        break
 
-            qdx.tx_off()
-            print(f"WSPR: TX off")
-
-            # Wait for pcmrecord to close the slot file.
-            # The slot started at `boundary`; pcmrecord closes at
-            # boundary + 120s. Add 3s grace.
-            now = time.time()
-            wait_until = boundary + 120.0 + 3.0
-            if wait_until > now:
-                remaining = wait_until - now
-                print(f"WSPR: waiting {remaining:.1f}s for slot file closure")
-                time.sleep(remaining)
-
-            # Stop pcmrecord
-            stop_pcmrecord(pcmrec_proc)
-            pcmrec_proc = None
-
-            # Find captured WAVs
-            wavs = sorted(glob.glob(os.path.join(cap_dir, "*.wav")))
-            if not wavs:
-                print(f"WSPR FAIL — no WAV captured in {cap_dir}")
-                qdx.set_freq(orig_freq)
-                sys.exit(1)
-            print(f"WSPR: {len(wavs)} capture(s): "
-                  + " ".join(os.path.basename(w) for w in wavs))
-
-            # Decode
-            decoded = False
-            best_snr = None
-            for cap_wav in wavs:
-                ok, snr = decode_and_check(
-                    cap_wav, msg_call, msg_grid, msg_dbm, dial_mhz)
-                if ok:
-                    decoded = True
-                    best_snr = snr
-                    print(f"WSPR:   decoded \"{message}\" "
-                          f"in {os.path.basename(cap_wav)}")
-                    break
+                if band_decoded:
+                    passed.append(name)
+                else:
+                    print(f"WSPR:   {name} FAIL — \"{message}\" not decoded")
+                    failed.append(name)
 
             # Restore original frequency
             qdx.set_freq(orig_freq)
-            print(f"WSPR: restored QDX freq -> {orig_freq} Hz")
+            print(f"\nWSPR: restored QDX freq -> {orig_freq} Hz")
 
     except QdxAudioError as exc:
         print(f"WSPR FAIL — audio: {exc}")
@@ -408,22 +419,13 @@ def main():
 
     # Verdict
     print()
-    if decoded:
-        snr_str = f"SNR={best_snr:.0f}" if best_snr is not None else "SNR=?"
-        print(f"WSPR OK — \"{message}\" decoded ({snr_str})")
-        if best_snr is not None:
-            if -15 <= best_snr <= -10:
-                print(f"WSPR: SNR {best_snr:.0f} dB is in the target range "
-                      f"(-10 to -15)")
-            elif best_snr > -10:
-                print(f"WSPR: SNR {best_snr:.0f} dB is above target — "
-                      f"increase attenuation for -10 to -15 dB")
-            else:
-                print(f"WSPR: SNR {best_snr:.0f} dB is below target — "
-                      f"decrease attenuation for -10 to -15 dB")
+    if not failed:
+        band_list = " ".join(p for p in passed)
+        print(f"WSPR OK ({len(passed)} bands: {band_list})")
         shutil.rmtree(TMP_DIR, ignore_errors=True)
     else:
-        print(f"WSPR FAIL — \"{message}\" not decoded")
+        fail_list = " ".join(failed)
+        print(f"WSPR FAIL — {fail_list}")
         print(f"(temp files kept in {TMP_DIR} for debugging)")
         sys.exit(1)
 

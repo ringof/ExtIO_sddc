@@ -6,6 +6,9 @@ QDX transmits a randomly-generated FT8 message on each of four bands
 ka9q-radio.  pcmrecord captures slot-aligned WAV files from the [FT8]
 channels, and decode_ft8 asserts the known message was decoded.
 
+Each band runs --passes passes (default 3) with a fresh random message
+per pass.  All passes must decode for a band to pass.
+
 Prerequisites:
   - Container running with radiod streaming (RX888 capturing)
   - QDX connected via USB (CAT + audio)
@@ -201,11 +204,9 @@ def main():
                    help="override auto-generated FT8 message")
     p.add_argument("--tone-freq", type=int, default=1500,
                    help="audio frequency in Hz for gen_ft8 (default: 1500)")
+    p.add_argument("--passes", type=int, default=3,
+                   help="passes per band; all must decode (default: 3)")
     args = p.parse_args()
-
-    # Generate unique message for this run
-    message = args.message or f"CQ {random_callsign()} {random_grid()}"
-    print(f"FT8: message = \"{message}\"")
 
     # Preflight checks
     for tool in ("gen_ft8", "decode_ft8", "sox", "pcmrecord", "aplay"):
@@ -225,10 +226,6 @@ def main():
     os.makedirs(TMP_DIR, exist_ok=True)
     os.makedirs(CAPS_DIR, exist_ok=True)
 
-    # Generate TX audio (once — reused for all bands)
-    print(f"FT8: generating FT8 TX audio (tone {args.tone_freq} Hz)")
-    tx_wav = generate_ft8_wav(message, args.tone_freq, TMP_DIR)
-
     passed = []
     failed = []
     pcmrec_proc = None
@@ -243,92 +240,109 @@ def main():
                 dial_hz = band["dial_hz"]
                 ssrc = band["ssrc"]
 
-                print(f"\nFT8: === {name} ({dial_hz} Hz) ===")
+                band_passes = 0
+                for pass_num in range(1, args.passes + 1):
+                    # Fresh random message each pass (unless overridden)
+                    message = (args.message
+                               or f"CQ {random_callsign()} {random_grid()}")
 
-                # Clean capture directory so stale files from prior
-                # runs don't interfere with file selection.
-                cap_dir = os.path.join(CAPS_DIR, name)
-                if os.path.exists(cap_dir):
-                    shutil.rmtree(cap_dir)
+                    print(f"\nFT8: === {name} pass {pass_num}/{args.passes} "
+                          f"({dial_hz} Hz) ===")
+                    print(f"FT8:   message = \"{message}\"")
 
-                # Set QDX frequency
-                readback = qdx.set_freq(dial_hz)
-                if readback != dial_hz:
-                    print(f"FT8:   FAIL — freq set: expected {dial_hz}, "
-                          f"got {readback}")
-                    failed.append(name)
-                    continue
-                print(f"FT8:   dial set -> {dial_hz} Hz")
+                    # Generate TX audio for this pass
+                    tx_wav = generate_ft8_wav(
+                        message, args.tone_freq, TMP_DIR)
 
-                # Start pcmrecord
-                pcmrec_proc, cap_dir = start_pcmrecord(
-                    name, ssrc, args.group, CAPS_DIR)
-                print(f"FT8:   pcmrecord started (pid {pcmrec_proc.pid})")
+                    # Clean capture directory so stale files from prior
+                    # passes don't interfere with file selection.
+                    cap_dir = os.path.join(CAPS_DIR, name)
+                    if os.path.exists(cap_dir):
+                        shutil.rmtree(cap_dir)
 
-                # Wait for FT8 slot boundary
-                boundary = wait_for_slot()
+                    # Set QDX frequency
+                    readback = qdx.set_freq(dial_hz)
+                    if readback != dial_hz:
+                        print(f"FT8:   FAIL — freq set: expected {dial_hz}, "
+                              f"got {readback}")
+                        break
+                    print(f"FT8:   dial set -> {dial_hz} Hz")
 
-                # TX: key QDX + play audio
-                qdx.tx_on()
-                tx_state = qdx.get_tx_state()
-                if not tx_state:
-                    print(f"FT8:   FAIL — QDX not in TX after TX;")
+                    # Start pcmrecord
+                    pcmrec_proc, cap_dir = start_pcmrecord(
+                        name, ssrc, args.group, CAPS_DIR)
+                    print(f"FT8:   pcmrecord started (pid {pcmrec_proc.pid})")
+
+                    # Wait for FT8 slot boundary
+                    boundary = wait_for_slot()
+
+                    # TX: key QDX + play audio
+                    qdx.tx_on()
+                    tx_state = qdx.get_tx_state()
+                    if not tx_state:
+                        print(f"FT8:   FAIL — QDX not in TX after TX;")
+                        stop_pcmrecord(pcmrec_proc)
+                        pcmrec_proc = None
+                        break
+
+                    print(f"FT8:   TX on, playing FT8 audio")
+                    aplay_proc = subprocess.Popen(
+                        ["aplay", "-D", hw, tx_wav],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    )
+
+                    # Wait for aplay to finish (FT8 audio is ~13s)
+                    try:
+                        aplay_proc.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        aplay_proc.terminate()
+                        aplay_proc.wait(timeout=5)
+                        print(f"FT8:   WARNING — aplay timed out")
+
+                    qdx.tx_off()
+                    print(f"FT8:   TX off")
+
+                    # Wait for pcmrecord to close the slot file.
+                    # The slot started at `boundary`; pcmrecord closes at
+                    # boundary + 15s. Add 2s grace.
+                    now = time.time()
+                    wait_until = boundary + 15.0 + 2.0
+                    if wait_until > now:
+                        time.sleep(wait_until - now)
+
+                    # Stop pcmrecord
                     stop_pcmrecord(pcmrec_proc)
                     pcmrec_proc = None
-                    failed.append(name)
-                    continue
 
-                print(f"FT8:   TX on, playing FT8 audio")
-                aplay_proc = subprocess.Popen(
-                    ["aplay", "-D", hw, tx_wav],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                )
-
-                # Wait for aplay to finish (FT8 audio is ~13s)
-                try:
-                    aplay_proc.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    aplay_proc.terminate()
-                    aplay_proc.wait(timeout=5)
-                    print(f"FT8:   WARNING — aplay timed out")
-
-                qdx.tx_off()
-                print(f"FT8:   TX off")
-
-                # Wait for pcmrecord to close the slot file.
-                # The slot started at `boundary`; pcmrecord closes at
-                # boundary + 15s. Add 2s grace.
-                now = time.time()
-                wait_until = boundary + 15.0 + 2.0
-                if wait_until > now:
-                    time.sleep(wait_until - now)
-
-                # Stop pcmrecord
-                stop_pcmrecord(pcmrec_proc)
-                pcmrec_proc = None
-
-                # Find captured WAVs.  pcmrecord writes slot-aligned
-                # files; SIGTERM may leave a short partial for the next
-                # slot.  Try all captures — signal is in the full one.
-                wavs = sorted(glob.glob(os.path.join(cap_dir, "*.wav")))
-                if not wavs:
-                    print(f"FT8:   FAIL — no WAV captured in {cap_dir}")
-                    failed.append(name)
-                    continue
-                print(f"FT8:   {len(wavs)} capture(s): "
-                      + " ".join(os.path.basename(w) for w in wavs))
-
-                band_decoded = False
-                for cap_wav in wavs:
-                    if decode_and_check(cap_wav, message):
-                        print(f"FT8:   {name} PASS — \"{message}\" decoded"
-                              f" in {os.path.basename(cap_wav)}")
-                        passed.append(name)
-                        band_decoded = True
+                    # Find captured WAVs.  pcmrecord writes slot-aligned
+                    # files; SIGTERM may leave a short partial for the next
+                    # slot.  Try all captures — signal is in the full one.
+                    wavs = sorted(glob.glob(os.path.join(cap_dir, "*.wav")))
+                    if not wavs:
+                        print(f"FT8:   FAIL — no WAV captured in {cap_dir}")
                         break
-                if not band_decoded:
-                    print(f"FT8:   {name} FAIL — \"{message}\" not decoded")
-                    failed.append(name)
+                    print(f"FT8:   {len(wavs)} capture(s): "
+                          + " ".join(os.path.basename(w) for w in wavs))
+
+                    decoded = False
+                    for cap_wav in wavs:
+                        if decode_and_check(cap_wav, message):
+                            print(f"FT8:   pass {pass_num} PASS — "
+                                  f"\"{message}\" decoded in "
+                                  f"{os.path.basename(cap_wav)}")
+                            decoded = True
+                            break
+                    if not decoded:
+                        print(f"FT8:   pass {pass_num} FAIL — "
+                              f"\"{message}\" not decoded")
+                        break
+
+                    band_passes += 1
+
+                if band_passes == args.passes:
+                    passed.append(name)
+                else:
+                    failed.append(f"{name}({band_passes}/{args.passes})")
 
             # Restore original frequency
             qdx.set_freq(orig_freq)
@@ -352,12 +366,13 @@ def main():
     print()
     if not failed:
         band_list = " ".join(p for p in passed)
-        print(f"FT8 OK ({len(passed)} bands: {band_list})")
+        print(f"FT8 OK ({len(passed)} bands x {args.passes} passes: "
+              f"{band_list})")
         # Clean up temp on success
         shutil.rmtree(TMP_DIR, ignore_errors=True)
     else:
-        for name in failed:
-            print(f"FT8 FAIL — {name}: \"{message}\" not decoded")
+        fail_list = " ".join(failed)
+        print(f"FT8 FAIL — {fail_list}")
         print(f"(temp files kept in {TMP_DIR} for debugging)")
         sys.exit(1)
 
