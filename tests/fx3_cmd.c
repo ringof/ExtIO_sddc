@@ -5111,8 +5111,10 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
              * Try to re-acquire before declaring the device gone. */
             printf("# soak: NO_DEVICE after '%s'; attempting to re-acquire...\n",
                    scenarios[sel].name);
+            if (soak_pps_active) pps_handle = NULL;  /* fence PPS thread off stale handle */
             if (soak_try_reacquire(&h) == 0 &&
                 soak_health_check(h, &prev_stats) == 0) {
+                if (soak_pps_active) pps_handle = h;
                 health_pass++;
             } else {
                 printf("\nSOAK ABORT: device gone after '%s' and re-acquire "
@@ -5136,8 +5138,10 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
                 health_pass++;
             } else if (hc2 == LIBUSB_ERROR_NO_DEVICE) {
                 printf("# soak: NO_DEVICE after retry; attempting to re-acquire...\n");
+                if (soak_pps_active) pps_handle = NULL;  /* fence PPS thread off stale handle */
                 if (soak_try_reacquire(&h) == 0 &&
                     soak_health_check(h, &prev_stats) == 0) {
+                    if (soak_pps_active) pps_handle = h;
                     health_pass++;
                 } else {
                     printf("\nSOAK ABORT: device gone after retry and re-acquire "
