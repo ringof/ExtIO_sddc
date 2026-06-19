@@ -5176,7 +5176,9 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     }
 
     if (pps_tid) {
-        /* soak_stop is already set; thread will exit on next tick */
+        /* Ensure soak_stop is set — Ctrl-C sets it via the signal handler,
+         * but the loop also exits on time/count via break without setting it. */
+        soak_stop = 1;
         pthread_join(pps_tid, NULL);
         /* Restore GPIO baseline (clear bit 9) */
         soak_pps_active = 0;
