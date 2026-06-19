@@ -27,6 +27,7 @@
 #include <termios.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <pthread.h>
 #include <libusb-1.0/libusb.h>
 
 /* ------------------------------------------------------------------ */
@@ -128,8 +129,14 @@ static int ctrl_read(libusb_device_handle *h, uint8_t request,
 }
 
 /* Convenience: send a command with a u32 payload, wValue=0, wIndex=0 */
+static volatile sig_atomic_t soak_pps_active;   /* nonzero = PPS thread owns bit 9 */
+static volatile uint32_t     gpio_pps_bit;       /* 0x200 during high phase, 0 during low */
+static libusb_device_handle *volatile pps_handle; /* updated by soak loop after each scenario */
+
 static int cmd_u32(libusb_device_handle *h, uint8_t cmd, uint32_t val)
 {
+    if (cmd == GPIOFX3 && soak_pps_active)
+        val = (val & ~0x200u) | (gpio_pps_bit & 0x200u);
     return ctrl_write_u32(h, cmd, 0, 0, val);
 }
 
@@ -4605,6 +4612,36 @@ static int do_test_watchdog_race(libusb_device_handle *h, int rounds)
 
 static volatile sig_atomic_t soak_stop;
 
+static void *soak_pps_thread(void *arg)
+{
+    (void)arg;
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+
+    while (!soak_stop) {
+        /* Advance to next 1-second boundary */
+        next.tv_sec += 1;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        if (soak_stop) break;
+
+        libusb_device_handle *h = pps_handle;
+        if (!h) continue;           /* device mid-reset */
+
+        /* Rising edge */
+        gpio_pps_bit = 0x200;
+        int r = cmd_u32(h, GPIOFX3, 0x0800 | 0x0200);  /* LED + BIAS_VHF */
+        if (r == LIBUSB_ERROR_NO_DEVICE) continue;
+
+        /* ~10 ms dwell */
+        usleep(10000);
+
+        /* Falling edge */
+        gpio_pps_bit = 0;
+        cmd_u32(h, GPIOFX3, 0x0800);  /* LED only */
+    }
+    return NULL;
+}
+
 static void soak_sigint(int sig)
 {
     (void)sig;
@@ -4780,6 +4817,8 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     for (int i = 0; i < argc && pos_argc < 16; i++) {
         if (strcmp(argv[i], "-q") == 0) {
             quiet = 1;
+        } else if (strcmp(argv[i], "--pps") == 0) {
+            soak_pps_active = 1;
         } else if ((strcmp(argv[i], "--weight") == 0 ||
                     strcmp(argv[i], "-w") == 0) && i + 1 < argc) {
             const char *spec = argv[++i];
@@ -4840,6 +4879,7 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
         {"stale_vendor_codes",  do_test_stale_vendor_codes,   3, 0, 0, 0},
         {"synth_pps_protocol",  do_test_synth_pps_protocol,   3, 0, 0, 0},
+        {"pps_inject",          do_test_pps_inject,           3, 0, 0, 0},
         {"setarg_gap_index",    do_test_setarg_gap_index,     3, 0, 0, 0},
         {"dma_count_reset",     do_test_dma_count_reset,      5, 0, 0, 0},
         {"dma_count_monotonic", do_test_dma_count_monotonic,  5, 0, 0, 0},
@@ -4927,6 +4967,8 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     if (max_scenarios > 0)
         printf("  MaxCycles: %d", max_scenarios);
     printf("\n");
+    if (soak_pps_active)
+        printf("  PPS: 1 Hz GPIO18\n");
     printf("Press Ctrl-C for early stop with summary\n\n");
 
     /* Initial health check */
@@ -4936,6 +4978,13 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         printf("SOAK ABORT: initial health check failed\n");
         *h_inout = h;  /* propagate (no re-acquire happened, but keep callers honest) */
         return 1;
+    }
+
+    pthread_t pps_tid = 0;
+    if (soak_pps_active) {
+        pps_handle = h;
+        gpio_pps_bit = 0;
+        pthread_create(&pps_tid, NULL, soak_pps_thread, NULL);
     }
 
     int total_cycles = 0, total_pass = 0, total_fail = 0;
@@ -5020,6 +5069,9 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         }
         total_cycles++;
         prev_sel = sel;
+
+        if (soak_pps_active)
+            pps_handle = h;   /* propagate any re-acquired handle */
 
         /* Inter-scenario cleanup: ensure streaming is stopped before the
          * health check.  Many scenarios already send STOPFX3 on their
@@ -5117,6 +5169,14 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
                    prev_stats.i2c_failures, prev_stats.streaming_faults);
             fflush(stdout);
         }
+    }
+
+    if (pps_tid) {
+        /* soak_stop is already set; thread will exit on next tick */
+        pthread_join(pps_tid, NULL);
+        /* Restore GPIO baseline (clear bit 9) */
+        soak_pps_active = 0;
+        cmd_u32(h, GPIOFX3, 0x0800);
     }
 
     /* Final report */
@@ -5544,8 +5604,9 @@ static void usage(const char *prog)
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
-        "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
+        "  soak [hours] [seed] [max] [-q] [--pps] [--weight NAME=N]...\n"
         "                               Multi-hour randomized stress test\n"
+        "                               --pps: background 1 Hz GPIO18 toggle (simulated PPS)\n"
         "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
