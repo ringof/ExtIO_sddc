@@ -527,7 +527,6 @@ static int do_test_abandoned_stream(libusb_device_handle *h);
 static int do_test_vendor_rqt_wrap(libusb_device_handle *h);
 static int do_test_stale_vendor_codes(libusb_device_handle *h);
 static int do_test_synth_pps_protocol(libusb_device_handle *h);
-static int do_test_synth_pps_streaming(libusb_device_handle *h);
 static int do_test_setarg_gap_index(libusb_device_handle *h);
 static int do_test_gpio_extremes(libusb_device_handle *h);
 static int do_test_hw_smoke(libusb_device_handle *h);
@@ -585,7 +584,6 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"vendor_rqt_wrap",  do_test_vendor_rqt_wrap},
     {"stale_vendor_codes", do_test_stale_vendor_codes},
     {"synth_pps_protocol", do_test_synth_pps_protocol},
-    {"synth_pps_streaming", do_test_synth_pps_streaming},
     {"setarg_gap_index", do_test_setarg_gap_index},
     {"gpio_extremes",    do_test_gpio_extremes},
     {"hw_smoke",         do_test_hw_smoke},
@@ -637,7 +635,6 @@ static void print_local_help(void)
            "  vendor_rqt_wrap               Counter wraparound at 256\n"
            "  stale_vendor_codes            Dead-zone bRequest values\n"
            "  synth_pps_protocol            SYNTH_PPS argument-validation stub (issue #125)\n"
-           "  synth_pps_streaming           SYNTH_PPS produces partial commits while streaming (issue #125)\n"
            "  setarg_gap_index              Near-miss SETARGFX3 wIndex\n"
            "  gpio_extremes                 Extreme GPIO patterns\n"
            "  hw_smoke                      ADC alive check (stream after GPIO)\n"
@@ -3374,136 +3371,6 @@ static int do_test_synth_pps_protocol(libusb_device_handle *h)
     return 0;
 }
 
-/* synth_pps_streaming — end-to-end check that SYNTH_PPS actually fires
- * partial commits and bumps glPpsCount (issue #125, A3).  Captures
- * GETSTATS before and after a 2-second window of 100 ms periodic
- * synth-PPS while streaming, expects pps_count delta in [15..25]
- * (target ~20 = 2 s / 100 ms) with generous tolerance for scheduler
- * jitter.  pps_commit_fail_count should be zero or near-zero during
- * active streaming.  Stops the timer + stops streaming on exit so
- * subsequent scenarios see a clean state. */
-static int do_test_synth_pps_streaming(libusb_device_handle *h)
-{
-    int r;
-    uint32_t sample_rate = 64000000;
-    uint32_t duration_ms = 2000;
-    uint16_t period_ms = 100;
-
-    struct fx3_stats before = {0}, after = {0};
-    if (read_stats(h, &before) < 0) {
-        printf("FAIL synth_pps_streaming: baseline GETSTATS\n");
-        return 1;
-    }
-
-    r = cmd_u32_retry(h, STARTADC, sample_rate);
-    if (r < 0) {
-        printf("FAIL synth_pps_streaming: STARTADC: %s\n", libusb_strerror(r));
-        return 1;
-    }
-
-    /* Primed start, same pattern as every other streaming scenario. */
-    int primed = primed_start_and_read_retry(h, 65536, 2000);
-    if (primed < 0) {
-        printf("FAIL synth_pps_streaming: primed start: %s\n",
-               libusb_strerror(primed));
-        cmd_u32(h, STOPFX3, 0);
-        return 1;
-    }
-
-    /* Start the synthetic-PPS timer at 100 ms period (10 Hz). */
-    r = libusb_control_transfer(h,
-            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
-                LIBUSB_ENDPOINT_OUT,
-            SYNTH_PPS, 1, period_ms, NULL, 0, CTRL_TIMEOUT_MS);
-    if (r != 0) {
-        printf("FAIL synth_pps_streaming: SYNTH_PPS start: %s\n",
-               libusb_strerror(r));
-        cmd_u32(h, STOPFX3, 0);
-        return 1;
-    }
-
-    /* Drain bulk for duration_ms.  Without draining, DMA buffers back
-     * up and SetWrapUp would have nothing to wrap.  We don't verify
-     * byte count here — sustained_stream does that elsewhere. */
-    int chunk = 65536;
-    uint8_t *buf = malloc(chunk);
-    if (!buf) {
-        cmd_u32(h, SYNTH_PPS, 0);
-        cmd_u32(h, STOPFX3, 0);
-        printf("FAIL synth_pps_streaming: malloc\n");
-        return 1;
-    }
-    uint64_t total_bytes = (uint64_t)primed;
-    struct timespec start_ts, now_ts;
-    clock_gettime(CLOCK_MONOTONIC, &start_ts);
-    int drain_fail = 0;
-    for (;;) {
-        int transferred = 0;
-        int rr = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
-        if (rr == 0 || (rr == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
-            total_bytes += transferred;
-        } else {
-            printf("FAIL synth_pps_streaming: bulk drain: %s\n", libusb_strerror(rr));
-            drain_fail = 1;
-            break;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &now_ts);
-        double elapsed_ms = (now_ts.tv_sec - start_ts.tv_sec) * 1000.0
-                          + (now_ts.tv_nsec - start_ts.tv_nsec) / 1e6;
-        if (elapsed_ms >= duration_ms) break;
-    }
-    free(buf);
-
-    /* Stop synth-PPS and streaming regardless of drain result. */
-    (void)libusb_control_transfer(h,
-            LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
-                LIBUSB_ENDPOINT_OUT,
-            SYNTH_PPS, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
-    cmd_u32(h, STOPFX3, 0);
-
-    if (drain_fail) return 1;
-
-    if (read_stats(h, &after) < 0) {
-        printf("FAIL synth_pps_streaming: post-run GETSTATS\n");
-        return 1;
-    }
-
-    uint32_t pps_delta = after.pps_count - before.pps_count;
-    uint32_t fail_delta = after.pps_commit_fail_count - before.pps_commit_fail_count;
-
-    /* Target ~20 commits (2000 ms / 100 ms).  Tolerance accounts for
-     * ThreadX scheduling jitter (~4% per cyu3os.h docs) plus startup
-     * timing latency.  Wider than strictly needed -- the negative test
-     * is "did anything fire at all," not "exact rate." */
-    if (pps_delta < 15 || pps_delta > 25) {
-        printf("FAIL synth_pps_streaming: pps_count delta=%u (expected 15..25)\n",
-               pps_delta);
-        return 1;
-    }
-
-    /* fail_delta should be 0 during active streaming.  Allow up to 2
-     * for the boundary ticks (start/stop windows) where the channel
-     * may briefly be between buffers. */
-    if (fail_delta > 2) {
-        printf("FAIL synth_pps_streaming: pps_commit_fail_count delta=%u (expected <=2)\n",
-               fail_delta);
-        return 1;
-    }
-
-    /* Verify device alive */
-    uint8_t info[4] = {0};
-    int rprobe = ctrl_read(h, TESTFX3, 0, 0, info, 4);
-    if (rprobe < 0) {
-        printf("FAIL synth_pps_streaming: post-run TESTFX3: %s\n",
-               libusb_strerror(rprobe));
-        return 1;
-    }
-
-    printf("PASS synth_pps_streaming: pps=%u fail=%u bytes=%lu\n",
-           pps_delta, fail_delta, (unsigned long)total_bytes);
-    return 0;
-}
-
 /* T3: setarg_gap_index — SETARGFX3 with wIndex values that fall in gaps
  * between valid arg IDs (10=DAT31_ATT, 11=AD8370_VGA, 14=WDG_MAX_RECOV).
  * wIndex 12, 13, 15 should STALL. */
@@ -4973,7 +4840,6 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
         {"stale_vendor_codes",  do_test_stale_vendor_codes,   3, 0, 0, 0},
         {"synth_pps_protocol",  do_test_synth_pps_protocol,   3, 0, 0, 0},
-        {"synth_pps_streaming", do_test_synth_pps_streaming,  3, 0, 0, 0},
         {"setarg_gap_index",    do_test_setarg_gap_index,     3, 0, 0, 0},
         {"dma_count_reset",     do_test_dma_count_reset,      5, 0, 0, 0},
         {"dma_count_monotonic", do_test_dma_count_monotonic,  5, 0, 0, 0},
@@ -5957,9 +5823,6 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "synth_pps_protocol") == 0) {
         rc = do_test_synth_pps_protocol(h);
-
-    } else if (strcmp(cmd, "synth_pps_streaming") == 0) {
-        rc = do_test_synth_pps_streaming(h);
 
     } else if (strcmp(cmd, "setarg_gap_index") == 0) {
         rc = do_test_setarg_gap_index(h);

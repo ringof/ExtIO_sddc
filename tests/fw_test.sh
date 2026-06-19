@@ -521,13 +521,13 @@ output=$(run_cmd synth_pps_protocol) && {
 }
 
 # ==================================================================
-# 20b. SYNTH_PPS produces partial commits while streaming (issue #125, A3)
+# 20b. PPS marker injection survival (issue #125, Phase 4a)
 # ==================================================================
 
-output=$(run_cmd synth_pps_streaming) && {
-    tap_ok "synth_pps_streaming: glPpsCount advances under active streaming (issue #125)"
+output=$(run_cmd pps_inject) && {
+    tap_ok "pps_inject: GPIO18 marker stream clean (issue #125)"
 } || {
-    tap_fail "synth_pps_streaming: synth-PPS not firing or counter not advancing" "$output"
+    tap_fail "pps_inject: marker injection broke stream or device" "$output"
 }
 
 # ==================================================================
