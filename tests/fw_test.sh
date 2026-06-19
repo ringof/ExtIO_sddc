@@ -192,8 +192,10 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 
 # ---- Test Plan ----
 
-# TAP plan is emitted after all tests run (trailing plan) so the count
-# is always correct — no manual bookkeeping when tests are added/removed.
+# TAP plan: counted automatically from "# TAP" markers below.
+# To add a test, put "# TAP" on exactly one comment line per test point.
+PLANNED=$(grep -c '^# TAP$' "$0")
+echo "1..$PLANNED"
 
 # ==================================================================
 # 1. Firmware upload via rx888_stream
@@ -207,6 +209,7 @@ echo "# sample rate:  $SAMPLE_RATE Hz"
 # If the device already has firmware loaded, rx888_stream opens it
 # directly and this still exercises the basic startup path.
 
+# TAP
 UPLOAD_LOG="$TMPDIR/upload.log"
 
 timeout 15 "$RX888_STREAM" -f "$FIRMWARE" -s "$SAMPLE_RATE" \
@@ -235,6 +238,7 @@ fi
 # 2. Device probe
 # ==================================================================
 
+# TAP
 output=$(run_cmd test) && {
     hwconfig=$(echo "$output" | grep -oP 'hwconfig=0x\K[0-9A-Fa-f]+' || echo "??")
     if [[ "$hwconfig" == "04" ]]; then
@@ -250,6 +254,7 @@ output=$(run_cmd test) && {
 # 3. GPIO test
 # ==================================================================
 
+# TAP
 # Set LED on, dither off, randomizer off
 output=$(run_cmd gpio 0x0800) && {
     tap_ok "gpio: set LED_BLUE"
@@ -261,6 +266,7 @@ output=$(run_cmd gpio 0x0800) && {
 # 4. ADC clock
 # ==================================================================
 
+# TAP
 output=$(run_cmd adc "$SAMPLE_RATE") && {
     tap_ok "adc: set clock to $SAMPLE_RATE Hz"
 } || {
@@ -271,12 +277,14 @@ output=$(run_cmd adc "$SAMPLE_RATE") && {
 # 5. Attenuator spot-check (min and max)
 # ==================================================================
 
+# TAP
 output=$(run_cmd att 0) && {
     tap_ok "att: set 0 (minimum)"
 } || {
     tap_fail "att: set 0 failed" "$output"
 }
 
+# TAP
 output=$(run_cmd att 63) && {
     tap_ok "att: set 63 (maximum)"
 } || {
@@ -287,12 +295,14 @@ output=$(run_cmd att 63) && {
 # 6. VGA spot-check (min and max)
 # ==================================================================
 
+# TAP
 output=$(run_cmd vga 0) && {
     tap_ok "vga: set 0 (minimum)"
 } || {
     tap_fail "vga: set 0 failed" "$output"
 }
 
+# TAP
 output=$(run_cmd vga 255) && {
     tap_ok "vga: set 255 (maximum)"
 } || {
@@ -303,6 +313,7 @@ output=$(run_cmd vga 255) && {
 # 7. Stop (ensure clean state)
 # ==================================================================
 
+# TAP
 output=$(run_cmd stop) && {
     tap_ok "stop: clean state"
 } || {
@@ -315,6 +326,7 @@ output=$(run_cmd stop) && {
 # These should STALL.  The "raw" subcommand treats STALL as PASS.
 # After each, verify the device is still responsive.
 
+# TAP
 output=$("$FX3_CMD" raw 0xB4 2>&1) || true
 if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERINIT (0xB4): got STALL as expected"
@@ -322,6 +334,7 @@ else
     tap_fail "stale TUNERINIT (0xB4): command accepted (not removed?)" "$output"
 fi
 
+# TAP
 output=$("$FX3_CMD" raw 0xB5 2>&1) || true
 if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERTUNE (0xB5): got STALL as expected"
@@ -329,6 +342,7 @@ else
     tap_fail "stale TUNERTUNE (0xB5): command accepted (not removed?)" "$output"
 fi
 
+# TAP
 output=$("$FX3_CMD" raw 0xB8 2>&1) || true
 if [[ "$output" == *STALL* ]]; then
     tap_ok "stale TUNERSTDBY (0xB8): got STALL as expected"
@@ -342,6 +356,7 @@ fi
 # Read from I2C address 0xC2 (no device at this address) to confirm
 # the firmware propagates I2C NACK errors as EP0 STALLs.
 
+# TAP
 output=$("$FX3_CMD" i2cr 0xC2 0 1 2>&1) || true
 if [[ "$output" == *FAIL* ]]; then
     tap_ok "i2c_nack: read from absent address 0xC2 correctly failed"
@@ -356,6 +371,7 @@ fi
 # through the error-checked I2cTransferW1 code.  On a working device
 # this should succeed (the Si5351 accepts the write to disable CLK0).
 
+# TAP
 output=$(run_cmd adc 0) && {
     tap_ok "adc_off: clock-off via STARTADC freq=0"
 } || {
@@ -367,6 +383,7 @@ output=$(run_cmd adc 0) && {
 # ==================================================================
 # Send a vendor request with wLength > 64 — firmware must STALL.
 
+# TAP
 output=$(run_cmd ep0_overflow) && {
     tap_ok "ep0_overflow: STALL on oversized wLength"
 } || {
@@ -380,6 +397,7 @@ output=$(run_cmd ep0_overflow) && {
 # Before the fix, this would index FX3CommandName[0xCC-0xAA] = [34],
 # reading past the 17-element array.
 
+# TAP
 output=$(run_cmd oob_brequest) && {
     tap_ok "oob_brequest: survived bRequest=0xCC (issue #21)"
 } || {
@@ -391,6 +409,7 @@ output=$(run_cmd oob_brequest) && {
 # ==================================================================
 # Send SETARGFX3 with wIndex=0xFFFF (outside SETARGFX3List[0..13]).
 
+# TAP
 output=$(run_cmd oob_setarg) && {
     tap_ok "oob_setarg: survived SETARGFX3 wIndex=0xFFFF (issue #20)"
 } || {
@@ -403,6 +422,7 @@ output=$(run_cmd oob_setarg) && {
 # Send 35 chars (exceeds 32-byte ConsoleInBuffer).  Before the fix,
 # the off-by-one allowed writing past the buffer.
 
+# TAP
 output=$(run_cmd console_fill) && {
     tap_ok "console_fill: survived 35-char input (issue #13)"
 } || {
@@ -415,6 +435,7 @@ output=$(run_cmd console_fill) && {
 # Rapidly interleave SETARGFX3 (generates debug output via TraceSerial)
 # with READINFODEBUG polls (reads debug buffer).
 
+# TAP
 output=$(run_cmd debug_race) && {
     tap_ok "debug_race: survived 50 rapid poll cycles (issue #8)"
 } || {
@@ -426,6 +447,7 @@ output=$(run_cmd debug_race) && {
 # ==================================================================
 # Send "?" + CR, collect debug output, verify we get help text back.
 
+# TAP
 output=$(run_cmd debug_poll) && {
     tap_ok "debug_poll: got debug output over USB (issue #26)"
 } || {
@@ -438,6 +460,7 @@ output=$(run_cmd debug_poll) && {
 # Query the "stack" debug command and verify adequate headroom
 # after the thread has run through initialization.
 
+# TAP
 output=$(run_cmd stack_check) && {
     tap_ok "stack_check: adequate stack headroom at 2KB (issue #12)"
 } || {
@@ -448,6 +471,7 @@ output=$(run_cmd stack_check) && {
 # 16. GETSTATS readout
 # ==================================================================
 
+# TAP
 output=$(run_cmd stats) && {
     tap_ok "stats: GETSTATS readout"
 } || {
@@ -458,6 +482,7 @@ output=$(run_cmd stats) && {
 # 17. GETSTATS I2C failure counter
 # ==================================================================
 
+# TAP
 output=$(run_cmd stats_i2c) && {
     tap_ok "stats_i2c: I2C failure counter incremented on NACK"
 } || {
@@ -470,6 +495,7 @@ output=$(run_cmd stats_i2c) && {
 # After test 4 set the ADC clock, the Si5351 PLL should be locked.
 # Verify SYS_INIT is clear and PLL A is locked via GETSTATS byte [19].
 
+# TAP
 output=$(run_cmd stats_pll) && {
     tap_ok "stats_pll: Si5351 PLL locked, SYS_INIT clear"
 } || {
@@ -480,6 +506,7 @@ output=$(run_cmd stats_pll) && {
 # 19. Vendor request counter wraparound
 # ==================================================================
 
+# TAP
 output=$(run_cmd vendor_rqt_wrap) && {
     tap_ok "vendor_rqt_wrap: counter wraps at 256"
 } || {
@@ -490,6 +517,7 @@ output=$(run_cmd vendor_rqt_wrap) && {
 # 20. Stale vendor codes (dead-zone bRequest values)
 # ==================================================================
 
+# TAP
 output=$(run_cmd stale_vendor_codes) && {
     tap_ok "stale_vendor_codes: dead-zone bRequest values STALL"
 } || {
@@ -500,6 +528,7 @@ output=$(run_cmd stale_vendor_codes) && {
 # 20a. SYNTH_PPS argument validation (issue #125, A2)
 # ==================================================================
 
+# TAP
 output=$(run_cmd synth_pps_protocol) && {
     tap_ok "synth_pps_protocol: SYNTH_PPS argument validation (issue #125)"
 } || {
@@ -510,6 +539,7 @@ output=$(run_cmd synth_pps_protocol) && {
 # 20b. PPS marker injection survival (issue #125, Phase 4a)
 # ==================================================================
 
+# TAP
 output=$(run_cmd pps_inject) && {
     tap_ok "pps_inject: GPIO18 marker stream clean (issue #125)"
 } || {
@@ -520,6 +550,7 @@ output=$(run_cmd pps_inject) && {
 # 21. SETARGFX3 near-miss wIndex values
 # ==================================================================
 
+# TAP
 output=$(run_cmd setarg_gap_index) && {
     tap_ok "setarg_gap_index: near-miss wIndex values survived"
 } || {
@@ -530,6 +561,7 @@ output=$(run_cmd setarg_gap_index) && {
 # 22. GPIO extreme patterns
 # ==================================================================
 
+# TAP
 output=$(run_cmd gpio_extremes) && {
     tap_ok "gpio_extremes: all-zeros/all-ones GPIO survived"
 } || {
@@ -540,6 +572,7 @@ output=$(run_cmd gpio_extremes) && {
 # 23. I2C write NACK counter
 # ==================================================================
 
+# TAP
 output=$(run_cmd i2c_write_bad_addr) && {
     tap_ok "i2c_write_bad_addr: write NACK path survived"
 } || {
@@ -554,6 +587,7 @@ output=$(run_cmd i2c_write_bad_addr) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd hw_smoke) && {
     tap_ok "hw_smoke: ADC alive — data flows after GPIO extremes"
 } || {
@@ -568,6 +602,7 @@ output=$(run_cmd hw_smoke) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd stop_gpif_state) && {
     tap_ok "stop_gpif_state: GPIF SM properly stopped after STOPFX3"
 } || {
@@ -582,6 +617,7 @@ output=$(run_cmd stop_gpif_state) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd stop_start_cycle) && {
     tap_ok "stop_start_cycle: 5 stop/start cycles completed"
 } || {
@@ -596,6 +632,7 @@ output=$(run_cmd stop_start_cycle) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd pll_preflight) && {
     tap_ok "pll_preflight: STARTFX3 rejected without ADC clock"
 } || {
@@ -611,6 +648,7 @@ output=$(run_cmd pll_preflight) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd wedge_recovery) && {
     tap_ok "wedge_recovery: recovered from DMA backpressure wedge"
 } || {
@@ -626,6 +664,7 @@ output=$(run_cmd wedge_recovery) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd gpif_soft_stop) && {
     tap_ok "gpif_soft_stop: SM consistently reaches IDLE via soft-stop"
 } || {
@@ -641,6 +680,7 @@ output=$(run_cmd gpif_soft_stop) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd stop_under_backpressure) && {
     tap_ok "stop_under_backpressure: clean stop from WAIT state + recovery"
 } || {
@@ -657,6 +697,7 @@ output=$(run_cmd stop_under_backpressure) && {
 
 device_quiesce
 
+# TAP
 output=$(run_cmd pib_overflow) && {
     tap_ok "pib_overflow: PIB error detected in debug output (issue #10)"
 } || {
@@ -668,6 +709,7 @@ output=$(run_cmd pib_overflow) && {
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
+# TAP
 output=$(run_cmd stats_pib) && {
     tap_ok "stats_pib: PIB error counter incremented on overflow"
 } || {
@@ -678,6 +720,9 @@ output=$(run_cmd stats_pib) && {
 # 33. Streaming test via rx888_stream
 # ==================================================================
 
+# TAP
+# TAP
+# TAP
 if [[ $SKIP_STREAM -eq 1 ]]; then
     tap_skip "stream: data capture" "streaming tests skipped"
     tap_skip "stream: byte count" "streaming tests skipped"
@@ -728,7 +773,6 @@ fi
 
 # ---- Summary ----
 
-echo "1..$TEST_NUM"
 echo "#"
 echo "# $PASS_COUNT passed, $FAIL_COUNT failed out of $TEST_NUM tests"
 
