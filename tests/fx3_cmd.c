@@ -552,6 +552,7 @@ static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
 static int do_test_main_recovery(libusb_device_handle *h);
+static int pps_integrity_main(libusb_device_handle *h, int argc, char **argv);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -2504,11 +2505,20 @@ static int do_test_pps_inject(libusb_device_handle *h)
         cmd_u32(h, GPIOFX3, GPIO_BASE);   /* settle low between steps */
     }
 
+    /* Drain in-flight bulk transfers before stopping */
+    for (int d = 0; d < 20; d++) {
+        int xf = 0;
+        r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &xf, 100);
+        if (r == LIBUSB_ERROR_TIMEOUT && xf == 0) break;
+    }
+
     free(buf);
+
+    cmd_u32(h, STOPFX3, 0);
+    usleep(50000);   /* let GPIF/DMA quiesce */
 
     struct fx3_stats bootN;
     int gsN = read_stats(h, &bootN);
-    cmd_u32(h, STOPFX3, 0);
     cmd_u32(h, GPIOFX3, GPIO_BASE);   /* restore: BIAS_VHF low */
 
     if (gsN >= 0 && bootN.boot_count != boot0.boot_count) {
@@ -2537,6 +2547,275 @@ static int do_test_pps_inject(libusb_device_handle *h)
            ceiling_clean,
            broke_at ? "; ceiling characterized" : "; no ceiling within tested range");
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared SIGINT flag — used by pps_integrity and soak                */
+/* ------------------------------------------------------------------ */
+
+static volatile sig_atomic_t soak_stop;
+
+static void soak_sigint(int sig)
+{
+    (void)sig;
+    soak_stop = 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* pps_integrity — long-duration PPS marker fidelity test             */
+/* ------------------------------------------------------------------ */
+
+static int do_pps_integrity(libusb_device_handle *h, double hours,
+                            uint32_t sample_rate)
+{
+    const uint32_t GPIO_BASE = 0x800;             /* LED_BLUE */
+    const uint32_t GPIO_EDGE = GPIO_BASE | 0x200; /* + BIAS_VHF (bit 9 / GPIO 18) */
+    const int chunk = 65536;
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, sample_rate);
+    if (r < 0) {
+        printf("FAIL pps_integrity: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    cmd_u32(h, GPIOFX3, GPIO_BASE);   /* BIAS_VHF low baseline */
+
+    struct fx3_stats boot0;
+    if (read_stats(h, &boot0) < 0) {
+        printf("FAIL pps_integrity: GETSTATS (before)\n");
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    int primed = primed_start_and_read_retry(h, chunk, 2000);
+    if (primed < 0) {
+        printf("FAIL pps_integrity: primed start: %s\n", libusb_strerror(primed));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+
+    uint8_t *buf = malloc(chunk);
+    if (!buf) {
+        cmd_u32(h, STOPFX3, 0);
+        printf("FAIL pps_integrity: malloc\n");
+        return 1;
+    }
+
+    uint64_t edges_sent = 0, markers_seen = 0;
+    uint64_t spurious_count = 0, missed_count = 0;
+    int expecting_marker = 0;
+    int gpio_high = 0;
+
+    struct timespec t_start, now, last_edge;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    last_edge = t_start;
+    double duration_secs = hours * 3600.0;
+
+    printf("pps_integrity: starting %.3f hour run @ %u MSPS\n",
+           hours, sample_rate / 1000000);
+    printf("#%-19s  %-4s  %6s  %6s  %4s  %4s\n",
+           "time", "stat", "edges", "marks", "spur", "miss");
+
+    while (!soak_stop) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - t_start.tv_sec)
+                       + (now.tv_nsec - t_start.tv_nsec) / 1e9;
+        if (elapsed >= duration_secs) break;
+
+        double since_edge = (now.tv_sec - last_edge.tv_sec)
+                          + (now.tv_nsec - last_edge.tv_nsec) / 1e9;
+
+        if (!gpio_high && since_edge >= 1.0) {
+            /* Report previous edge result */
+            if (edges_sent > 0) {
+                const char *stat;
+                if (expecting_marker) {
+                    missed_count++;
+                    expecting_marker = 0;
+                    stat = "MISS";
+                } else {
+                    stat = "ok";
+                }
+                struct timespec wall;
+                clock_gettime(CLOCK_REALTIME, &wall);
+                struct tm tm;
+                localtime_r(&wall.tv_sec, &tm);
+                printf(" %02d:%02d:%02d.%06ld  %-4s  %6lu  %6lu  %4lu  %4lu\n",
+                       tm.tm_hour, tm.tm_min, tm.tm_sec,
+                       wall.tv_nsec / 1000,
+                       stat,
+                       (unsigned long)edges_sent,
+                       (unsigned long)markers_seen,
+                       (unsigned long)spurious_count,
+                       (unsigned long)missed_count);
+                fflush(stdout);
+            }
+            /* Rising edge */
+            cmd_u32(h, GPIOFX3, GPIO_EDGE);
+            gpio_high = 1;
+            edges_sent++;
+            expecting_marker = 1;
+            last_edge = now;
+        } else if (gpio_high && since_edge >= 0.010) {
+            /* Falling edge after 10 ms dwell */
+            cmd_u32(h, GPIOFX3, GPIO_BASE);
+            gpio_high = 0;
+        }
+
+        /* Bulk read — 2000 ms timeout matches pps_inject */
+        int transferred = 0;
+        r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &transferred, 2000);
+        if (r == 0 || (r == LIBUSB_ERROR_TIMEOUT && transferred > 0)) {
+            if (transferred > 0 && transferred < chunk - 1024) {
+                if (expecting_marker) {
+                    markers_seen++;
+                    expecting_marker = 0;
+                } else {
+                    spurious_count++;
+                }
+            }
+        } else if (r != LIBUSB_ERROR_TIMEOUT) {
+            printf("FAIL pps_integrity: bulk read error: %s\n",
+                   libusb_strerror(r));
+            break;
+        }
+    }
+    /* Report final edge */
+    if (edges_sent > 0) {
+        const char *stat;
+        if (expecting_marker) {
+            missed_count++;
+            expecting_marker = 0;
+            stat = "MISS";
+        } else {
+            stat = "ok";
+        }
+        struct timespec wall;
+        clock_gettime(CLOCK_REALTIME, &wall);
+        struct tm tm;
+        localtime_r(&wall.tv_sec, &tm);
+        printf(" %02d:%02d:%02d.%06ld  %-4s  %6lu  %6lu  %4lu  %4lu\n",
+               tm.tm_hour, tm.tm_min, tm.tm_sec,
+               wall.tv_nsec / 1000,
+               stat,
+               (unsigned long)edges_sent,
+               (unsigned long)markers_seen,
+               (unsigned long)spurious_count,
+               (unsigned long)missed_count);
+    }
+
+    /* Final missed-marker check */
+    if (expecting_marker) missed_count++;
+
+    /* Drain in-flight bulk transfers before stopping */
+    for (int d = 0; d < 20; d++) {
+        int xf = 0;
+        r = libusb_bulk_transfer(h, EP1_IN, buf, chunk, &xf, 100);
+        if (r == LIBUSB_ERROR_TIMEOUT && xf == 0) break;
+    }
+
+    free(buf);
+
+    /* Driver-conventional shutdown: STOP first, then stats/GPIO */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(50000);   /* let GPIF/DMA quiesce */
+
+    struct fx3_stats bootN;
+    int gsN = read_stats(h, &bootN);
+    cmd_u32(h, GPIOFX3, GPIO_BASE);   /* restore: BIAS_VHF low */
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int total = (int)((now.tv_sec - t_start.tv_sec)
+              + (now.tv_nsec - t_start.tv_nsec) / 1e9);
+
+    uint32_t fw_pps = 0, fw_pps_fail = 0, pib = 0, faults = 0;
+    int device_reset = 0;
+    if (gsN >= 0) {
+        fw_pps = bootN.pps_count - boot0.pps_count;
+        fw_pps_fail = bootN.pps_commit_fail_count - boot0.pps_commit_fail_count;
+        pib = bootN.pib_errors - boot0.pib_errors;
+        faults = bootN.streaming_faults - boot0.streaming_faults;
+        device_reset = (bootN.boot_count != boot0.boot_count);
+    }
+
+    printf("\n=== PPS INTEGRITY RESULT ===\n");
+    printf("Duration:        %02d:%02d:%02d\n",
+           total / 3600, (total % 3600) / 60, total % 60);
+    printf("Edges sent:      %lu\n", (unsigned long)edges_sent);
+    printf("Markers seen:    %lu\n", (unsigned long)markers_seen);
+    printf("FW pps_count:    %u\n", fw_pps);
+    printf("FW pps_fail:     %u\n", fw_pps_fail);
+    printf("Spurious shorts: %lu\n", (unsigned long)spurious_count);
+    printf("Missed markers:  %lu\n", (unsigned long)missed_count);
+    printf("PIB errors:      %u\n", pib);
+    printf("Stream faults:   %u\n", faults);
+
+    /* Pass criteria: 1:1 edge/marker correlation, no spurious shorts */
+    int pass = 1;
+    if (spurious_count != 0) {
+        printf("FAIL: spurious short transfers\n"); pass = 0;
+    }
+    if (missed_count != 0) {
+        printf("FAIL: missed markers\n"); pass = 0;
+    }
+    int64_t delta = (int64_t)markers_seen - (int64_t)edges_sent;
+    if (delta < -2 || delta > 2) {
+        printf("FAIL: marker/edge mismatch (delta=%ld)\n", (long)delta);
+        pass = 0;
+    }
+    if (device_reset) {
+        printf("FAIL: device reset during test\n"); pass = 0;
+    }
+    if (faults != 0) {
+        printf("FAIL: streaming faults=%u\n", faults); pass = 0;
+    }
+
+    /* Informational — not pass/fail criteria */
+    if (pib != 0)
+        printf("NOTE: PIB errors=%u (no marker impact)\n", pib);
+    if (gsN >= 0 && markers_seen != fw_pps)
+        printf("NOTE: fw pps_count mismatch (%lu vs %u) — investigate\n",
+               (unsigned long)markers_seen, fw_pps);
+    if (fw_pps_fail != 0)
+        printf("NOTE: firmware pps_fail=%u\n", fw_pps_fail);
+
+    printf("Result: %s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+static int pps_integrity_main(libusb_device_handle *h, int argc, char **argv)
+{
+    double hours = 4.0;
+    uint32_t rate = 16000000;  /* default 16 MSPS, same as pps_inject */
+
+    /* Parse: [hours] [--rate MSPS] */
+    for (int i = 0; i < argc; i++) {
+        if ((strcmp(argv[i], "--rate") == 0) && i + 1 < argc) {
+            unsigned long r = strtoul(argv[++i], NULL, 0);
+            if (r == 8 || r == 16 || r == 32 || r == 64)
+                rate = (uint32_t)(r * 1000000);
+            else {
+                fprintf(stderr, "pps_integrity: --rate must be 8, 16, 32, or 64\n");
+                return 2;
+            }
+        } else {
+            double v = atof(argv[i]);
+            if (v > 0) hours = v;
+        }
+    }
+
+    struct sigaction sa = { .sa_handler = soak_sigint };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    soak_stop = 0;
+
+    int rc = do_pps_integrity(h, hours, rate);
+
+    /* Restore default SIGINT */
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGINT, &sa, NULL);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -4610,8 +4889,6 @@ static int do_test_watchdog_race(libusb_device_handle *h, int rounds)
 /* Soak test harness                                                  */
 /* ------------------------------------------------------------------ */
 
-static volatile sig_atomic_t soak_stop;
-
 static void *soak_pps_thread(void *arg)
 {
     (void)arg;
@@ -4640,12 +4917,6 @@ static void *soak_pps_thread(void *arg)
         cmd_u32(h, GPIOFX3, 0x0800);  /* LED only */
     }
     return NULL;
-}
-
-static void soak_sigint(int sig)
-{
-    (void)sig;
-    soak_stop = 1;
 }
 
 struct soak_scenario {
@@ -5610,6 +5881,8 @@ static void usage(const char *prog)
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
+        "  pps_integrity [hours] [--rate 8|16|32|64]\n"
+        "                               Long-duration PPS marker fidelity (default 4h, 16 MSPS)\n"
         "  soak [hours] [seed] [max] [-q] [--pps] [--weight NAME=N]...\n"
         "                               Multi-hour randomized stress test\n"
         "                               --pps: background 1 Hz GPIO18 toggle (simulated PPS)\n"
@@ -5940,6 +6213,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "watchdog_race") == 0) {
         int rnds = (argc >= 3) ? (int)parse_num(argv[2]) : 50;
         rc = do_test_watchdog_race(h, rnds);
+
+    } else if (strcmp(cmd, "pps_integrity") == 0) {
+        rc = pps_integrity_main(h, argc - 2, argv + 2);
 
     } else if (strcmp(cmd, "soak") == 0) {
         /* Pass &h so soak_try_reacquire() (which closes and replaces
