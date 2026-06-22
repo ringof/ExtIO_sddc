@@ -373,6 +373,11 @@ wLength  = 34    (firmware sends exactly 34 bytes; host may request
 | 25 | 1 | `clk0_result` | `si5351_clk0_enabled()` (1 = CLK0 enabled, 0 = disabled or I2C error).  Same value `GpifPreflightCheck()` consults at `STARTFX3` time. |
 | 26--29 | 4 | `glPpsCount` | Synthetic-PPS successful partial-commit count since boot (issue #125).  Bumped by the `synth_pps` module on each `CyU3PDmaMultiChannelSetWrapUp` that the active producer socket accepts. |
 | 30--33 | 4 | `glPpsCommitFailCount` | Wrap-up attempts where both producer sockets refused — typically because streaming is idle or the channel is between buffers.  Expected to stay 0 during active streaming. |
+| 34 | 1 | `glPpsLastWrapS0` | Last `SetWrapUp` return code for socket 0 (0xFF = never called).  Only active in `PPS_CTL_ENABLE=0` builds. |
+| 35 | 1 | `glPpsLastWrapS1` | Last `SetWrapUp` return code for socket 1 (0xFF = never called).  Only active in `PPS_CTL_ENABLE=0` builds. |
+| 36--39 | 4 | `apiProd` | DMA producer transfer count (bytes) from `CyU3PDmaMultiChannelGetStatus` — hardware socket `xferCount` register, not callback-based.  Wraps at 2³² bytes (~16 s at 129.6 MSPS). |
+| 40--43 | 4 | `apiCons` | DMA consumer transfer count (bytes) from `CyU3PDmaMultiChannelGetStatus` — same API, consumer side.  `apiProd − apiCons` = bytes in-flight in the DMA channel. |
+| 44--47 | 4 | `rawCons` | Direct UIB socket `xferCount` register read for `CY_U3P_UIB_SOCKET_CONS_1` — raw hardware, no API wrapper.  Cross-check against `apiCons`; if they differ, the API adds overhead/lag. |
 
 ### Counter Behavior
 

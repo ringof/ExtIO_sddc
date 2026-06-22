@@ -163,8 +163,6 @@ void StartApplication ( void ) {
 	dmaMultiConfig.prodSckId [1]  = (CyU3PDmaSocketId_t)PONG_PRODUCER_SOCKET;
 	dmaMultiConfig.consSckId [0]  = (CyU3PDmaSocketId_t)CONSUMER_USB_SOCKET;
 	dmaMultiConfig.dmaMode        = CY_U3P_DMA_MODE_BYTE;
-	//     dmaMultiConfig.notification   = CY_U3P_DMA_CB_CONS_EVENT;
-
     /* Create a DMA AUTO channel for P2U transfer. */
 	dmaMultiConfig.notification   = CY_U3P_DMA_CB_PROD_EVENT;
 	dmaMultiConfig.cb = (CyU3PDmaMultiCallback_t) DmaCallback;

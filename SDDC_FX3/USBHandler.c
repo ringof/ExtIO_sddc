@@ -11,6 +11,7 @@
  */
 
 #include "Application.h"
+#include "cyu3socket.h"
 
 #include "Si5351.h"
 
@@ -298,6 +299,33 @@ CyFxSlFifoApplnUSBSetupCB (
 					 * 34 to 36 bytes.  Revert before A3 fix. */
 					glEp0Buffer[off++] = glPpsLastWrapS0;                /* [34] */
 					glEp0Buffer[off++] = glPpsLastWrapS1;                /* [35] */
+					{
+						/* Hardware-level DMA transfer counts — read from
+						 * socket xferCount registers, not callbacks.
+						 * AUTO channels don't fire CONS_EVENT callbacks,
+						 * but the hardware still tracks byte counts.
+						 *
+						 * Approach #2: CyU3PDmaMultiChannelGetStatus API */
+						uint32_t apiProd = 0, apiCons = 0;
+						CyU3PDmaState_t chState = 0;
+						CyU3PDmaMultiChannelGetStatus(
+							&glMultiChHandleSlFifoPtoU,
+							&chState, &apiProd, &apiCons, 0);
+						memcpy(&glEp0Buffer[off], &apiProd, 4);          /* [36..39] */
+						off += 4;
+						memcpy(&glEp0Buffer[off], &apiCons, 4);          /* [40..43] */
+						off += 4;
+
+						/* Approach #1: direct UIB socket register read */
+						{
+							extern CyU3PDmaSocket_t *glDmaSocket[];
+							uint8_t ipNum  = CyU3PDmaGetIpNum(CY_U3P_UIB_SOCKET_CONS_1);
+							uint8_t sckNum = CyU3PDmaGetSckNum(CY_U3P_UIB_SOCKET_CONS_1);
+							uint32_t rawCons = glDmaSocket[ipNum][sckNum].xferCount;
+							memcpy(&glEp0Buffer[off], &rawCons, 4);      /* [44..47] */
+							off += 4;
+						}
+					}
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
