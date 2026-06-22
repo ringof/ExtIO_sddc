@@ -1,6 +1,6 @@
-# MCU-side PPS latch — FX3 feasibility analysis
+# PPS marker approaches — analysis and status
 
-## Problem
+## Current in-band mechanism (GPIF PPS commit)
 
 The current in-band PPS marker (issue #125) uses the GPIF state
 machine to detect a rising edge on CTL[2] (GPIO 19) and transition
@@ -16,16 +16,162 @@ CPU involvement. The `synth_pps.c` module (`SetWrapUp`) is a
 separate software-driven path used only for synthetic testing when
 `PPS_CTL_ENABLE=0`.
 
-Evidence from pps_integrity testing suggests the GPIF PPS commit may
-cause data loss — samples arriving during the commit/cross-route
-transition may be dropped.
+### Why GPIF in-band is the better time-propagation source
 
-The rx888-tools side proposed an alternative: instead of perturbing
-the stream with a GPIF state transition, latch the DMA position when
-the GPIO edge arrives and expose it via GETSTATS. Zero perturbation,
-out-of-band timestamping.
+The GPIF in-band marker is architecturally superior to EP0
+request-response for time propagation:
 
-## Can the FX3 latch `glDMACount` on a GPIO interrupt?
+- **Sample-exact, self-consistent.** The PPS edge causes an
+  immediate GPIF state transition (1–2 ADC clocks). The short
+  transfer boundary appears inline in the bulk data stream — the
+  host knows exactly which sample was the last before the PPS edge.
+  The timestamp IS the data. No cross-path correlation needed.
+
+- **All-hardware path.** GPIF → DMA → USB bulk. No CPU, no polling,
+  no OS scheduling jitter.
+
+- **No correlation problem.** EP0 latch requires the host to match
+  a GETSTATS response (traveling the EP0 control path) with a
+  position in the bulk stream (traveling EP1) — two different USB
+  paths, two different latency profiles. The in-band marker has no
+  such ambiguity.
+
+- **Resolution.** ~7.7 ns at 129.6 MSPS (one ADC clock) vs ~63 µs
+  buffer-level (EP0 latch). 3–4 orders of magnitude.
+
+This is why fixing the in-band approach is worth pursuing rather
+than retreating to EP0.
+
+## Observed data loss — current status
+
+### The evidence
+
+Controlled experiments at 129.6 MSPS (rx888-tools pps_integrity /
+stream_soak):
+
+| Run | Rate | Throughput | Short xfers | Loss |
+|---|---|---|---|---|
+| stream_soak (no marker) | 129.6 MSPS | 259 MB/s | 0 | 0 |
+| pps_integrity (1 Hz marker) | 129 MSPS | 258 MB/s | 333 | ~82 MB |
+
+The bare stream sustains 259 MB/s for 3 hours with zero short
+transfers and zero loss (produced == delivered to within 16 KB).
+The lossy run was at *lower* throughput with markers, while the
+*higher* throughput without markers was clean. This inversion
+exonerates the streaming path — if it were a drain limit, the higher
+bare rate would fail first. It didn't.
+
+### The loss is anomalously large
+
+A correct forced-commit should cost 0–2 samples: it ships a partial
+buffer early and starts a fresh one. The observed loss is ~500×
+larger:
+
+- ~82 MB lost across ~333 events over 3 h → ~250 KB per event
+- At 259 MB/s that's ~0.5–1 ms of stream gone per event
+- Expected: 1–2 ADC clocks (~15 ns). Observed: ~500 µs–1 ms.
+
+This is not "marking costs a little." This is a state-machine or
+DMA stall causing ~500× more loss than the intrinsic cost of a
+buffer commit. **The implementation has a pathology; the concept
+is not yet proven broken.**
+
+### Suspected root causes
+
+Two uncontrolled variables in the current test rig:
+
+**1. Edge quality (prime suspect).** The GPIO 18→19 loopback uses
+a 100 kΩ resistor, giving an RC edge of ~4 µs. At 129.6 MSPS
+that's ~500 clock cycles dwelling in the threshold region. A slow
+edge into a sampling element is the classic recipe for
+metastability — and metastability resolving into a bad GPIF state
+is exactly the kind of thing that produces a ~0.5 ms stall on
+~5% of edges.
+
+**2. Input synchronization.** The PPS signal on CTL[2] is
+asynchronous to the ADC clock. The GPIF samples it on the clock
+edge, but a single sample of an asynchronous signal is not a
+synchronizer — the first flop can latch a metastable value and
+propagate it into the state machine. The standard fix is a two-flop
+(double-FF) synchronizer: FF1 may go metastable, FF2 resolves it
+before it reaches logic. **Open question:** does the FX3 GPIF II
+synchronize CTL inputs internally before they drive state
+transitions? If not, we need a synchronizer.
+
+### DMA descriptor chain behavior (TRM finding)
+
+The FX3 TRM (page 70) confirms that the DMA descriptor chain
+advance is not instantaneous. After a buffer commit, the producer
+must:
+
+1. Write descriptor back to memory (DMA-to-memory write)
+2. Send produce event to consumer socket (DMA-to-MMIO write)
+3. Load next descriptor from memory (DMA-to-memory read)
+4. If next buffer occupied → socket stalls
+
+`DMA_RDY` deasserts during steps 1–3. This is structural — even
+with pre-queued buffers, the descriptor load cost is paid every
+time. The two-thread ping-pong exists to hide this latency: while
+TH0's socket does the descriptor swap, the GPIF cross-routes to
+TH1 whose socket is already active.
+
+This means the PPS cross-route is timing-sensitive: if TH1 is
+mid-descriptor-swap when the PPS fires, the GPIF lands in
+TH1_BUSY/WAIT and stalls for the full swap duration — losing every
+sample during that window. At 129.6 MSPS, buffers fill in ~63 µs,
+making the collision window a non-trivial fraction.
+
+## Experiment plan
+
+### Step 1: Matched-rate baseline (current rig)
+
+`pps_integrity 3 --rate 129` and `stream_soak 3 --rate 129` — same
+rate, same duration. Confirms the effect at the production rate,
+removes the 129-vs-129.6 mismatch. This measures the *current rig*,
+not the concept.
+
+### Step 2: Clean edge (resistor change or logic buffer)
+
+Replace the 100 kΩ with a fast edge (<1 ADC clock transition).
+Options: lower resistor value, or a logic buffer (74LVC1G17 Schmitt
+trigger). Re-run `pps_integrity 3 --rate 129`.
+
+If loss drops sharply → edge quality was a major cause.
+
+### Step 3: Input synchronization
+
+Determine whether the FX3 GPIF II synchronizes CTL inputs
+internally. If not, add a 2-FF synchronizer on the PPS input
+(either in a CPLD/buffer external to the FX3, or by adding
+synchronizer states in the GPIF waveform). Re-run.
+
+If loss drops to ~0–2 samples/marker → in-band marking is viable
+for production.
+
+### Determination
+
+If after steps 2+3 the per-marker cost lands at the expected 1–2
+samples, then the "demote PPS off the data path" conclusion was
+premature — it was the rig, not the idea. The 500× overshoot in
+per-event loss strongly suggests a fixable artifact (metastability,
+synchronization), not an intrinsic cost.
+
+## Alternative: MCU-side latch (out-of-band)
+
+### Role
+
+The latch is a **diagnostic and characterization tool**, not a
+replacement for in-band marking. It answers "did the PPS arrive?"
+and "roughly where in the stream?" without perturbing the data —
+useful for PPS integrity testing and timing studies where the
+measurement shouldn't affect the thing being measured.
+
+If the in-band approach proves unfixable (steps 2+3 don't resolve
+the loss), the latch becomes the fallback — but with the
+understanding that it trades 3–4 orders of magnitude of time
+resolution.
+
+### Feasibility
 
 **Yes, straightforwardly.** Three pieces:
 
@@ -47,125 +193,51 @@ out-of-band timestamping.
    GPIO interrupt. The ISR checks which pin fired, latches
    `glDMACount`, and returns. Lightweight enough for ISR context.
 
-## Which GPIO pin?
+### Within-buffer byte offset — not worth pursuing
 
-- **GPIO 18 (BIAS_VHF)** — currently the **output** the host
-  toggles. For the synthetic test (GPIO 18→19 loopback through the
-  100k resistor), GPIO 18 is the driver, not the listener.
+`glDMACount` alone gives buffer-level resolution (~63 µs at
+129.6 MSPS). Finer resolution via DMA socket `BYTE_COUNT` registers
+is theoretically possible but practically problematic:
 
-- **GPIO 19 (BIAS_HF)** — the natural PPS input candidate:
-  - In **production mode** (`PPS_CTL_ENABLE=0`): GPIO 19 is a simple
-    GPIO output. It could be reconfigured as input with
-    `CY_U3P_GPIO_INTR_POS_EDGE`. The existing 100k resistor from
-    GPIO 18 would carry the synthetic PPS pulse. This works for the
-    test harness.
-  - In **PPS_CTL_ENABLE=1 mode**: GPIO 19 is released to the GPIF as
-    CTL[2]. The GPIO block doesn't own it — you **cannot** register a
-    GPIO interrupt on it. The GPIF sees the edge, but the GPIF is a
-    fixed state machine — it commits the buffer rather than latching
-    a counter.
+- **Ping-pong ambiguity:** ISR must determine which of two producer
+  sockets is actively filling — fiddly and error-prone.
+- **Coherency risk:** No SDK guarantee that `BYTE_COUNT` is coherent
+  mid-burst. False precision is worse than coarse-but-correct.
+- **Marginal benefit:** Buffer-level already exceeds USB transport
+  jitter.
 
-The MCU-side latch works cleanly in **production GPIO mode** (the
-default build). Switching from the GPIF PPS commit to the latch
-means building without `PPS_CTL_ENABLE` and loading the original
-GPIF waveform (no PPS_COMMIT states), while adding the GPIO ISR.
+Confirmed by rx888-tools side: the risks of errors outweigh the
+benefit, and the resolution isn't necessary for the use cases.
 
-## Within-buffer byte offset
+### GPIO pin selection
 
-Not worth pursuing. `glDMACount` alone gives buffer-level resolution
-(16 KB / (2 bytes/sample × rate) = **~125 µs at 64 MSPS**, **~63 µs
-at 129.6 MSPS**), which is already better than USB transport jitter
-and more than adequate for PPS characterization.
+- **GPIO 19 (BIAS_HF)** in production mode (`PPS_CTL_ENABLE=0`):
+  reconfigure as input with `CY_U3P_GPIO_INTR_POS_EDGE`. The
+  existing 100k resistor from GPIO 18 carries the pulse.
+- In `PPS_CTL_ENABLE=1` mode: GPIO 19 is owned by the GPIF as
+  CTL[2] — cannot register a GPIO interrupt.
 
-Finer resolution via DMA socket `BYTE_COUNT` registers is
-theoretically possible but practically problematic:
+## Comparison
 
-- **Ping-pong ambiguity:** Two producer sockets
-  (`CY_U3P_PIB_SOCKET_0`, `CY_U3P_PIB_SOCKET_1`). The ISR would
-  need to determine which one is actively filling — fiddly and
-  error-prone from interrupt context.
-- **Coherency risk:** `BYTE_COUNT` is hardware-managed. No SDK
-  guarantee that it's coherent mid-burst while the GPIF is actively
-  writing. Reading a stale or transitional value would be worse than
-  not reading it at all — it would inject false precision.
-- **Marginal benefit:** Going from ~125 µs to sub-µs resolution
-  doesn't change what you can do with the measurement. The
-  buffer-level latch already answers "did the PPS arrive?" and
-  "where in the stream was it?" to sufficient accuracy.
-
-The risk of subtle errors outweighs the value of the extra
-resolution. Stick with `glDMACount`.
-
-## Comparison: GPIF PPS commit vs MCU-side latch
-
-| Axis | GPIF PPS commit (current) | MCU-side latch |
+| Axis | GPIF PPS commit | MCU-side latch |
 |---|---|---|
-| Stream perturbation | GPIF commits partial buffer, forces short transfer + cross-route | **Zero** — GPIF runs unmodified, every buffer fills completely |
-| Data integrity | Deterministic, bounded loss during PPS_COMMIT→cross-route (1–2 GPIF clock cycles, needs empirical measurement) | **No risk** — never touches the DMA channel or GPIF state machine |
-| Time resolution | **Sample-exact** — short transfer boundary marks exactly where in the stream the PPS edge landed | Buffer-level (~125 µs at 64 MSPS) — 3–4 orders of magnitude coarser |
-| CPU involvement | **None** — GPIF hardware handles everything, zero CPU load during streaming | GPIO ISR fires once per second — trivial but nonzero |
-| Detection mechanism | Short USB bulk transfer (host detects `nsamples < expected`) | GETSTATS field (host polls or reads post-hoc) |
-| Host complexity | Detect short transfers in streaming path (in-band, must handle at wire speed) | Poll GETSTATS at 1 Hz alongside GPIO toggle (out-of-band, relaxed timing) |
-| GPIF waveform | Custom `SDDC_GPIF_PPS.h` with 14 states including PPS_COMMIT + cross-route | Stock waveform (no PPS states needed) |
-
-### Not "strictly better" — a genuine tradeoff
-
-The latch eliminates stream perturbation and any risk of data loss,
-but gives up sample-exact resolution. Whether that tradeoff is worth
-it depends on the application:
-
-- **PPS characterization / timing studies:** Buffer-level resolution
-  is sufficient. The latch wins — zero perturbation means cleaner
-  measurements and no concern about dropped samples corrupting the
-  analysis.
-
-- **Sample-exact timestamping for downstream SDR processing:** The
-  GPIF commit wins — if the data loss is confirmed to be only 1–2
-  samples (15–30 ns at 64 MSPS) once per second, that's negligible
-  for virtually any receiver application, and the sample-exact
-  boundary is genuinely valuable for precise time alignment.
-
-The data loss question is empirically testable: stream at full rate
-with PPS enabled, compare total samples received vs. expected from
-the sample rate and elapsed time. If the deficit is consistently
-1–2 samples per PPS edge, the GPIF approach is sound for production
-use and the latch becomes a diagnostic/characterization tool rather
-than a replacement.
-
-## End-to-end operation
-
-1. **Firmware:** Build without `PPS_CTL_ENABLE` (production GPIF
-   waveform). Configure GPIO 19 as input with
-   `CY_U3P_GPIO_INTR_POS_EDGE`. Register callback. On rising edge:
-   `glPpsLatchedDMACount = glDMACount;` (optionally
-   `glPpsLatchCount++`). Add both to GETSTATS response.
-
-2. **Host (pps_integrity):** Each second, toggle GPIO 18 high (EP0
-   GPIOFX3), wait 10 ms, toggle low. After each edge, read
-   GETSTATS — compare `glPpsLatchedDMACount` against the running DMA
-   count to verify the latch fired. No need to detect short transfers
-   in the sample stream at all.
-
-3. **Timing quality:** Host records `clock_gettime(CLOCK_REALTIME)`
-   at each GPIO toggle. The latched DMA count gives the firmware-side
-   timestamp in buffer units. The delta between host wall-clock
-   intervals and DMA-count intervals reveals transport jitter — all
-   without perturbing the stream.
+| Time resolution | **~7.7 ns** (sample-exact at 129.6 MSPS) | ~63 µs (buffer-level) |
+| Time propagation | **Self-consistent** — marker is inline in data stream | EP0 side-channel — host must correlate two USB paths |
+| Stream perturbation | Partial buffer commit + cross-route | **Zero** — GPIF/DMA unmodified |
+| Data integrity | Anomalous loss on current rig (~250 KB/event); root cause under investigation | **No risk** |
+| CPU involvement | **None** — all GPIF hardware | GPIO ISR once/second (trivial) |
+| Host complexity | Detect short transfers at wire speed | Poll GETSTATS at leisure |
+| Status | Under investigation — edge quality and synchronization are open variables | Ready to implement |
 
 ## Bottom line
 
-These are complementary mechanisms, not necessarily replacements:
+The in-band GPIF marker is the right architecture for production
+time propagation — sample-exact, self-consistent, all-hardware. The
+observed data loss is anomalously large (500× expected), consistent
+with edge-quality and input-synchronization artifacts on the current
+test rig, not with an intrinsic limitation of the commit mechanism.
 
-- **GPIF PPS commit** gives sample-exact in-band markers with
-  deterministic, bounded data loss (1–2 GPIF cycles, needs
-  measurement). Best for production timestamping if the loss is
-  confirmed negligible.
-
-- **MCU-side latch** gives zero-perturbation out-of-band timestamps
-  at buffer-level resolution. Best for PPS characterization,
-  diagnostics, and timing studies where you don't want the
-  measurement to affect the thing being measured.
-
-Both could coexist — the latch requires `PPS_CTL_ENABLE=0` (GPIO 19
-as GPIO, not GPIF CTL[2]), so it's a different firmware build, but
-the two approaches serve different purposes and validate each other.
+The experiment sequence (matched baseline → clean edge → synchronizer)
+will determine whether the loss is a fixable rig artifact or a
+fundamental problem. The MCU-side latch serves as a diagnostic tool
+and fallback, not as the primary time source.
