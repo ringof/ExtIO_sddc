@@ -305,14 +305,26 @@ CyFxSlFifoApplnUSBSetupCB (
 						 * AUTO channels don't fire CONS_EVENT callbacks,
 						 * but the hardware still tracks byte counts.
 						 *
-						 * Approach #2: CyU3PDmaMultiChannelGetStatus API */
-						uint32_t apiProd = 0, apiCons = 0;
+						 * Approach #2: CyU3PDmaMultiChannelGetStatus API
+						 * MANY_TO_ONE has 2 producer sockets — sckIndex
+						 * selects which one.  Sum both for total produced. */
+						uint32_t prod0 = 0, prod1 = 0, apiCons = 0;
 						CyU3PDmaState_t chState = 0;
 						CyU3PDmaMultiChannelGetStatus(
 							&glMultiChHandleSlFifoPtoU,
-							&chState, &apiProd, &apiCons, 0);
-						memcpy(&glEp0Buffer[off], &apiProd, 4);          /* [36..39] */
-						off += 4;
+							&chState, &prod0, &apiCons, 0);
+						{
+							CyU3PDmaState_t st1;
+							uint32_t cons1;
+							CyU3PDmaMultiChannelGetStatus(
+								&glMultiChHandleSlFifoPtoU,
+								&st1, &prod1, &cons1, 1);
+						}
+						{
+							uint32_t apiProd = prod0 + prod1;
+							memcpy(&glEp0Buffer[off], &apiProd, 4);      /* [36..39] */
+							off += 4;
+						}
 						memcpy(&glEp0Buffer[off], &apiCons, 4);          /* [40..43] */
 						off += 4;
 
