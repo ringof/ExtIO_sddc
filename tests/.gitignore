@@ -2,4 +2,17 @@
 fx3_cmd
 *.o
 rx888_stream
+si5351_math_test
+si5351_mc
+si5351_bench
 host/health_eval_test
+
+# Generated analysis artifacts (reproducible via `make mc-plot`)
+si5351_mc_scatter.csv
+si5351_mc_cdf.csv
+si5351_mc_cdist.csv
+si5351_mc_epsilon.csv
+si5351_mc_scatter.png
+si5351_mc_cdf.png
+si5351_mc_cdist.png
+si5351_mc_epsilon.png

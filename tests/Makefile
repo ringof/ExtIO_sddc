@@ -37,6 +37,33 @@ fx3_cmd: $(FX3_OBJS)
 %.o: %.c $(FX3_HDRS)
 	$(CC) $(FX3_CFLAGS) -c -o $@ $<
 
+# Standalone host-side unit test for the Si5351 synthesis math (issue #133).
+# No libusb/hardware dependency; only needs libm.
+si5351_math_test: si5351_math_test.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: check-math
+check-math: si5351_math_test
+	./si5351_math_test
+
+# Monte-Carlo error characterization + gnuplot error plots (issue #133).
+si5351_mc: si5351_mc.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: mc-plot
+mc-plot: si5351_mc
+	./si5351_mc
+	gnuplot si5351_mc.gp
+	@echo "wrote si5351_mc_scatter.png si5351_mc_cdf.png"
+
+# Divider-search cost benchmark (issue #133).
+si5351_bench: si5351_bench.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
+.PHONY: bench
+bench: si5351_bench
+	./si5351_bench
+
 rx888_stream: $(RX888_STREAM_BIN)
 	@# Symlink into tests/ so fw_test.sh finds it alongside fx3_cmd
 	ln -sf $(RX888_STREAM_BIN) $@
@@ -57,7 +84,7 @@ check-health: $(HOST_HEALTH_BIN)
 	./$(HOST_HEALTH_BIN)
 
 clean:
-	rm -f fx3_cmd $(FX3_OBJS) rx888_stream $(HOST_HEALTH_BIN)
+	rm -f fx3_cmd $(FX3_OBJS) rx888_stream si5351_math_test si5351_mc si5351_bench $(HOST_HEALTH_BIN)
 	$(MAKE) -C $(RX888_TOOLS) clean 2>/dev/null || true
 
 .PHONY: all clean rx888_stream check-health
