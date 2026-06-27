@@ -2,7 +2,7 @@
 title: USB API reference
 nav_order: 2
 permalink: /api/
-description: Complete USB vendor-command protocol for the RX888mk2 FX3 firmware - STARTFX3, STOPFX3, GETSTATS 26-byte layout, SETARGFX3, GPIO bitmap, Si5351 I2C.
+description: Complete USB vendor-command protocol for the RX888mk2 FX3 firmware - STARTFX3, STOPFX3, GETSTATS 30-byte layout, SETARGFX3, GPIO bitmap, Si5351 I2C.
 ---
 
 # USB API reference
@@ -13,8 +13,8 @@ image.  Every claim on this page cites a source file and line in the
 firmware tree; if behavior differs between this page and the source, the
 source is authoritative — please open an issue.
 
-Reference firmware version: **2.3**
-(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=3` —
+Reference firmware version: **2.6**
+(`FIRMWARE_VER_MAJOR=2`, `FIRMWARE_VER_MINOR=6` —
 `SDDC_FX3/protocol.h:10-11`).
 
 1. TOC
@@ -54,6 +54,15 @@ EP0 vendor requests are limited to **64 bytes of data-phase payload**
 `wLength > 64` are rejected with a STALL on EP0 before any data phase
 runs (`USBHandler.c:187-193`).
 
+> **Direction is validated.** The data-stage direction (the IN/OUT column
+> below) is enforced: the handler checks the `bmRequestType` direction bit
+> against the command and **STALLs a mismatch** (an IN transfer to an
+> OUT-only command, or vice-versa) before touching the data phase. This
+> closes [#142](https://github.com/ringof/rx888-firmware/issues/142), where a
+> stream of wrong-direction requests would desync and wedge EP0 until a
+> re-flash. Status-only test commands (`HANGFX3`/`HANGMAIN`/`HANGCOLDSTART`)
+> are exempt; unknown `bRequest` values STALL regardless.
+
 The streaming IQ pipeline uses 4 DMA buffers of 16 KB each
 (`Application.h:41-44`), assembled in a multi-channel ping-pong from
 two PIB sockets to USB socket 1.  The IQ data is **16-bit signed,
@@ -83,6 +92,7 @@ All vendor commands target `bmRequestType` with `Type=Vendor`,
 | `0xBA`     | [`READINFODEBUG`](#readinfodebug) | IN/OUT | ≤64 | Debug console RX (wValue=ASCII) / TX. |
 | `0xCE`     | [`HANGFX3`](#hangfx3)   | —   | 0 | **Test-only.** Sleep `wValue` ms in EP0 handler. |
 | `0xCF`     | [`HANGMAIN`](#hangmain) | —   | 0 | **Test-only.** Arm main-thread infinite spin. |
+| `0xD0`     | `HANGCOLDSTART`         | —   | 0 | **Test-only.** Suppress DMA-progress accounting (`glDMACount` frozen at 0) to reproduce a cold-start wedge (#137). |
 
 > **Direction is from the host's perspective.** `OUT` = data flows
 > host → device; `IN` = device → host; `—` = no data phase (status only).
@@ -289,7 +299,7 @@ emitted (`USBHandler.c:248-251`).
 Source: `SDDC_FX3/USBHandler.c:256-289`.
 
 Reads back diagnostic counters and state.  The firmware fills a
-fixed-layout buffer of 26 bytes total.
+fixed-layout buffer of 30 bytes total.
 
 | Field         | Value               |
 |---------------|---------------------|
@@ -297,7 +307,7 @@ fixed-layout buffer of 26 bytes total.
 | `bmRequestType` | `0xC0`            |
 | `wValue`      | 0 (ignored)         |
 | `wIndex`      | 0 (ignored)         |
-| `wLength`     | ≤ 64 (firmware sends 26) |
+| `wLength`     | ≤ 64 (firmware sends 30) |
 
 **Byte layout** (little-endian for multi-byte fields):
 
@@ -305,20 +315,21 @@ fixed-layout buffer of 26 bytes total.
 |--------|-------|-------------------|-------------|
 | 0–3    | u32   | `glDMACount`      | DMA completion count since the most recent `STARTFX3`. Reset to 0 on `STARTFX3`/`STOPFX3`. (`USBHandler.c:375`, `:419`.) |
 | 4      | u8    | `gpifState`       | GPIF state machine state at the moment the request was serviced.  IDLE = 1.  255 means `CyU3PGpifGetSMState` failed. |
-| 5–8    | u32   | `glCounter[0]`    | Free-running counter incremented in the main loop; useful as a liveness probe. |
+| 5–8    | u32   | `glCounter[0]`    | PIB error count — incremented in `PibErrorCallback` (`StartStopApplication.c`) on each `CYU3P_PIB_INTR_ERROR`. |
 | 9–10   | u16   | `glLastPibArg`    | Last argument captured from the PIB error path (see `gpif-and-recovery.md`). |
-| 11–14  | u32   | `glCounter[1]`    | Counter 1 — currently used for unclean-stop events. |
-| 15–18  | u32   | `glCounter[2]`    | Counter 2 — EP underrun count (`USBHandler.c:563`). |
+| 11–14  | u32   | `glCounter[1]`    | I2C failure count — incremented in `I2cTransfer` (`i2cmodule.c`) on each failed transfer. |
+| 15–18  | u32   | `glCounter[2]`    | Streaming fault count — incremented by the GPIF watchdog on each recovery (`health.c`, `health_recover`) and on EP underrun events (`USBHandler.c`). |
 | 19     | u8    | Si5351 reg 0      | Live read of Si5351 status register (PLL lock bits).  Useful for confirming the ADC clock health without separately issuing `I2CRFX3`. (`USBHandler.c:271`.) |
 | 20–23  | u32   | `boot_count`      | Increments once per firmware `health_init()` call.  Use to detect mid-test resets: snapshot before, compare after; mismatch means the device reset.  (`USBHandler.c:275`, `SDDC_FX3/health.c:health_boot_count`.) |
 | 24     | u8    | Si5351 CLK0_CONTROL (reg 16) | Live I2C read of the Si5351 CLK0 output-driver control register.  Bit 7 is `CLK0_PDN` — set means CLK0 powered down, clear means CLK0 enabled.  Returns `0xFF` if the I2C read fails.  (`USBHandler.c:283-285`.) |
 | 25     | u8    | `clk0_result`     | Result of the firmware's `si5351_clk0_enabled()` query: `1` = CLK0 enabled (bit 7 clear and I2C read succeeded), `0` = disabled or I2C error.  This is the same value `GpifPreflightCheck()` consults at [`STARTFX3`](#startfx3) time.  (`USBHandler.c:286`.) |
+| 26–29  | u32   | GPIO state        | Live `rx888r2_ReadGpioState()` sampled at read time, packed with the same bit positions as the [`GPIOFX3`](#gpiofx3) control word.  Lets the host confirm `SHDWN` is asserted after every teardown path (issue #131). |
 
-The firmware sends exactly 26 bytes via `CyU3PUsbSendEP0Data`; hosts
-should request `wLength=26` (or up to 64) and read the prefix that
-fits.  Hosts written against an earlier firmware that requested
-`wLength=24` continue to work — the firmware will return only the 24
-bytes requested, omitting the new Si5351 CLK0 bytes.
+The firmware sends exactly 30 bytes via `CyU3PUsbSendEP0Data`; hosts
+should request `wLength=30` (or up to 64) and read the prefix that
+fits.  Hosts written against earlier firmware that requested a shorter
+length continue to work — the firmware returns only the bytes
+requested, omitting the later fields (Si5351 CLK0 bytes, GPIO state).
 
 ### SETARGFX3
 
@@ -343,7 +354,8 @@ Defined parameter selectors (`enum ArgumentList` in
 |----------|----------------|---------------------------|--------|--------|
 | 10       | `DAT31_ATT`    | 0 – 63 (6-bit, 0.5 dB)    | Sets the DAT-31 step attenuator.  6 bits shifted to `ATT_LE`. | `rx888r2_SetAttenuator()`, `radio/rx888r2.c:78-82` |
 | 11       | `AD8370_VGA`   | 0 – 255 (raw 8-bit register) | Sets the AD8370 VGA gain register.  See AD8370 datasheet for the gain-code mapping. | `rx888r2_SetGain()`, `radio/rx888r2.c:84-89` |
-| 14       | `WDG_MAX_RECOV` | 0 (unlimited) – 255      | Caps consecutive watchdog recoveries.  Default `WDG_MAX_RECOVERY_DEFAULT = 5` (`protocol.h:86`).  After the cap, the firmware reboots instead of attempting another recovery — used by host-side tests to bound flakiness. | `protocol.h:83`, `USBHandler.c:318-322` |
+| 14       | `WDG_MAX_RECOV` | 0 (unlimited) – 255      | Caps consecutive streaming-watchdog light recoveries.  Default `WDG_MAX_RECOVERY_DEFAULT = 5` (`protocol.h:86`).  After the cap the firmware stops attempting light recovery; for a **cold-start** wedge it then escalates to a device reset (see `WDG_RESET_ESCALATE`), otherwise it waits for the host to restart. | `protocol.h`, `health.c` |
+| 15       | `WDG_RESET_ESCALATE` | 0 (off) / non-zero (on) | Enable/disable autonomous `CyU3PDeviceReset` escalation for an unrecoverable **cold-start** streaming wedge (#137).  **On by default.**  When on, a cold-start wedge that survives the recovery cap triggers a device reset — gated on a healthy ADC clock and limited to once per streaming session (STARTFX3/STOPFX3 boundary).  Post-stream stalls / abandoned streams never escalate. | `protocol.h`, `health.c` |
 
 Unrecognized `wIndex` values are signaled by STALLing the status phase
 (`USBHandler.c:323-328`).  Recognized calls bump `glVendorRqtCnt`.
@@ -443,7 +455,7 @@ listed here are ignored (no FX3 GPIO is wired up for them).
 
 | Bit | Mask         | Constant   | Function                              | Notes |
 |-----|--------------|------------|---------------------------------------|-------|
-| 5   | `0x00000020` | `SHDWN`    | Front-end shutdown line               | Active-high in the control word; drives the SHDN pin. |
+| 5   | `0x00000020` | `SHDWN`    | Front-end shutdown line               | Active-high in the control word; drives the SHDN pin. The firmware also drives this line automatically from the streaming state — standby at boot and on `STOPFX3`, woken on `STARTFX3` (issue #131) — so a manual write here may be overridden at the next start/stop. |
 | 6   | `0x00000040` | `DITH`     | LTC2208 dither enable                 | Enables ADC dither for SFDR improvement. |
 | 7   | `0x00000080` | `RANDO`    | LTC2208 output randomization          | When set, ADC output is randomized — host must un-randomize before processing. |
 | 8   | `0x00000100` | `BIAS_HF`  | HF antenna-port bias-tee power        | |

@@ -70,7 +70,7 @@ const char* FX3CommandName[FX3_CMD_COUNT] = {  // start 0xAA
 // ExtIO host DLL; not implemented in this firmware.
 const char* SETARGFX3List[SETARGFX3_LIST_COUNT] = {
 "0", "1","2","3","4","5","6","7","8","9",
-"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR","WDG_MAX_RECOV"
+"DAT31_ATT","AD8370_VGA","PRESELECTOR","VHF_ATTENUATOR","WDG_MAX_RECOV","WDG_RESET_ESCALATE"
 };
 #endif
 
@@ -190,10 +190,18 @@ static CyU3PReturnStatus_t MyDebugSNPrint (
                 if (intArg < 0)
                 {
                     debugMsg[i++] = '-';
-                    intArg = -intArg;
+                    /* Compute the magnitude in unsigned space.  Negating
+                     * intArg directly is undefined behaviour for INT32_MIN
+                     * (-(-2147483648) overflows int32_t); the unsigned
+                     * form is well-defined and correct for all values. */
+                    uintArg = (uint32_t)0 - (uint32_t)intArg;
+                }
+                else
+                {
+                    uintArg = (uint32_t)intArg;
                 }
 
-                argStr =  CyU3PDebugIntToStr (convertedString, intArg, 10);
+                argStr =  CyU3PDebugIntToStr (convertedString, uintArg, 10);
                 copyReqd = CyTrue;
             }
             break;

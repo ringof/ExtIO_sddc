@@ -14,8 +14,13 @@ avahi-daemon --no-drop-root --daemonize 2>/dev/null || true
 # Check for firmware image
 if [ ! -f /firmware/SDDC_FX3.img ]; then
     echo "WARNING: /firmware/SDDC_FX3.img not found."
-    echo "Mount it with: -v /path/to/SDDC_FX3:/firmware"
-    echo "If the device is already loaded, this is fine."
+    echo "Point at your built firmware by bind-mounting the directory that"
+    echo "contains SDDC_FX3.img onto /firmware, e.g.:"
+    echo "    -v /abs/path/to/firmware-dir:/firmware"
+    echo "or mount the file directly if it has a different name:"
+    echo "    -v /abs/path/to/your.img:/firmware/SDDC_FX3.img"
+    echo "(ka9q.sh: FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start)"
+    echo "If the device is already loaded (PID 0x00F1), this is only a warning."
 fi
 
 # Check for USB device
@@ -37,11 +42,14 @@ fi
 # blocks → rof1620000; 12 kHz output → cob240).
 #
 # Planning rigor is configurable via FFTW_RIGOR (estimate|measure|
-# patient|exhaustive); default is "measure" (minutes, near-optimal
-# runtime).  "patient" can take many hours for the 1.62M-point FFT;
-# "estimate" is instant but yields slower runtime FFTs.
+# patient|exhaustive).  Default here is "estimate": instant cold boot,
+# which is what you want for a firmware-compatibility test/eval image
+# (you rarely care about optimal runtime FFT plans during a bring-up
+# check).  Set FFTW_RIGOR=measure (minutes, near-optimal) or =patient
+# (hours for the 1.62M-point FFT, optimal) if you intend to operate the
+# radio long-term.
 WISDOM_FILE="/var/lib/ka9q-radio/wisdom"
-FFTW_RIGOR="${FFTW_RIGOR:-measure}"
+FFTW_RIGOR="${FFTW_RIGOR:-estimate}"
 case "$FFTW_RIGOR" in
     estimate)   WISDOM_FLAG="-e" ;;
     measure)    WISDOM_FLAG="-m" ;;

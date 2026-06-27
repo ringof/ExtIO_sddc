@@ -1,0 +1,137 @@
+name: Feature request
+description: Propose a firmware change or new capability. Required fields must be filled before the request can be filed.
+title: "[FEATURE] <short, specific summary>"
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Read this first
+
+        This is **FX3 firmware for the RX888 mk2** — a USB vendor-command
+        protocol, a GPIF II state machine, a DMA pipeline, and clock control,
+        running on a memory- and MIPS-constrained Cypress FX3. It is **not**
+        a host application and not a DSP framework.
+
+        Before you file:
+
+        - **Scope it to the firmware.** Demodulation, channelization, audio,
+          waterfalls, and UI belong in the host (ka9q-radio, rx888_tools).
+          If it can be done host-side, it should be.
+        - **R828D / VHF requests are limited, not banned.** The firmware is
+          HF direct-sampling and the GPL R82xx driver was removed for a license
+          conflict (see README "Limitations"). **Simple, bounded R828D control
+          — e.g. init and standby/power-down — may be accepted if you make a
+          good case.** Full VHF tuning, gain-stage control, channel filtering,
+          and anything resembling a tuner driver are refused — that belongs in
+          a host-side driver over the I2C passthrough. Tell us which side of
+          that line your request is on, and why.
+        - **Justify it.** A feature is a maintenance and recoverability
+          liability forever. Tell us the problem, not just the solution.
+        - Every required field below must be answered. Requests that gut
+          the template will be closed without triage.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      description: All of these must be true. Tick each one only after you have actually done it.
+      options:
+        - label: I searched existing open AND closed issues/discussions and this is not a duplicate.
+          required: true
+        - label: This genuinely belongs in the FIRMWARE — it cannot reasonably be done host-side (ka9q-radio / rx888_tools).
+          required: true
+        - label: If this involves the R828D / VHF tuner, it is limited to simple bounded control (e.g. init / standby) — I am NOT asking for VHF tuning, gain-stage, or channel-filter control in firmware (those belong host-side; see README "Limitations").
+          required: true
+        - label: I have read the relevant docs (`README.md`, `docs/architecture.md`, `docs/vendor-protocol-plan.md`) and this does not already exist.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: >
+        What can't you do today, and why does it matter? Describe the actual
+        problem and who hits it — not the solution. "I want feature X" is not a
+        motivation; "I cannot do Y because the firmware does Z" is.
+      placeholder: |
+        When I ... the firmware currently ... which means I cannot ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: >
+        Concretely, what should the firmware do? If it touches the USB wire
+        protocol, name the vendor command(s) and payload(s). If it touches
+        clocking, GPIF, DMA, or GPIO, say so.
+      placeholder: |
+        Add/extend vendor command ... with payload ...
+        Affects: protocol.h / GPIF / Si5351 clock / DMA / GPIO map (circle as applicable)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary firmware area affected
+      options:
+        - USB vendor-command protocol (protocol.h / EP0 handlers)
+        - GPIF II state machine
+        - DMA / streaming pipeline
+        - Si5351 / clock control
+        - ADC / front-end control (gain, attenuator, dither/rand)
+        - GPIO map
+        - Recovery / watchdog
+        - Build / tooling / CI
+        - Other (explain in the proposal)
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: recoverability
+    attributes:
+      label: Recoverability impact (Principle 2)
+      description: >
+        No firmware change may leave the RX888 in a state requiring a power
+        cycle to recover (see docs/vendor-protocol-plan.md). Explain how your
+        proposal returns to EP0 idle within bounded time, rejects malformed
+        payloads cleanly, and leaves RESETFX3/STOPFX3 working from any reachable
+        state. If you don't know, say so — but it WILL be evaluated on this.
+      placeholder: |
+        New command validates length/range at EP0 before acting; on bad input
+        it stalls/returns without mutating state; RESETFX3 still works because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Why can't this be solved host-side? What other approaches did you
+        weigh, and why are they worse? "None" is acceptable only if you explain
+        why there is genuinely no host-side or simpler option.
+      placeholder: |
+        Host-side in ka9q-radio: rejected because ...
+        Simpler firmware approach: rejected because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: >
+        Does this change the wire protocol or behaviour seen by existing hosts
+        (ka9q-radio, rx888_tools/rx888_stream, ExtIO hosts)? Is it backward
+        compatible? Does it need a firmware-version bump (TESTFX3)?
+      placeholder: |
+        Backward compatible: yes/no, because ...
+        Existing hosts affected: ...
+        Needs FIRMWARE_VER bump: yes/no
+    validations:
+      required: true

@@ -1,9 +1,11 @@
 # Build artifacts
 fx3_cmd
+*.o
 rx888_stream
 si5351_math_test
 si5351_mc
 si5351_bench
+host/health_eval_test
 
 # Generated analysis artifacts (reproducible via `make mc-plot`)
 si5351_mc_scatter.csv

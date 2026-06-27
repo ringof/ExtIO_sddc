@@ -27,208 +27,23 @@
 #include <termios.h>
 #include <sys/wait.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
 #include <libusb-1.0/libusb.h>
 
 /* ------------------------------------------------------------------ */
-/* Protocol constants — must match SDDC_FX3/protocol.h                */
+/* Modularization (issue #139): the shared lower layers now live in     */
+/* sibling modules.  Future cuts: fx3_scenarios.c (the do_test_*        */
+/* scenarios) and fx3_soak.c (the soak runner).                         */
 /* ------------------------------------------------------------------ */
+#include "fx3_proto.h"
+#include "fx3_usb.h"
+#include "fx3_stats.h"
+#include "fx3_bulk.h"
+#include "fx3_fuzz.h"
+#include "fx3_lifecycle.h"
 
-/* USB IDs */
-#define RX888_VID        0x04B4
-#define RX888_PID_APP    0x00F1
-#define RX888_PID_BOOT   0x00F3
-
-/* Vendor request codes */
-#define STARTFX3      0xAA
-#define STOPFX3       0xAB
-#define TESTFX3       0xAC
-#define GPIOFX3       0xAD
-#define I2CWFX3       0xAE
-#define I2CRFX3       0xAF
-#define RESETFX3      0xB1
-#define STARTADC      0xB2
-#define GETSTATS      0xB3
-/* Legacy tuner commands (R82xx driver removed — GPL conflict).
- * Retained here for stale-command regression tests: the "raw"
- * subcommand sends these codes and expects a USB STALL. */
-#define TUNERINIT     0xB4
-#define TUNERTUNE     0xB5
-#define SETARGFX3     0xB6
-#define TUNERSTDBY    0xB8
-#define READINFODEBUG 0xBA
-#define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
-                              * used by test_health_recovery to trip the
-                              * firmware health watchdog (#104, #105). */
-#define HANGMAIN      0xCF   /* TEST-ONLY: signal main thread to spin
-                              * forever on next iteration; used by
-                              * test_main_recovery to trip the FX3
-                              * hardware watchdog (Level 5). */
-
-/* SETARGFX3 argument IDs */
-#define DAT31_ATT     10
-#define AD8370_VGA    11
-#define WDG_MAX_RECOV 14
-
-/* Timeouts */
-#define CTRL_TIMEOUT_MS  1000
-
-/* Global libusb context — needed by primed_start_and_read() for
- * libusb_handle_events_timeout_completed().  Set once in main(). */
-static libusb_context *g_ctx;
-static const char *g_firmware_path = NULL;  /* set from -F option in main() */
-
-/* ------------------------------------------------------------------ */
-/* USB helpers (patterns from rx888_stream.c)                         */
-/* ------------------------------------------------------------------ */
-
-static int ctrl_write_u32(libusb_device_handle *h, uint8_t request,
-                          uint16_t wValue, uint16_t wIndex, uint32_t val)
-{
-    uint8_t data[4];
-    data[0] = (uint8_t)(val & 0xFF);
-    data[1] = (uint8_t)((val >>  8) & 0xFF);
-    data[2] = (uint8_t)((val >> 16) & 0xFF);
-    data[3] = (uint8_t)((val >> 24) & 0xFF);
-
-    int r = libusb_control_transfer(
-        h,
-        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
-        request, wValue, wIndex, data, sizeof(data), CTRL_TIMEOUT_MS);
-    if (r < 0) return r;
-    if (r != (int)sizeof(data)) return LIBUSB_ERROR_IO;
-    return 0;
-}
-
-static int ctrl_write_buf(libusb_device_handle *h, uint8_t request,
-                          uint16_t wValue, uint16_t wIndex,
-                          const uint8_t *buf, uint16_t len)
-{
-    int r = libusb_control_transfer(
-        h,
-        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
-        request, wValue, wIndex, (unsigned char *)buf, len, CTRL_TIMEOUT_MS);
-    if (r < 0) return r;
-    if (r != (int)len) return LIBUSB_ERROR_IO;
-    return 0;
-}
-
-static int ctrl_read(libusb_device_handle *h, uint8_t request,
-                     uint16_t wValue, uint16_t wIndex,
-                     uint8_t *buf, uint16_t len)
-{
-    int r = libusb_control_transfer(
-        h,
-        LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
-        request, wValue, wIndex, buf, len, CTRL_TIMEOUT_MS);
-    return r;
-}
-
-/* Convenience: send a command with a u32 payload, wValue=0, wIndex=0 */
-static int cmd_u32(libusb_device_handle *h, uint8_t cmd, uint32_t val)
-{
-    return ctrl_write_u32(h, cmd, 0, 0, val);
-}
-
-/* Convenience: send SETARGFX3 with arg_id in wIndex, arg_val in wValue,
- * and a 1-byte zero payload (matches rx888_stream encoding). */
-static int set_arg(libusb_device_handle *h, uint16_t arg_id, uint16_t arg_val)
-{
-    uint8_t zero = 0;
-    return ctrl_write_buf(h, SETARGFX3, arg_val, arg_id, &zero, 1);
-}
-
-/* Retry a command on a transient USB error with escalating backoff.
- * When a soak scenario starts right after a prior scenario triggered
- * heavy watchdog activity, the device may still be mid-recovery and
- * unable to service control transfers.  This manifests as either:
- *
- *   LIBUSB_ERROR_TIMEOUT  — transfer completed but device didn't ACK
- *                           within CTRL_TIMEOUT_MS
- *   LIBUSB_ERROR_IO       — low-level USB I/O failure (broken pipe,
- *                           NAK flood, etc.) while the FX3 is
- *                           resetting its DMA/GPIF state
- *
- * The helper retries up to twice with escalating backoff (500 ms then
- * 1 s, worst-case 1.5 s total).  STARTFX3 is especially sensitive
- * because it restarts the GPIF state machine — unlike simple EP0
- * reads (TESTFX3) which succeed sooner.  The 1.5 s budget matches the
- * observed watchdog recovery window (~2 s) while still catching a
- * genuinely wedged device within a few seconds.
- *
- * Convention: use cmd_u32_retry for the FIRST STARTADC + STARTFX3 in
- * every soak scenario (the "entry point" calls most exposed to
- * inter-scenario timing).  Use plain cmd_u32 for mid-scenario calls
- * (STOP→START transitions, recovery verification, etc.) so genuine
- * firmware failures are caught immediately. */
-static int cmd_u32_retry(libusb_device_handle *h, uint8_t cmd, uint32_t val)
-{
-    int r = cmd_u32(h, cmd, val);
-    if (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO)
-        return r;
-    usleep(500000);                    /* 500 ms backoff */
-    r = cmd_u32(h, cmd, val);
-    if (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO)
-        return r;
-    usleep(1000000);                   /* 1 s backoff */
-    return cmd_u32(h, cmd, val);
-}
-
-/* ------------------------------------------------------------------ */
-/* Device open / close                                                */
-/* ------------------------------------------------------------------ */
-
-static libusb_device_handle *open_rx888(libusb_context *ctx)
-{
-    libusb_device_handle *h = libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
-    if (!h) {
-        /* Check if device is in bootloader mode */
-        libusb_device_handle *boot = libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_BOOT);
-        if (boot) {
-            libusb_close(boot);
-            fprintf(stderr, "error: device found in bootloader mode (PID 0x%04X) — flash firmware first\n",
-                    RX888_PID_BOOT);
-        } else {
-            fprintf(stderr, "error: no RX888 device found (VID 0x%04X, PID 0x%04X)\n",
-                    RX888_VID, RX888_PID_APP);
-        }
-        return NULL;
-    }
-
-    /* Detach kernel driver if attached */
-    if (libusb_kernel_driver_active(h, 0) == 1)
-        libusb_detach_kernel_driver(h, 0);
-
-    int r = libusb_claim_interface(h, 0);
-    if (r < 0) {
-        fprintf(stderr, "error: claim interface: %s\n", libusb_strerror(r));
-        libusb_close(h);
-        return NULL;
-    }
-
-    /* Restart the XHCI endpoint ring for EP1-IN.
-     *
-     * When the previous process closed its USB fd, the kernel killed
-     * pending URBs via xhci_urb_dequeue → Set TR Dequeue Pointer,
-     * which leaves the XHCI endpoint in the "stopped" state.  New TDs
-     * submitted by this process won't be processed until the endpoint
-     * is restarted.  libusb_clear_halt sends CLEAR_FEATURE(ENDPOINT_HALT)
-     * to the device AND calls usb_hcd_reset_endpoint which issues a
-     * Reset Endpoint command to the XHCI — clearing the stopped state.
-     *
-     * The firmware CLEAR_FEATURE handler now just ACKs the setup
-     * (no stall-clear, no DMA teardown), so this is safe. */
-    libusb_clear_halt(h, 0x81);  /* EP1-IN — restart XHCI endpoint ring */
-
-    return h;
-}
-
-static void close_rx888(libusb_device_handle *h)
-{
-    if (h) {
-        libusb_release_interface(h, 0);
-        libusb_close(h);
-    }
-}
 
 /* ------------------------------------------------------------------ */
 /* Firmware upload via rx888_stream (same approach as soak_test.sh)    */
@@ -407,6 +222,34 @@ static int do_wdg_max(libusb_device_handle *h, uint16_t val)
     return 0;
 }
 
+/* #163: from a CLEAN Si5351, write each register start..0xFF (single byte =
+ * value) and probe (read 0xC0 reg0) after each.  Reports the first register
+ * whose write mutes the chip.  Wedge is POR-only, so it stops there; resume
+ * past it after a power cycle: i2c_sweep <found+1> <value>. */
+static int do_i2c_sweep(libusb_device_handle *h, uint16_t start, uint16_t value)
+{
+    uint8_t p = 0;
+    if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &p, 1) < 0) {
+        printf("FAIL i2c_sweep: Si5351 already mute at start — power-cycle first.\n");
+        return 1;
+    }
+    uint8_t v = (uint8_t)value;
+    int s = start & 0xFF;
+    printf("i2c_sweep: write 0xC0 reg 0x%02x..0xFF = 0x%02x, probe after each...\n", s, v);
+    for (int reg = s; reg <= 0xFF; reg++) {
+        ctrl_write_buf(h, I2CWFX3, 0x00C0, (uint16_t)reg, &v, 1);
+        uint8_t probe;
+        if (ctrl_read(h, I2CRFX3, 0x00C0, 0x00, &probe, 1) < 0) {
+            printf(">>> reg 0x%02x (write 0x%02x) WEDGED the Si5351 <<<\n", reg, v);
+            printf("    clean through 0x%02x..0x%02x; next: power-cycle, then  i2c_sweep 0x%02x 0x%02x\n",
+                   s, reg - 1 < s ? s : reg - 1, reg + 1, v);
+            return 1;
+        }
+    }
+    printf("i2c_sweep: 0x%02x..0xFF ALL survived value 0x%02x (no forbidden reg in this range/value)\n", s, v);
+    return 0;
+}
+
 static int do_start(libusb_device_handle *h)
 {
     int r = cmd_u32(h, STARTFX3, 0);
@@ -434,9 +277,22 @@ static int do_i2cr(libusb_device_handle *h, uint16_t addr, uint16_t reg, uint16_
     uint8_t buf[64];
     if (len > sizeof(buf)) len = sizeof(buf);
 
+    /* Enable USB debug first so a firmware-side I2C failure is captured: the
+     * I2CRFX3 handler logs CyU3PI2cGetErrorCode (the granular NAK reason) via
+     * DebugPrint2USB, which only buffers when debug mode is on (#163). */
+    ctrl_read(h, TESTFX3, 1, 0, buf, 4);
+
     int r = ctrl_read(h, I2CRFX3, addr, reg, buf, len);
     if (r < 0) {
         printf("FAIL i2cr addr=0x%02X reg=0x%02X: %s\n", addr, reg, libusb_strerror(r));
+        /* Drain the firmware debug buffer — surfaces "I2CRD ... ec=N", where
+         * ec=0 NAK_BYTE_0 (address), 1 NAK_BYTE_1 (register), 8 NAK_DATA. */
+        uint8_t dbg[64];
+        for (int k = 0; k < 16; k++) {
+            int n = ctrl_read(h, READINFODEBUG, 0, 0, dbg, sizeof(dbg));
+            if (n > 1) printf("  [fw]%.*s\n", n - 1, (char *)dbg);
+            usleep(15000);
+        }
         return 1;
     }
     printf("PASS i2cr addr=0x%02X reg=0x%02X len=%d:", addr, reg, r);
@@ -473,6 +329,161 @@ static int do_reset(libusb_device_handle *h)
     return 0;
 }
 
+/* Host-side USB port reset via the raw USBDEVFS_RESET ioctl.
+ *
+ * Deliberately does NOT use libusb_reset_device(): that requires opening
+ * and claiming the device, which can fail on exactly the wedged state this
+ * is meant to recover.  We only enumerate (read descriptors — no claim) to
+ * locate the bus/address, then issue the ioctl on the /dev/bus/usb node,
+ * so it works even when the firmware is too wedged for libusb to claim.
+ *
+ * Linux-only (USBDEVFS_RESET), which matches the Docker-on-Linux harness
+ * and the external `usbreset` utility it replaces.  Unlike RESETFX3 this
+ * does not power-cycle the FX3, so a running device may re-enumerate still
+ * loaded — pair it with `reset` (RESETFX3) when a fresh image is required. */
+static int do_usbreset(libusb_context *ctx)
+{
+    libusb_device **list;
+    ssize_t n = libusb_get_device_list(ctx, &list);
+    if (n < 0) {
+        fprintf(stderr, "FAIL usbreset: libusb_get_device_list: %s\n",
+                libusb_strerror((int)n));
+        return 1;
+    }
+
+    uint8_t bus = 0, addr = 0;
+    uint16_t pid = 0;
+    int found = 0;
+    for (ssize_t i = 0; i < n; i++) {
+        struct libusb_device_descriptor d;
+        if (libusb_get_device_descriptor(list[i], &d) != 0)
+            continue;
+        if (d.idVendor == RX888_VID &&
+            (d.idProduct == RX888_PID_APP || d.idProduct == RX888_PID_BOOT)) {
+            bus = libusb_get_bus_number(list[i]);
+            addr = libusb_get_device_address(list[i]);
+            pid = d.idProduct;
+            found = 1;
+            break;
+        }
+    }
+    libusb_free_device_list(list, 1);
+
+    if (!found) {
+        fprintf(stderr, "FAIL usbreset: no RX888 found "
+                "(VID 0x%04X, PID 0x%04X/0x%04X)\n",
+                RX888_VID, RX888_PID_APP, RX888_PID_BOOT);
+        return 1;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/dev/bus/usb/%03u/%03u", bus, addr);
+
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        fprintf(stderr, "FAIL usbreset: open %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    int ret = ioctl(fd, USBDEVFS_RESET, 0);
+    int saved = errno;
+    close(fd);
+    if (ret < 0 && saved != ENODEV) {
+        fprintf(stderr, "FAIL usbreset: USBDEVFS_RESET %s: %s\n",
+                path, strerror(saved));
+        return 1;
+    }
+    if (ret < 0) {
+        /* ENODEV is expected, not an error: the port reset reboots the
+         * FX3, which re-enumerates as a *new* device (on this hardware it
+         * drops to the bootloader, PID 0x00F1 -> 0x00F3), so the original
+         * /dev/bus/usb node disappears before the ioctl returns.  Same
+         * "device disconnected on success" semantics as RESETFX3.  The
+         * device now needs a firmware re-upload before it is usable. */
+        printf("PASS usbreset %s (PID 0x%04X reset; device re-enumerated — "
+               "re-upload firmware)\n", path, pid);
+    } else {
+        printf("PASS usbreset %s (PID 0x%04X reset)\n", path, pid);
+    }
+    return 0;
+}
+
+/* Force a full firmware reload: reset the FX3 to the bootloader using BOTH
+ * the in-band RESETFX3 vendor command and a host-side usbreset (so a wedged
+ * device that can't accept RESETFX3 is still recovered), re-upload the
+ * image, and verify the device returns healthy at the app PID.
+ *
+ * This is the force_reload() primitive the ka9q-radio soak fires every few
+ * minutes; it also stands alone as `fx3_cmd [-F img] reload`.  Both the
+ * vendor reset and the bus reset leave the device in DFU, so a re-upload is
+ * mandatory afterward — that's the whole point. */
+static int do_reload(libusb_context *ctx, const char *fw)
+{
+    if (access(fw, R_OK) != 0) {
+        fprintf(stderr, "FAIL reload: firmware not readable: %s\n", fw);
+        return 1;
+    }
+
+    /* In-band reset first: if the device is in app mode and claimable, send
+     * RESETFX3 (the path nothing else exercises).  Best-effort — a wedged
+     * device may refuse it, which is what the usbreset below covers. */
+    libusb_device_handle *app =
+        libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
+    if (app) {
+        if (libusb_kernel_driver_active(app, 0) == 1)
+            libusb_detach_kernel_driver(app, 0);
+        if (libusb_claim_interface(app, 0) == 0) {
+            cmd_u32(app, RESETFX3, 0);   /* device disconnects; result ignored */
+            printf("# reload: RESETFX3 sent\n");
+        }
+        libusb_close(app);
+        sleep(2);                        /* let it re-enumerate to bootloader */
+    }
+
+    /* Host-side kick: always issue a usbreset too.  If RESETFX3 already
+     * dropped the device to the bootloader this just resets it again
+     * (harmless); if RESETFX3 couldn't be delivered, this recovers it.
+     * Non-fatal — the bootloader-wait below is the real gate. */
+    do_usbreset(ctx);
+    sleep(2);
+
+    /* Gate: confirm the device is in the bootloader before re-uploading. */
+    int in_boot = 0;
+    for (int waited_ms = 0; waited_ms < 6000; waited_ms += 250) {
+        libusb_device_handle *bl =
+            libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_BOOT);
+        if (bl) { libusb_close(bl); in_boot = 1; break; }
+        usleep(250000);
+    }
+    if (!in_boot) {
+        fprintf(stderr, "FAIL reload: device did not enter bootloader "
+                "(PID 0x%04X) within timeout\n", RX888_PID_BOOT);
+        return 1;
+    }
+    printf("# reload: device in bootloader (PID 0x%04X)\n", RX888_PID_BOOT);
+
+    /* Re-upload (verifies the device returns at the app PID). */
+    if (upload_firmware(ctx, fw) != 0) {
+        printf("FAIL reload: firmware re-upload failed\n");
+        return 1;
+    }
+
+    /* Verify the freshly-loaded firmware answers TESTFX3. */
+    libusb_device_handle *h = open_rx888(ctx);
+    if (!h) {
+        printf("FAIL reload: device not usable after re-upload\n");
+        return 1;
+    }
+    int rc = do_test(h);
+    close_rx888(h);
+    if (rc != 0) {
+        printf("FAIL reload: device unhealthy after re-upload\n");
+        return 1;
+    }
+    printf("PASS reload (device re-flashed and healthy at PID 0x%04X)\n",
+           RX888_PID_APP);
+    return 0;
+}
+
 /* Send a raw vendor command code — for testing stale/removed commands */
 static int do_raw(libusb_device_handle *h, uint8_t code)
 {
@@ -494,7 +505,6 @@ static int do_raw(libusb_device_handle *h, uint8_t code)
 /* ------------------------------------------------------------------ */
 
 /* Forward declarations for do_* functions defined later in this file. */
-static int do_stats(libusb_device_handle *h);
 static int do_ep0_overflow(libusb_device_handle *h);
 static int do_test_oob_brequest(libusb_device_handle *h);
 static int do_test_oob_setarg(libusb_device_handle *h);
@@ -506,8 +516,10 @@ static int do_test_stack_check(libusb_device_handle *h);
 static int do_test_stats_i2c(libusb_device_handle *h);
 static int do_test_stats_pib(libusb_device_handle *h);
 static int do_test_stats_pll(libusb_device_handle *h);
+static int do_test_stats_shdn(libusb_device_handle *h);
 static int do_test_stop_gpif_state(libusb_device_handle *h);
 static int do_test_stop_start_cycle(libusb_device_handle *h);
+static int do_test_resetup_cycle(libusb_device_handle *h);
 static int do_test_pll_preflight(libusb_device_handle *h);
 static int do_test_clk0_chip_query(libusb_device_handle *h);
 static int do_test_wedge_recovery(libusb_device_handle *h);
@@ -539,6 +551,7 @@ static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
 static int do_test_main_recovery(libusb_device_handle *h);
+static int do_test_coldstart_recovery(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -562,8 +575,10 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stats_i2c",        do_test_stats_i2c},
     {"stats_pib",        do_test_stats_pib},
     {"stats_pll",        do_test_stats_pll},
+    {"stats_shdn",       do_test_stats_shdn},
     {"stop_gpif_state",  do_test_stop_gpif_state},
     {"stop_start_cycle", do_test_stop_start_cycle},
+    {"resetup_cycle",    do_test_resetup_cycle},
     {"pll_preflight",    do_test_pll_preflight},
     {"clk0_chip_query",  do_test_clk0_chip_query},
     {"wedge_recovery",   do_test_wedge_recovery},
@@ -593,8 +608,12 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"data_sanity",      do_test_data_sanity},
     {"gpif_soft_stop",   do_test_gpif_soft_stop},
     {"stop_under_backpressure", do_test_stop_under_backpressure},
+    {"protocol_fuzz_burst", do_test_protocol_fuzz_burst},
+    {"stream_fuzz_burst", do_test_stream_fuzz_burst},
     {"test_health_recovery", do_test_health_recovery},
     {"test_main_recovery", do_test_main_recovery},
+    {"test_coldstart_recovery", do_test_coldstart_recovery},
+    {"two_actor_open",   do_test_two_actor_open},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -612,8 +631,10 @@ static void print_local_help(void)
            "  gpio <bits>                   Set GPIO word\n"
            "  stats                         Read GETSTATS counters\n"
            "  stats_i2c / stats_pib / stats_pll   Counter tests\n"
+           "  stats_shdn                    SHDN asserted after STOPFX3 (#131)\n"
            "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
            "  stop_start_cycle              Cycle STOP+START N times\n"
+           "  resetup_cycle                 Full re-setup restart cycling (host-style); env RESETUP_STANDBY_MS/CYCLES/GPIO/REOPEN\n"
            "  pll_preflight                 Verify START rejected without clock\n"
            "  clk0_chip_query               Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
            "  wedge_recovery                Provoke DMA wedge, test recovery\n"
@@ -643,8 +664,12 @@ static void print_local_help(void)
            "  data_sanity                   Bulk data corruption check\n"
            "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
            "  stop_under_backpressure       STOP while DMA buffers full\n"
+           "  protocol_fuzz_burst           200 random EP0 transfers, health-gated (#139)\n"
+           "  stream_fuzz_burst             3s of random bulk/host-lifecycle fuzzing (#139)\n"
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
            "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
+           "  test_coldstart_recovery       HANGCOLDSTART + cold-start reset escalation round-trip (#137)\n"
+           "  two_actor_open                2nd process hammers EP0 while streaming (#143)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -705,6 +730,11 @@ static int dispatch_local_cmd(libusb_device_handle *h, const char *line)
     if (strcmp(cmd, "wdg_max") == 0) {
         if (!args) { printf("usage: wdg_max <0-255>\n"); return 1; }
         return do_wdg_max(h, (uint16_t)strtoul(args, NULL, 0));
+    }
+    if (strcmp(cmd, "i2c_sweep") == 0) {
+        unsigned long st = 0, v = 0xFF;
+        if (args) sscanf(args, "%li %li", &st, &v);
+        return do_i2c_sweep(h, (uint16_t)st, (uint16_t)v);
     }
     if (strcmp(cmd, "gpio") == 0) {
         if (!args) { printf("usage: gpio <bits>\n"); return 1; }
@@ -942,8 +972,10 @@ static int do_test_oob_setarg(libusb_device_handle *h)
         return 1;
     }
 
-    /* Verify device is still alive */
-    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    /* Verify the device survived.  The OOB SETARGFX3 above intentionally
+     * STALLs EP0; tolerate the transient post-STALL pipe error (issue
+     * #135 — see ep0_alive_after_stall). */
+    r = ep0_alive_after_stall(h);
     if (r < 0) {
         printf("FAIL oob_setarg: device unresponsive after OOB wIndex: %s\n",
                libusb_strerror(r));
@@ -1319,74 +1351,6 @@ static int do_test_stack_check(libusb_device_handle *h)
 /* GETSTATS tests                                                     */
 /* ------------------------------------------------------------------ */
 
-/* GETSTATS response layout (20 bytes, little-endian):
- *   [0..3]   uint32  DMA buffer completions
- *   [4]      uint8   GPIF state machine state
- *   [5..8]   uint32  PIB error count
- *   [9..10]  uint16  last PIB error arg
- *   [11..14] uint32  I2C failure count
- *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
- *   [19]     uint8   Si5351 status register (reg 0)
- */
-#define GETSTATS_LEN  26    /* bumped from 24 in si5351-chip-query PR — adds
-                             * clk0_reg16 [24] and clk0_result [25] diagnostic
-                             * bytes.  Strict-length check below means flashing
-                             * the new firmware is required after this host
-                             * update. */
-
-struct fx3_stats {
-    uint32_t dma_count;
-    uint8_t  gpif_state;
-    uint32_t pib_errors;
-    uint16_t last_pib_arg;
-    uint32_t i2c_failures;
-    uint32_t streaming_faults;
-    uint8_t  si5351_status;
-    uint32_t boot_count;       /* Increments once per firmware boot.  Mismatch
-                                * across two snapshots = device reset between
-                                * them (HWDT, CyU3PDeviceReset, RESETFX3, or
-                                * power cycle). */
-    uint8_t  clk0_reg16;       /* Si5351 CLK0_CONTROL register (16) raw value.
-                                * Bit 7 = CLK0_PDN (0=on, 1=off). */
-    uint8_t  clk0_result;      /* Boolean returned by si5351_clk0_enabled():
-                                * 1 if firmware sees CLK0 as enabled (i.e.
-                                * reg16 bit 7 == 0), 0 otherwise. */
-};
-
-static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
-{
-    uint8_t buf[GETSTATS_LEN];
-    int r = ctrl_read(h, GETSTATS, 0, 0, buf, GETSTATS_LEN);
-    if (r < 0) return r;
-    if (r < GETSTATS_LEN) return LIBUSB_ERROR_IO;
-    memcpy(&s->dma_count,    &buf[0],  4);
-    s->gpif_state = buf[4];
-    memcpy(&s->pib_errors,   &buf[5],  4);
-    memcpy(&s->last_pib_arg, &buf[9],  2);
-    memcpy(&s->i2c_failures, &buf[11], 4);
-    memcpy(&s->streaming_faults, &buf[15], 4);
-    s->si5351_status = buf[19];
-    memcpy(&s->boot_count, &buf[20], 4);
-    s->clk0_reg16  = buf[24];
-    s->clk0_result = buf[25];
-    return 0;
-}
-
-/* Read and display GETSTATS fields */
-static int do_stats(libusb_device_handle *h)
-{
-    struct fx3_stats s;
-    int r = read_stats(h, &s);
-    if (r < 0) {
-        printf("FAIL stats: %s\n", libusb_strerror(r));
-        return 1;
-    }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u\n",
-           s.dma_count, s.gpif_state, s.pib_errors,
-           s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result);
-    return 0;
-}
 
 /* Verify I2C failure counter increments on NACK.
  * Read stats, trigger I2C NACK (absent address 0xC2), read stats again. */
@@ -1508,162 +1472,48 @@ static int do_test_stats_pll(libusb_device_handle *h)
     return 0;
 }
 
+/* Verify the firmware parks the ADC in SHDN standby after STOPFX3
+ * (issue #131). Sequence: STARTADC -> STARTFX3 (wakes SHDN) -> STOPFX3
+ * (firmware asserts SHDN in the stop path) -> read gpio_state from
+ * GETSTATS and check the SHDWN bit is set. The gpio_state bit positions
+ * mirror enum GPIOPin in protocol.h, so we mask with the same SHDWN
+ * constant the host uses for the GPIOFX3 control word. */
+static int do_test_stats_shdn(libusb_device_handle *h)
+{
+    struct fx3_stats s;
+    int r;
+
+    /* Bring the ADC into a known-awake state: STARTADC + STARTFX3. */
+    cmd_u32(h, STARTADC, 32000000);
+    if (cmd_u32(h, STARTFX3, 0) != 0) {
+        printf("FAIL stats_shdn: STARTFX3 failed\n");
+        return 1;
+    }
+    usleep(50000);  /* let the wake settle */
+
+    /* Stop. Firmware's STOPFX3 handler asserts SHDN at the end. */
+    cmd_u32(h, STOPFX3, 0);
+    usleep(50000);
+
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL stats_shdn: GETSTATS: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    if (!(s.gpio_state & SHDWN)) {
+        printf("FAIL stats_shdn: SHDWN not asserted after STOPFX3 (gpio_state=0x%05X)\n",
+               s.gpio_state);
+        return 1;
+    }
+    printf("PASS stats_shdn: SHDWN asserted after STOPFX3 (gpio_state=0x%05X)\n",
+           s.gpio_state);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* GPIF wedge / stop-start tests                                      */
 /* ------------------------------------------------------------------ */
 
-/* EP1 IN (bulk consumer endpoint) */
-#define EP1_IN  0x81
-
-/* Try to read some bulk data from EP1 IN.  Returns the number of bytes
- * actually received, or a negative libusb error code.  A timeout (no
- * data within timeout_ms) returns 0. */
-static int bulk_read_some(libusb_device_handle *h, int len, int timeout_ms)
-{
-    uint8_t *buf = malloc(len);
-    if (!buf) return LIBUSB_ERROR_NO_MEM;
-    int transferred = 0;
-    int r = libusb_bulk_transfer(h, EP1_IN, buf, len, &transferred, timeout_ms);
-    free(buf);
-    if (r == LIBUSB_ERROR_TIMEOUT) return transferred;  /* partial is OK */
-    if (r < 0) return r;
-    return transferred;
-}
-
-/* ---- Primed (async) start-and-read --------------------------------
- *
- * Race-free alternative to cmd_u32(STARTFX3) + bulk_read_some().
- *
- * At 32 MS/s the four 16 KB DMA buffers fill in ~1 ms.  If the host
- * hasn't submitted a bulk TD by then, PIB overflows force the xHCI
- * endpoint into an error state and all subsequent reads return -EIO.
- * rx888_stream avoids this by pre-submitting 32 async transfers BEFORE
- * sending STARTFX3.  This helper does the same thing for the test
- * harness:
- *
- *   1. libusb_submit_transfer()   — queue one async bulk read TD
- *   2. cmd_u32(STARTFX3, 0)       — start GPIF; data lands in the TD
- *   3. libusb_handle_events()     — wait for completion
- *
- * Note: libusb_clear_halt is NOT called here.  Between clean stop/start
- * cycles the endpoint is not halted, and clear_halt on a non-stalled EP
- * corrupts USB controller ERDY state via the firmware's CLEAR_FEATURE
- * handler.  The retry variant (primed_start_and_read_retry) calls
- * clear_halt between attempts to recover from genuine endpoint errors.
- *
- * Returns bytes received (>= 0) or a negative libusb error code.
- * On success the caller still owns the STOPFX3 responsibility. */
-
-struct primed_xfer_state {
-    int completed;       /* set to 1 by callback */
-    int actual_length;   /* bytes transferred     */
-    int status;          /* libusb_transfer_status */
-};
-
-static void LIBUSB_CALL primed_xfer_cb(struct libusb_transfer *xfer)
-{
-    struct primed_xfer_state *st = xfer->user_data;
-    st->actual_length = xfer->actual_length;
-    st->status        = xfer->status;
-    st->completed     = 1;
-}
-
-static int primed_start_and_read(libusb_device_handle *h,
-                                 int len, int timeout_ms)
-{
-    uint8_t *buf = malloc(len);
-    if (!buf) return LIBUSB_ERROR_NO_MEM;
-
-    struct libusb_transfer *xfer = libusb_alloc_transfer(0);
-    if (!xfer) { free(buf); return LIBUSB_ERROR_NO_MEM; }
-
-    struct primed_xfer_state st = { .completed = 0 };
-
-    /* Note: do NOT call libusb_clear_halt here.  Between clean stop/start
-     * cycles the endpoint is not halted, and clear_halt on a non-stalled
-     * endpoint triggers CyU3PUsbStall(CyFalse, CyTrue) in the firmware's
-     * CLEAR_FEATURE handler, which corrupts USB controller ERDY state
-     * after data has flowed.  The clear_halt at device open (open_rx888)
-     * handles the initial xHCI endpoint reset; error recovery is handled
-     * by the retry variant below. */
-
-    /* 1. Fill and submit async bulk transfer BEFORE starting GPIF */
-    libusb_fill_bulk_transfer(xfer, h, EP1_IN, buf, len,
-                              primed_xfer_cb, &st, timeout_ms);
-    int r = libusb_submit_transfer(xfer);
-    if (r < 0) {
-        libusb_free_transfer(xfer);
-        free(buf);
-        return r;
-    }
-
-    /* 2. Start GPIF — data flows into the already-queued TD */
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        libusb_cancel_transfer(xfer);
-        /* Drain the cancelled transfer so libusb doesn't leak it */
-        while (!st.completed)
-            libusb_handle_events_completed(g_ctx, &st.completed);
-        libusb_free_transfer(xfer);
-        free(buf);
-        return r;
-    }
-
-    /* 3. Wait for the bulk transfer to complete */
-    while (!st.completed)
-        libusb_handle_events_completed(g_ctx, &st.completed);
-
-    libusb_free_transfer(xfer);
-    free(buf);
-
-    if (st.status == LIBUSB_TRANSFER_COMPLETED)
-        return st.actual_length;
-
-    /* H4 fix: timeout with 0 bytes means the device didn't produce any
-     * data — return LIBUSB_ERROR_TIMEOUT so the retry variant fires its
-     * STOP + clear_halt + retry recovery.  Previously this returned 0,
-     * which looked like "success" (r >= 0) and bypassed recovery entirely.
-     * Timeout with partial data (actual_length > 0) is a valid short
-     * read — return the byte count so callers can use the data. */
-    if (st.status == LIBUSB_TRANSFER_TIMED_OUT)
-        return (st.actual_length > 0) ? st.actual_length
-                                      : LIBUSB_ERROR_TIMEOUT;
-
-    /* Map transfer status to a libusb error code */
-    switch (st.status) {
-    case LIBUSB_TRANSFER_ERROR:    return LIBUSB_ERROR_IO;
-    case LIBUSB_TRANSFER_STALL:    return LIBUSB_ERROR_PIPE;
-    case LIBUSB_TRANSFER_OVERFLOW: return LIBUSB_ERROR_OVERFLOW;
-    case LIBUSB_TRANSFER_NO_DEVICE:return LIBUSB_ERROR_NO_DEVICE;
-    case LIBUSB_TRANSFER_CANCELLED:return LIBUSB_ERROR_INTERRUPTED;
-    default:                       return LIBUSB_ERROR_OTHER;
-    }
-}
-
-/* Retry variant: retries primed_start_and_read on transient USB errors
- * (timeout / IO), same escalation as cmd_u32_retry.  Use for the first
- * STARTFX3 in a scenario after potential watchdog recovery. */
-static int primed_start_and_read_retry(libusb_device_handle *h,
-                                       int len, int timeout_ms)
-{
-    int r = primed_start_and_read(h, len, timeout_ms);
-    if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
-        return r;
-    /* First retry — previous attempt may have started GPIF (STARTFX3
-     * succeeded but bulk read failed).  Stop streaming, clear the
-     * xHCI endpoint error state, then retry. */
-    cmd_u32(h, STOPFX3, 0);
-    usleep(500000);
-    libusb_clear_halt(h, EP1_IN);
-    r = primed_start_and_read(h, len, timeout_ms);
-    if (r >= 0 || (r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_IO))
-        return r;
-    /* Second retry */
-    cmd_u32(h, STOPFX3, 0);
-    usleep(1000000);
-    libusb_clear_halt(h, EP1_IN);
-    return primed_start_and_read(h, len, timeout_ms);
-}
 
 /* Stop GPIF then verify the SM state via GETSTATS.
  *
@@ -1738,6 +1588,102 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
  *
  * On the current firmware this wedges on the 2nd or 3rd cycle because
  * STARTFX3 doesn't restart the SM after STOPFX3 leaves it stuck. */
+/* resetup_cycle: exercise a FULL re-setup restart each cycle -- the way a host
+ * (e.g. radiod) actually restarts streaming, NOT the bare STARTFX3/STOPFX3 of
+ * stop_start_cycle. Per cycle: dwell in SHDN standby for RESETUP_STANDBY_MS
+ * (the gap stop_start_cycle never exercises), then re-init clock + GPIO +
+ * atten/VGA + TUNERSTDBY + STARTFX3 (firmware wakes the ADC, settles
+ * ADC_WAKEUP_SETTLE_MS, starts the GPIF) and confirm the stream flows. The
+ * standby dwell is the knob to bisect the wake timing.
+ *
+ * RESETUP_REOPEN=1 goes further: each cycle uses a brand-new libusb handle
+ * (open_rx888 -> claim -> stream -> STOPFX3 -> release -> close), mimicking
+ * radiod restarting as a fresh PROCESS. Caveat: the caller's handle stays open
+ * (interface released, re-claimed at the end), so the device isn't fully at
+ * zero open handles between cycles.
+ *   env: RESETUP_CYCLES (8), RESETUP_STANDBY_MS (40), RESETUP_GPIO (0),
+ *        RESETUP_REOPEN (0). */
+static int do_test_resetup_cycle(libusb_device_handle *h)
+{
+    int cycles = 8, standby_ms = 40, reopen = 0;
+    uint32_t gpios = 0;
+    const char *e;
+    if ((e = getenv("RESETUP_CYCLES")))     cycles = atoi(e);
+    if ((e = getenv("RESETUP_STANDBY_MS"))) standby_ms = atoi(e);
+    if ((e = getenv("RESETUP_GPIO")))       gpios = (uint32_t)strtoul(e, NULL, 0);
+    if ((e = getenv("RESETUP_REOPEN")))     reopen = atoi(e);
+
+    printf("# resetup_cycle: %d cycles, %d ms standby, gpio=0x%x, reopen=%d\n",
+           cycles, standby_ms, gpios, reopen);
+
+    /* Reopen mode: free interface 0 so each cycle's fresh handle can claim it. */
+    if (reopen)
+        libusb_release_interface(h, 0);
+
+    int rc = 0;
+    for (int i = 0; i < cycles; i++) {
+        libusb_device_handle *use = h;
+
+        if (reopen) {
+            /* Device idle in SHDN standby, no streaming handle (between
+             * "processes"), then a fresh open+claim -- like radiod restarting. */
+            usleep((useconds_t)standby_ms * 1000);
+            use = open_rx888(g_ctx);
+            if (!use) {
+                printf("FAIL resetup_cycle: cycle %d/%d open_rx888 failed "
+                       "(device gone after restart?)\n", i + 1, cycles);
+                rc = 1; break;
+            }
+        } else {
+            cmd_u32(use, STOPFX3, 0);                /* park ADC in standby */
+            usleep((useconds_t)standby_ms * 1000);
+        }
+
+        /* Full re-setup burst (5 ms gaps), mirroring a host restart. */
+        cmd_u32_retry(use, STARTADC, 64800000); usleep(5000);  /* re-init ADC clock */
+        do_gpio(use, gpios);                    usleep(5000);
+        do_att(use, 0);                         usleep(5000);
+        do_vga(use, 0);                         usleep(5000);
+        cmd_u32(use, TUNERSTDBY, 0);            usleep(5000);  /* HF: harmless STALL */
+        do_gpio(use, gpios);                    usleep(5000);
+
+        /* STARTFX3 (firmware wakes the ADC + settle + GPIF) + primed bulk read. */
+        int got = primed_start_and_read(use, 16384, 2000);
+        cmd_u32(use, TUNERSTDBY, 0);
+
+        if (got < 1024) {
+            struct fx3_stats s = {0};
+            read_stats(use, &s);
+            printf("FAIL resetup_cycle: cycle %d/%d stalled after restart: "
+                   "%d bytes (standby=%d ms, reopen=%d); GPIF_state=%u "
+                   "DMA_count=%u PIB_err=%u faults=%u\n",
+                   i + 1, cycles, got < 0 ? 0 : got, standby_ms, reopen,
+                   s.gpif_state, s.dma_count, s.pib_errors, s.streaming_faults);
+            cmd_u32(use, STOPFX3, 0);
+            if (reopen) { libusb_release_interface(use, 0); libusb_close(use); }
+            rc = 1; break;
+        }
+
+        if (reopen) {
+            cmd_u32(use, STOPFX3, 0);            /* "process" exits: stop + close */
+            libusb_release_interface(use, 0);
+            libusb_close(use);
+        }
+        usleep(100000);  /* brief dwell while streaming */
+    }
+
+    if (reopen)
+        libusb_claim_interface(h, 0);   /* re-claim for the caller's cleanup */
+    else
+        cmd_u32(h, STOPFX3, 0);
+
+    if (rc == 0)
+        printf("PASS resetup_cycle: %d %s restarts, stream flowed each time "
+               "(standby=%d ms)\n", cycles, reopen ? "fresh-handle" : "in-handle",
+               standby_ms);
+    return rc;
+}
+
 static int do_test_stop_start_cycle(libusb_device_handle *h)
 {
     int cycles = 5;
@@ -3162,9 +3108,14 @@ static int do_test_setarg_gap_index(libusb_device_handle *h)
         /* Either STALL or accept is fine — just no crash */
     }
 
-    /* Verify alive */
-    uint8_t info[4] = {0};
-    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    /* Verify alive.  The final gap probe STALLs EP0 (expected); the FX3 can
+     * race the stall auto-clear, so this survival check — the very next SETUP —
+     * can see a transient LIBUSB_ERROR_PIPE on a device that is alive and
+     * answers the next request.  Tolerate and retry, exactly as the #135
+     * scenarios do.  This was the ~5.9% setarg_gap_index intermittent (#111);
+     * the per-probe loop above already accepts PIPE, so the survival check was
+     * the only spot that turned the transient stall into a false failure. */
+    int r = ep0_alive_after_stall(h);
     if (r < 0) {
         int have_after = (read_stats(h, &after) == 0);
         printf("FAIL setarg_gap_index: device unresponsive: %s\n",
@@ -3262,9 +3213,10 @@ static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
     r = ctrl_write_buf(h, I2CWFX3, 0x90, 0, &data, 1);
     /* Expected: STALL or error from NACK */
 
-    /* Verify alive */
-    uint8_t info[4] = {0};
-    r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    /* Verify the device survived.  A NACK'd I2C write makes the I2CWFX3
+     * handler STALL EP0; tolerate the transient post-STALL pipe error
+     * (issue #135 — see ep0_alive_after_stall). */
+    r = ep0_alive_after_stall(h);
     if (r < 0) {
         printf("FAIL i2c_write_bad_addr: device unresponsive: %s\n",
                libusb_strerror(r));
@@ -3288,12 +3240,17 @@ static int do_test_i2c_write_bad_addr(libusb_device_handle *h)
     return 0;
 }
 
-/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers. */
+/* T10: i2c_multibyte — multi-byte I2C round-trip on Si5351 registers.
+ * Uses the CLK0-7 control block (regs 16-23): an 8-register contiguous span
+ * that is all within the AN619-documented (host-writable) range, so the #163
+ * reserved-register guard permits it.  (Regs 0-7 would straddle reserved
+ * 4-7 and be STALLed.)  Non-destructive: reads the originals and writes the
+ * identical bytes back. */
 static int do_test_i2c_multibyte(libusb_device_handle *h)
 {
-    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 0 */
+    /* Read 8 bytes from Si5351 (addr 0xC0) starting at reg 16 (CLK0_CONTROL) */
     uint8_t orig[8] = {0};
-    int r = ctrl_read(h, I2CRFX3, 0xC0, 0, orig, 8);
+    int r = ctrl_read(h, I2CRFX3, 0xC0, 16, orig, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: initial read: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
@@ -3301,7 +3258,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
     }
 
     /* Write the same bytes back (non-destructive) */
-    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 0, orig, 8);
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 16, orig, 8);
     if (r < 0) {
         printf("FAIL i2c_multibyte: write 8 bytes: %s\n", libusb_strerror(r));
         return 1;
@@ -3309,7 +3266,7 @@ static int do_test_i2c_multibyte(libusb_device_handle *h)
 
     /* Read back */
     uint8_t readback[8] = {0};
-    r = ctrl_read(h, I2CRFX3, 0xC0, 0, readback, 8);
+    r = ctrl_read(h, I2CRFX3, 0xC0, 16, readback, 8);
     if (r < 8) {
         printf("FAIL i2c_multibyte: readback: %s (got %d bytes)\n",
                r < 0 ? libusb_strerror(r) : "short", r < 0 ? 0 : r);
@@ -4618,6 +4575,17 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * subsequent scenarios, so it stays fw_test.sh-only. */
         {"gpif_soft_stop",      do_test_gpif_soft_stop,       3, 0, 0, 0},
         {"stop_under_backpressure", do_test_stop_under_backpressure, 3, 0, 0, 0},
+        /* NOTE: the seeded fuzzers (protocol_fuzz_burst / stream_fuzz_burst,
+         * issue #139) are deliberately NOT in this rotation.  Hardware soak
+         * (seed 42) showed protocol_fuzz can drive the device into an
+         * EP0-corrupted state (hwconfig reads 0xF0, GETSTATS garbage) that
+         * needs a firmware re-upload to clear — see issue #142 — which then
+         * contaminates the following scenarios (wedge_recovery STOPFX3
+         * timeout, abandoned_stream cap miss).  A test that can require a
+         * re-flash does not belong in the unattended soak; the fuzzers run
+         * standalone (`fx3_cmd protocol_fuzz` / `stream_fuzz`, and the `!`
+         * local commands) and will move into the destructive target.  Same
+         * escape hatch as gpio_extremes. */
         {"hw_smoke",            do_test_hw_smoke,             3, 0, 0, 0},
         {"stop_gpif_state",     do_test_stop_gpif_state,      3, 0, 0, 0},
         {"vendor_rqt_wrap",     do_test_vendor_rqt_wrap,      3, 0, 0, 0},
@@ -4628,6 +4596,7 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * per 1 hour soak (well above the 10-per-hour coverage floor). */
         {"test_health_recovery",do_test_health_recovery,      3, 0, 0, 0},
         {"test_main_recovery",  do_test_main_recovery,        3, 0, 0, 0},
+        {"test_coldstart_recovery", do_test_coldstart_recovery, 3, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
@@ -4787,7 +4756,13 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
          * Rule for new scenarios: always STOPFX3 on the success path,
          * and rely on this safety net for early-exit failure paths. */
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
-        cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
+        cmd_u32(h, GPIOFX3, 0x0820); /* LED_BLUE on, SHDWN asserted — match
+                                      * the firmware-side standby state that
+                                      * STOPFX3 leaves the ADC in (issue #131),
+                                      * so soak inter-scenario idle exercises
+                                      * that state. Scenarios that need the
+                                      * ADC awake go through STARTFX3, which
+                                      * wakes SHDN in firmware. */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
         /* NOTE: do NOT call libusb_clear_halt(EP1_IN) here unconditionally.
          * The FX3 CLEAR_FEATURE handler calls CyU3PUsbStall(ep,false,true)
@@ -4874,6 +4849,17 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
                    prev_stats.i2c_failures, prev_stats.streaming_faults);
             fflush(stdout);
         }
+    }
+
+    /* Final teardown: park the ADC in low-power standby (SHDN) so the
+     * soak does not leave the LTC2208 cooking after the run. Inter-scenario
+     * cleanup above now also asserts SHDWN, so the device should already
+     * be parked; this final pass is a belt-and-suspenders in case the last
+     * scenario aborted mid-stream before reaching cleanup. Guarded on a
+     * live handle — after a NO_DEVICE abort there is nothing to talk to. */
+    if (h) {
+        cmd_u32(h, STOPFX3, 0);
+        cmd_u32(h, GPIOFX3, 0x0800 | 0x20); /* LED_BLUE on, SHDWN set — ADC standby */
     }
 
     /* Final report */
@@ -5050,6 +5036,126 @@ static int do_test_health_recovery(libusb_device_handle *h)
 
     printf("PASS test_health_recovery: HANGFX3 -> watchdog reset -> bootloader "
            "-> firmware re-uploaded -> device alive (hwconfig=0x%02X fw=%d.%d)\n",
+           buf[0], buf[1], buf[2]);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* test_coldstart_recovery — end-to-end validation of the #137 cold-  */
+/* start detection + autonomous reset escalation.                      */
+/*                                                                     */
+/* HANGCOLDSTART makes the DMA producer callback stop incrementing     */
+/* glDMACount, so after STARTADC+STARTFX3 the GPIF SM is active but no  */
+/* buffer progress is recorded — a cold-start wedge.  With WDG_MAX_RECOV*/
+/* = 1 the streaming watchdog detects it, one light recovery fails to   */
+/* clear it (DMA still suppressed), the cap exhausts, and (clock        */
+/* healthy) health_recover escalates to CyU3PDeviceReset.  Verifies the */
+/* device re-enumerates to bootloader, re-uploads, and resumes.         */
+/*                                                                     */
+/* Requires -F <firmware.img> (or the ../SDDC_FX3 fallback).  #137.     */
+/* ------------------------------------------------------------------ */
+static int do_test_coldstart_recovery(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[4];
+
+    r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: precheck TESTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* Resolve firmware path before tripping the reset (same as
+     * test_health_recovery) so a missing path fails cleanly. */
+    const char *fw = g_firmware_path;
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
+        if (access(fallback, R_OK) == 0) {
+            if (fw) printf("# firmware path '%s' not readable; using fallback '%s'\n", fw, fallback);
+            fw = fallback;
+        } else {
+            printf("FAIL test_coldstart_recovery: no readable firmware (tried '%s' and '%s'). "
+                   "Use -F <firmware.img>.\n", fw ? fw : "(none)", fallback);
+            return 1;
+        }
+    }
+
+    /* Ensure escalation enabled + make the cap small so the round-trip is
+     * quick (one light recovery, then escalate). */
+    if (set_arg(h, WDG_RESET_ESCALATE, 1) < 0 || set_arg(h, WDG_MAX_RECOV, 1) < 0) {
+        printf("FAIL test_coldstart_recovery: SETARGFX3 (escalation/cap) failed\n");
+        return 1;
+    }
+
+    printf("# test_coldstart_recovery: HANGCOLDSTART, then STARTADC+STARTFX3\n");
+    printf("#   expected: SM active + DMA frozen at 0 -> cold-start wedge ->\n");
+    printf("#   cap exhausts -> health_recover escalates CyU3PDeviceReset ->\n");
+    printf("#   device re-enumerates to bootloader PID 0x%04X.\n", RX888_PID_BOOT);
+
+    /* Suppress DMA progress, then bring the SM up. */
+    r = libusb_control_transfer(
+        h, LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        HANGCOLDSTART, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: HANGCOLDSTART: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    if (cmd_u32(h, STARTADC, 64000000) < 0) {
+        printf("FAIL test_coldstart_recovery: STARTADC failed\n");
+        return 1;
+    }
+    /* STARTFX3 should succeed (SM starts); the wedge develops afterward as
+     * glDMACount never advances. */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0 && r != LIBUSB_ERROR_PIPE) {
+        printf("FAIL test_coldstart_recovery: STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("# SM started with DMA suppressed; waiting for cold-start detection + escalation...\n");
+
+    /* Cold-start grace (~500 ms) + one light recovery + cap + reset +
+     * re-enumeration.  A few seconds worst-case; wait 6 s. */
+    sleep(6);
+
+    /* Verify the device dropped to bootloader (escalation reset fired). */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (!bl) {
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            libusb_close(app);
+            printf("FAIL test_coldstart_recovery: device at APP PID, not bootloader — "
+                   "escalation did not fire (detection / cap / clock-gate?).\n");
+        } else {
+            printf("FAIL test_coldstart_recovery: device not visible at either PID after 6 s.\n");
+        }
+        return 1;
+    }
+    libusb_close(bl);
+    printf("# device at bootloader PID — cold-start reset escalation fired\n");
+
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_coldstart_recovery: firmware re-upload failed.\n"
+               "#   Recover with: ./fx3_cmd load <path-to-SDDC_FX3.img>\n");
+        return 1;
+    }
+
+    libusb_device_handle *running =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (!running) {
+        printf("FAIL test_coldstart_recovery: device not at APP PID after re-upload\n");
+        return 1;
+    }
+    r = ctrl_read(running, TESTFX3, 0, 0, buf, 4);
+    libusb_close(running);
+    if (r < 0) {
+        printf("FAIL test_coldstart_recovery: post-recovery TESTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    printf("PASS test_coldstart_recovery: HANGCOLDSTART -> cold-start wedge -> reset escalation "
+           "-> bootloader -> firmware re-uploaded -> device alive (hwconfig=0x%02X fw=%d.%d)\n",
            buf[0], buf[1], buf[2]);
     return 0;
 }
@@ -5233,6 +5339,49 @@ static int do_test_main_recovery(libusb_device_handle *h)
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
+/* #148: a fuzz run returned 2 — the device is EP0-healthy but no longer
+ * streaming, almost always because the fuzzer reconfigured the Si5351 via
+ * I2CWFX3 (a legal host op, not a firmware bug).  Confirm it's *recoverable*:
+ * reload firmware and re-verify streaming.  Needs a firmware image (-F or the
+ * ../SDDC_FX3 fallback); without one we can only WARN.  Returns 0 if the
+ * device streams again (or we couldn't verify), 1 if it cannot stream even
+ * after a reload (real firmware/clock damage). */
+static int fuzz_reload_verify(libusb_device_handle **h)
+{
+    const char *fw = g_firmware_path;
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0)
+        fw = (access(fallback, R_OK) == 0) ? fallback : NULL;
+
+    if (!fw) {
+        printf("# reload-verify: no firmware image (-F) — cannot confirm "
+               "recovery.  Reload before streaming.  Treating EP0 survival as PASS.\n");
+        return 0;
+    }
+    printf("# reload-verify: reloading firmware to confirm the device recovers...\n");
+    if (*h) { close_rx888(*h); *h = NULL; }
+    if (do_reload(g_ctx, fw) != 0) {
+        printf("FAIL: reload failed during recovery verify\n");
+        return 1;
+    }
+    *h = open_rx888(g_ctx);
+    if (!*h) {
+        printf("FAIL: reopen after reload failed\n");
+        return 1;
+    }
+    cmd_u32(*h, STARTADC, 32000000);
+    int got = primed_start_and_read_retry(*h, 16384, 2000);
+    cmd_u32(*h, STOPFX3, 0);
+    if (got > 0) {
+        printf("PASS: device recovered after reload — the fuzz run had "
+               "reconfigured the Si5351; firmware is fine.\n");
+        return 0;
+    }
+    printf("FAIL: device cannot stream even after reload — possible "
+           "firmware/clock damage.\n");
+    return 1;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -5244,17 +5393,21 @@ static void usage(const char *prog)
         "\n"
         "Commands:\n"
         "  load <firmware.img>          Upload firmware and exit\n"
+        "  reload [firmware.img]        Reset to bootloader (RESETFX3 + usbreset),\n"
+        "                               re-upload firmware, verify healthy\n"
         "  test                         Read device info (TESTFX3)\n"
         "  gpio <bits>                  Set GPIO word (hex or decimal)\n"
         "  adc <freq_hz>               Set ADC clock frequency (STARTADC)\n"
         "  att <0-63>                   Set DAT-31 attenuator\n"
         "  vga <0-255>                  Set AD8370 VGA gain\n"
         "  wdg_max <0-255>             Set watchdog max recovery count (0=unlimited)\n"
+        "  i2c_sweep [start] [val]      Write Si5351 regs start..0xFF=val, probe each; find forbidden reg (#163)\n"
         "  start                        Start streaming (STARTFX3)\n"
         "  stop                         Stop streaming (STOPFX3)\n"
         "  i2cr <addr> <reg> <len>      I2C read (hex addresses)\n"
         "  i2cw <addr> <reg> <byte>...  I2C write (hex addresses, hex data)\n"
-        "  reset                        Reboot FX3 to bootloader\n"
+        "  reset                        Reboot FX3 to bootloader (RESETFX3)\n"
+        "  usbreset                     Host-side USB port reset (USBDEVFS_RESET)\n"
         "  debug                        Interactive debug console over USB\n"
         "  raw <code>                   Send raw vendor request (hex)\n"
         "  ep0_overflow                 Test EP0 wLength bounds check\n"
@@ -5269,8 +5422,10 @@ static void usage(const char *prog)
         "  stats_i2c                    Verify I2C failure counter via NACK\n"
         "  stats_pib                    Verify PIB error counter via overflow\n"
         "  stats_pll                    Verify Si5351 PLL lock status\n"
+        "  stats_shdn                   SHDN asserted after STOPFX3 (#131)\n"
         "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
+        "  resetup_cycle                Full re-setup restart cycling, host-style (RESETUP_STANDBY_MS, RESETUP_REOPEN knobs)\n"
         "  pll_preflight                Verify STARTFX3 rejected without clock\n"
         "  clk0_chip_query              Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
         "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
@@ -5300,6 +5455,15 @@ static void usage(const char *prog)
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
+        "  protocol_fuzz [ops] [seed]   Seeded EP0 control-transfer fuzzer (#139;\n"
+        "                               default 5000 ops; prints coverage + reproduce seed)\n"
+        "  stream_fuzz [secs] [seed]    Seeded bulk/host-lifecycle fuzzer (#139; default 60s)\n"
+        "  dir_mismatch [ops] [seed]    Well-formed EP0 requests, wrong direction only (#142 isolation)\n"
+        "  ep0_sweep                    Deterministic bRequest 0..255 x IN/OUT direction sweep (#149)\n"
+        "  i2c_fuzz [ops] [seed]        Malformed I2CWFX3/I2CRFX3 only (#154 isolation)\n"
+        "  oversend_fuzz [ops] [seed]   Short-wLength on fixed-size IN responders (#154 isolation)\n"
+        "  reopen_race_storm            Tight close/reopen storm; device must stay healthy (#143)\n"
+        "  two_actor_open               2nd process hammers EP0 while streaming (#143)\n"
         "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
         "                               Multi-hour randomized stress test\n"
         "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
@@ -5382,6 +5546,31 @@ int main(int argc, char **argv)
         return (rc == 0) ? 0 : 1;
     }
 
+    /* ---- Handle "usbreset" command (raw USBDEVFS_RESET, no claim) ----
+     * Handled before open_rx888()/auto-upload so it can recover a wedged
+     * device that can't be claimed and never triggers a firmware upload. */
+    if (strcmp(cmd, "usbreset") == 0) {
+        int rc = do_usbreset(ctx);
+        libusb_exit(ctx);
+        return rc;
+    }
+
+    /* ---- Handle "reload" command (reset -> re-upload -> verify) ----
+     * Like load, handled before open_rx888() since the device passes
+     * through the bootloader. Firmware comes from -F or a path argument. */
+    if (strcmp(cmd, "reload") == 0) {
+        const char *fw = (argc >= 3) ? argv[2] : firmware_path;
+        if (!fw) {
+            fprintf(stderr, "error: reload requires a firmware path\n"
+                            "usage: %s [-F img] reload [firmware.img]\n", argv[0]);
+            libusb_exit(ctx);
+            return 2;
+        }
+        int rc = do_reload(ctx, fw);
+        libusb_exit(ctx);
+        return rc;
+    }
+
     /* ---- Auto-upload if -F given and device is in bootloader mode ---- */
     if (firmware_path) {
         libusb_device_handle *boot =
@@ -5427,6 +5616,10 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "wdg_max") == 0) {
         if (argc < 3) { usage(argv[0]); goto out; }
         rc = do_wdg_max(h, (uint16_t)parse_num(argv[2]));
+
+    } else if (strcmp(cmd, "i2c_sweep") == 0) {
+        rc = do_i2c_sweep(h, (argc >= 3) ? (uint16_t)parse_num(argv[2]) : 0,
+                             (argc >= 4) ? (uint16_t)parse_num(argv[3]) : 0xFF);
 
     } else if (strcmp(cmd, "start") == 0) {
         rc = do_start(h);
@@ -5487,11 +5680,17 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "stats_pll") == 0) {
         rc = do_test_stats_pll(h);
 
+    } else if (strcmp(cmd, "stats_shdn") == 0) {
+        rc = do_test_stats_shdn(h);
+
     } else if (strcmp(cmd, "stop_gpif_state") == 0) {
         rc = do_test_stop_gpif_state(h);
 
     } else if (strcmp(cmd, "stop_start_cycle") == 0) {
         rc = do_test_stop_start_cycle(h);
+
+    } else if (strcmp(cmd, "resetup_cycle") == 0) {
+        rc = do_test_resetup_cycle(h);
 
     } else if (strcmp(cmd, "clk0_chip_query") == 0) {
         rc = do_test_clk0_chip_query(h);
@@ -5568,6 +5767,14 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "test_main_recovery") == 0) {
         rc = do_test_main_recovery(h);
 
+    } else if (strcmp(cmd, "two_actor_open") == 0) {
+        rc = do_test_two_actor_open(h);
+
+    } else if (strcmp(cmd, "reopen_race_storm") == 0) {
+        /* Pass &h: each close/reopen replaces the handle, so the final live
+         * handle must propagate back for the out: cleanup (like soak). */
+        rc = do_test_reopen_race_storm(&h);
+
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);
 
@@ -5623,6 +5830,37 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "watchdog_race") == 0) {
         int rnds = (argc >= 3) ? (int)parse_num(argv[2]) : 50;
         rc = do_test_watchdog_race(h, rnds);
+
+    } else if (strcmp(cmd, "protocol_fuzz") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_protocol(&h, n, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
+
+    } else if (strcmp(cmd, "stream_fuzz") == 0) {
+        double secs = (argc >= 3) ? atof(argv[2]) : 60.0;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_stream(&h, secs, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
+
+    } else if (strcmp(cmd, "dir_mismatch") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 2000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_dir_mismatch(&h, n, seed);
+        if (rc == 2) rc = fuzz_reload_verify(&h);   /* #148 */
+
+    } else if (strcmp(cmd, "ep0_sweep") == 0) {
+        rc = fuzz_ep0_sweep(&h);                    /* #149 */
+
+    } else if (strcmp(cmd, "i2c_fuzz") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_i2c(&h, n, seed);                 /* #154 isolation */
+
+    } else if (strcmp(cmd, "oversend_fuzz") == 0) {
+        long n = (argc >= 3) ? (long)parse_num(argv[2]) : 5000;
+        uint64_t seed = (argc >= 4) ? (uint64_t)strtoull(argv[3], NULL, 0) : 0;
+        rc = fuzz_oversend(&h, n, seed);            /* #154 isolation */
 
     } else if (strcmp(cmd, "soak") == 0) {
         /* Pass &h so soak_try_reacquire() (which closes and replaces

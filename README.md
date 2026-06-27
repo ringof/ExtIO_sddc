@@ -75,6 +75,29 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
+### Full validation in one command
+
+`tests/validate.sh` runs the whole firmware-validation sequence against an
+attached RX888 — three sequential stages with one overall PASS/FAIL:
+
+```
+tests/validate.sh                 # all stages (300 s soak)
+tests/validate.sh --skip-soak     # quick: correctness + ka9q-radio only
+```
+
+1. **`fw_test.sh`** — vendor-command and data-flow correctness.
+2. **`soak_test.sh`** — stability (default 300 s; pass `--soak-secs N` /
+   run the soak standalone for hours for a real run).
+3. **ka9q-radio** — confirms the firmware runs under the real host stack
+   (`radiod` + `rx888.so`) **and produces real output**: a live power
+   spectrum (sane noise floor, natural variance, and the fs/2 Nyquist alias
+   — not the flat line a dead/frozen ADC would give), plus a kill-and-return
+   check that `radiod` restarts and re-streams cleanly (issue #131). Needs
+   the `ka9q-radio` docker image (see below).
+
+See [`tests/README.md`](tests/README.md) for the per-stage pass/fail
+criteria and the `ka9q_smoke.sh` / `ka9q_test.sh` details.
+
 ### USB device permissions
 
 The FX3 USB device must be accessible to the user running the tests.
@@ -149,7 +172,7 @@ a new evaluation branch — not writing a new watchdog.
 
 | Level | Remedy | Appropriate for | Latency | Status |
 |---|---|---|---|---|
-| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` — issue #115) |
+| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** in `health_recover(HEALTH_WEDGED_STREAMING)` (migrated from `RunApplication.c` into the health module — #115). |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
 | 4 | `CyU3PDeviceReset(CyFalse)` | Vendor-handler hang (EP0 thread deadlocked in an SDK call) | full re-enumeration (~1-2 s) | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` (#104, #105).  Validated end-to-end by `test_health_recovery` (HANGFX3). |
@@ -159,9 +182,20 @@ a new evaluation branch — not writing a new watchdog.
 
 - **Streaming wedges** — DMA producer stuck waiting for the host to
   drain, GPIF state machine in `TH0_WAIT`/`TH1_WAIT`/`TH0_RD` for
-  >300 ms.  The existing watchdog in `SDDC_FX3/RunApplication.c`
-  detects and recovers; observed reliable across `wedge_recovery`
-  scenarios in `fw_test.sh` and the soak rotation.
+  >300 ms.  The watchdog in `SDDC_FX3/health.c`
+  (`health_evaluate` / `health_recover`) detects and recovers; observed
+  reliable across `wedge_recovery` scenarios in `fw_test.sh` and the
+  soak rotation.
+- **Cold-start streaming wedges** — the GPIF SM left IDLE (a stream was
+  commanded) but the first DMA buffer never arrives (`glDMACount` frozen
+  at 0 for ~500 ms).  `health_evaluate()` detects it; light recovery is
+  tried, and if it can't clear it the cap exhausts and
+  `health_recover()` escalates to `CyU3PDeviceReset` — gated on a healthy
+  ADC clock, once per streaming session, and disable-able via the
+  `WDG_RESET_ESCALATE` arg.  Post-stream backpressure / abandoned streams
+  are unaffected (they cap-and-wait).  Validated by the
+  `test_coldstart_recovery` host scenario (firmware-side `HANGCOLDSTART`)
+  and the `health_eval_test` host unit test (#137, #119).
 - **EP0 vendor-handler hangs** — a vendor request callback wedged
   inside an SDK call for >2 s.  `health_evaluate()` detects via the
   EP0 enter/exit timestamp; `health_recover(HEALTH_WEDGED_EP0)` fires

@@ -243,11 +243,15 @@ for the full state machine design and GPIF-level recovery details.
 
 **Wider recovery cascade:**
 
-The GPIF watchdog is one level of a broader recovery cascade.  The
-firmware also detects EP0 vendor-handler hangs (Level 4, in
+The GPIF watchdog is **Level 1** of a broader five-level recovery
+cascade, implemented in `health.c` behind
+`health_recover(HEALTH_WEDGED_STREAMING)` (migrated out of
+`RunApplication.c` in #115, so all recovery now routes through the
+health module).  The firmware also detects EP0 vendor-handler hangs (Level 4, in
 `SDDC_FX3/health.c`) and main-thread death via the FX3 hardware
 watchdog (Level 5, configured in `health.c` and petted by a
-heartbeat-gated ThreadX timer).  Test-only vendor commands `HANGFX3`
+heartbeat-gated ThreadX timer).  Levels 2–3 are reserved and not yet
+implemented.  Test-only vendor commands `HANGFX3`
 (0xCE) and `HANGMAIN` (0xCF) force each failure mode for round-trip
 validation.  A `boot_count` value in `GETSTATS` lets a host detect
 that the device reset between two snapshots regardless of cause.
@@ -545,7 +549,7 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 0 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
-| 0xB3 | GETSTATS | IN | 0 | 0 | 26 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1).  See [api.md §GETSTATS](api.md) for the canonical layout. |
+| 0xB3 | GETSTATS | IN | 0 | 0 | 30 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1), GPIO state (4).  See [api.md §GETSTATS](api.md) for the canonical layout. |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | N B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255), arg_id 14 = `WDG_MAX_RECOV` watchdog recovery cap |
 | 0xBA | READINFODEBUG | IN | char | -- | ≤ 64 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 | 0xCE | HANGFX3 | OUT | sleep ms | -- | 0 B | **Test-only.** Sleeps `wValue` ms inside the EP0 handler to deterministically wedge the vendor callback; used by `test_health_recovery` to validate the Level-4 EP0 watchdog. |
@@ -569,6 +573,28 @@ valid argument.  For unknown argument IDs, the handler explicitly stalls
 EP0 via `CyU3PUsbStall()` and sets `isHandled = CyTrue`, producing a
 single clean STALL that the host sees as a rejected command.
 
+### Vendor-request direction validation
+
+Each handler calls `CyU3PUsbGetEP0Data()` (OUT) or `CyU3PUsbSendEP0Data()`
+(IN) based on `bRequest`, so the request's actual data-stage direction must
+match.  Before dispatch the handler checks the **direction** bit of
+`bmRequestType` against the command's expected direction and **STALLs on a
+mismatch** — an IN transfer to an OUT-only command (`GPIOFX3`, `STARTADC`,
+`I2CWFX3`, `SETARGFX3`, `STARTFX3`, `STOPFX3`, `RESETFX3`) or an OUT transfer
+to an IN-only command (`TESTFX3`, `GETSTATS`, `I2CRFX3`, `READINFODEBUG`).
+Status-only test commands (`HANGFX3`/`HANGMAIN`/`HANGCOLDSTART`) never touch
+the data phase and are exempt; unknown `bRequest` values STALL via the
+default path.
+
+Without this check, a wrong-direction request mismatches the EP0 data phase
+and desyncs the FX3 EP0 block; a stream of them corrupts subsequent IN
+responses (`hwconfig`/`GETSTATS` read back garbage) and eventually wedges EP0
+hard enough to need a re-flash.  This was an unauthenticated DoS surface — a
+host can legally send such requests — isolated by the host-side
+`tests/fx3_cmd dir_mismatch` test (well-formed requests, wrong direction
+only) and fixed by the direction guard
+([#142](https://github.com/ringof/rx888-firmware/issues/142)).
+
 ---
 
 ## GPIO control and the analog front end
@@ -589,7 +615,7 @@ Each pin is configured as a simple push-pull output during
 | 24 | PGA | Programmable gain amplifier enable (**inverted**: GPIO high = PGA off) |
 | 26 | ATT_DATA | Serial data to PE4304 and AD8370 (shared) |
 | 27 | ATT_CLK | Serial clock to PE4304 and AD8370 (shared) |
-| 28 | SHDWN | Shutdown control |
+| 28 | SHDWN | ADC shutdown control (driven from streaming state: standby when idle, awake while streaming — issue #131) |
 | 29 | DITH | Dither enable |
 | 35 | VHF_EN | VHF receive path enable |
 | 36 | SENSE | Hardware ID sense (input, active low = RX888r2) |
@@ -823,7 +849,8 @@ every vendor command through `fx3_cmd`.
 | File | Purpose |
 |------|---------|
 | `SDDC_FX3/StartUp.c` | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | Application thread, hardware detection, main loop, GPIF streaming watchdog, recovery cascade integration |
+| `SDDC_FX3/RunApplication.c` | Application thread, hardware detection, main loop, `health_tick()` (recovery cascade) integration |
+| `SDDC_FX3/health.c` | Recovery cascade: EP0-wedge (L4), HWDT (L5), and the Level-1 GPIF streaming watchdog (`health_evaluate` / `health_recover`) |
 | `SDDC_FX3/USBHandler.c` | USB setup callback (all vendor commands), USB init, EP0 liveness reporting into `health.c` |
 | `SDDC_FX3/StartStopApplication.c` | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
 | `SDDC_FX3/DebugConsole.c` | UART init, debug buffer, console parser, USB debug |

@@ -11,12 +11,20 @@
  */
 
 #include "Application.h"
+#include "cyu3i2c.h"   /* CyU3PI2cGetErrorCode — granular I2C NAK reason (issue #163 diagnostic) */
 
 #include "Si5351.h"
 
 #include "radio.h"
 
 #include "health.h"
+
+#include "gpif_states.h"
+
+/* Settle time after waking the ADC from SHDN standby before the GPIF
+ * state machine starts clocking samples (issue #131). A few ms is well
+ * within the host's start-command tolerance. */
+#define ADC_WAKEUP_SETTLE_MS 5
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -39,12 +47,52 @@ extern uint8_t glBufDebug[MAXLEN_D_USB];
 extern uint32_t glCounter[20];
 extern uint16_t glLastPibArg;
 extern uint32_t glDMACount;
-extern uint8_t glWdgMaxRecovery;
-extern uint8_t glWdgRecoveryCount;
 
 
 
 #define CYFX_SDRAPP_MAX_EP0LEN  64      /* Max. data length supported for EP0 requests. */
+
+/* #163: clock-chip documented-register allowlist (AN619 register map).  The
+ * RX888mk2 fits an MS5351M (a register-compatible Si5351 clone), NOT a genuine
+ * Skyworks Si5351A.  On the MS5351M, a non-zero host write to a *reserved*
+ * register — the low gaps 4-8/10-14 OR the high gaps 93-148, 171-176, 178-182,
+ * 184-186, 188+ — can wedge its I2C slave into an unrecoverable,
+ * power-cycle-only state.  (Not confirmed on a true Si5351A; the allowlist is
+ * harmless there regardless.)  Permit only documented registers; block
+ * everything else on the host (I2CWFX3) path.  Firmware-internal clock-chip
+ * writes call I2cTransfer directly and bypass this. */
+static CyBool_t si5351_reg_writable(uint8_t r)
+{
+    return (r <= 3)               /* status / interrupt / output enable      */
+        || (r == 9)               /* OEB pin enable control mask             */
+        || (r >= 15 && r <= 92)   /* PLL src, CLK0-7 ctrl, disable state, MultiSynth, R-div */
+        || (r >= 149 && r <= 170) /* spread spectrum, VCXO, CLK phase offsets */
+        || (r == 177)             /* PLL reset                               */
+        || (r == 183)             /* crystal internal load                   */
+        || (r == 187);            /* fanout enable                           */
+}
+
+/* #163: should this host I2C access (read or write) to the Si5351 be blocked?
+ * Blocks the read-address 0xC1 used as a base (malformed preamble), or any
+ * register in the [wIndex, wIndex+wLength) range that is reserved.  Applies to
+ * both directions; firmware-internal Si5351 access bypasses this. */
+static CyBool_t si5351_access_blocked(uint16_t wValue, uint16_t wIndex, uint16_t wLength)
+{
+    uint16_t k;
+    if (wLength == 0)                          return CyFalse;  /* no-op transfer        */
+    if (((uint8_t)wValue & 0xFEu) != 0xC0u)    return CyFalse;  /* not the Si5351 (0x60) */
+    if ((uint8_t)wValue & 0x01u)               return CyTrue;   /* 0xC1 base = malformed */
+    for (k = 0; k < wLength; k++)
+        if (!si5351_reg_writable((uint8_t)(wIndex + k))) return CyTrue;  /* reserved reg */
+    return CyFalse;
+}
+
+/* GETSTATS payload length. Single source of truth; the per-field writes
+ * inside the GETSTATS handler must sum to exactly this. Compile-time
+ * guard below catches any future addition that would overrun glEp0Buffer. */
+#define GETSTATS_PAYLOAD_LEN  30
+_Static_assert(GETSTATS_PAYLOAD_LEN <= CYFX_SDRAPP_MAX_EP0LEN,
+               "GETSTATS payload exceeds EP0 buffer");
 
 extern CyU3PDmaMultiChannel glMultiChHandleSlFifoPtoU;
 // Global data owned by this module
@@ -192,6 +240,39 @@ CyFxSlFifoApplnUSBSetupCB (
     		return CyTrue;
     	}
 
+    	/* Validate the data-phase direction before touching it (issue #142).
+    	 * The cases below call CyU3PUsbGetEP0Data() (OUT) or
+    	 * CyU3PUsbSendEP0Data() (IN) based purely on bRequest, never on the
+    	 * host's bmRequestType direction bit.  If the host's direction
+    	 * disagrees, that Get/Send mismatches the EP0 data phase and desyncs
+    	 * the FX3 EP0 block — repeated mismatches corrupt subsequent IN
+    	 * responses (hwconfig/GETSTATS read back garbage) and eventually wedge
+    	 * EP0 hard enough to need a re-flash.  Confirmed in isolation by the
+    	 * host-side dir_mismatch test (well-formed requests, wrong direction
+    	 * only, wedge EP0 -> bootloader).  STALL the mismatch here, before any
+    	 * data-phase call.  Status-only commands (HANG*) and unknown bRequests
+    	 * are exempt — the former never touch the data phase, the latter STALL
+    	 * via the switch default below. */
+    	{
+    		/* bmRequestType bit 7 (USB 2.0 sec 9.3): 1 = device->host (IN). */
+    		CyBool_t hostIn = ((bReqType & 0x80u) != 0) ? CyTrue : CyFalse;
+    		int expectIn = -1;   /* -1 = exempt / unknown */
+    		switch (bRequest) {
+    			case TESTFX3: case GETSTATS: case I2CRFX3: case READINFODEBUG:
+    				expectIn = 1; break;
+    			case GPIOFX3: case STARTADC: case I2CWFX3: case SETARGFX3:
+    			case STARTFX3: case STOPFX3: case RESETFX3:
+    				expectIn = 0; break;
+    			default:
+    				expectIn = -1; break;
+    		}
+    		if (expectIn >= 0 && (int)hostIn != expectIn) {
+    			CyU3PUsbStall(0, CyTrue, CyFalse);
+    			health_record_event(HEALTH_EVENT_EP0_HANDLER_EXIT);
+    			return CyTrue;
+    		}
+    	}
+
     	switch (bRequest)
     	 {
 			case GPIOFX3:
@@ -217,7 +298,7 @@ CyFxSlFifoApplnUSBSetupCB (
 						{
 							uint8_t smState = 0xFF;
 							CyU3PGpifGetSMState(&smState);
-							if (smState != 0 && smState != 0xFF) {
+							if (smState != GPIF_RESET && smState != 0xFF) {
 								DebugPrint(4, "\r\nSTARTADC: implicit GPIF stop (SM=%d)", smState);
 								CyU3PGpifControlSWInput(CyFalse);
 								CyU3PGpifDisable(CyTrue);
@@ -285,6 +366,19 @@ CyFxSlFifoApplnUSBSetupCB (
 						glEp0Buffer[off++] = clk0_reg16;                 /* [24] */
 						glEp0Buffer[off++] = si5351_clk0_enabled() ? 1 : 0; /* [25] */
 					}
+					{
+						/* User-visible steady-state GPIOs, packed using the
+						 * same bit positions as the GPIOFX3 control word
+						 * (enum GPIOPin). Mainly for #131: lets the host
+						 * verify SHDWN is asserted after every teardown
+						 * path. See rx888r2_ReadGpioState() for details. */
+						uint32_t gpio_state = rx888r2_ReadGpioState(); /* [26..29] */
+						memcpy(&glEp0Buffer[off], &gpio_state, 4); off += 4;
+					}
+					/* Tripwire: if per-field writes ever drift from the
+					 * declared payload length, truncate the response
+					 * rather than risk leaking stale buffer contents. */
+					if (off > GETSTATS_PAYLOAD_LEN) off = GETSTATS_PAYLOAD_LEN;
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
@@ -294,24 +388,50 @@ CyFxSlFifoApplnUSBSetupCB (
 					apiRetStatus  = CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 						{
+							/* #163: protect the Si5351 — reject host writes to the
+							 * read-address 0xC1 or any reserved register. */
+							if (si5351_access_blocked(wValue, wIndex, wLength))
+							{
+								DebugPrint (4, "\r\nI2CWR BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
+								glCounter[1]++;   /* count as an i2c_failure for visibility */
+								isHandled = CyFalse;
+							}
+							else
+							{
 							apiRetStatus = I2cTransfer ( wIndex, wValue, wLength, glEp0Buffer, CyFalse);
 							if (apiRetStatus == CY_U3P_SUCCESS)
 								isHandled = CyTrue;
 							else
 							{
-								CyU3PDebugPrint (4, "I2cwrite Error %d\n", apiRetStatus);
+								{ CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+								  DebugPrint (4, "\r\nI2CWR a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec); }
 								isHandled = CyFalse;
+							}
 							}
 						}
 					break;
 
 			case I2CRFX3:
+					if (si5351_access_blocked(wValue, wIndex, wLength))
+					{
+						DebugPrint (4, "\r\nI2CRD BLOCKED: Si5351 a=0x%x r=0x%x len %d (#163)", wValue, wIndex, wLength);
+						glCounter[1]++;
+						/* isHandled stays CyFalse -> STALL */
+					}
+					else {
 					CyU3PMemSet (glEp0Buffer, 0, CYFX_SDRAPP_MAX_EP0LEN);
 					apiRetStatus = I2cTransfer (wIndex, wValue, wLength, glEp0Buffer, CyTrue);
 					if (apiRetStatus == CY_U3P_SUCCESS)
 					{
 						apiRetStatus = CyU3PUsbSendEP0Data(wLength, glEp0Buffer);
 						isHandled = CyTrue;
+					}
+					else
+					{
+						CyU3PI2cError_t i2cec = (CyU3PI2cError_t)0xFF; CyU3PI2cGetErrorCode(&i2cec);
+						DebugPrint (4, "\r\nI2CRD a=0x%x r=0x%x fail:%d ec=%d", wValue, wIndex, apiRetStatus, i2cec);
+						/* isHandled stays CyFalse -> EP0 STALL (host sees pipe error) */
+					}
 					}
 					break;
 			case SETARGFX3:
@@ -328,7 +448,12 @@ CyFxSlFifoApplnUSBSetupCB (
 							isHandled = CyTrue;
 							break;
 						case WDG_MAX_RECOV:
-							glWdgMaxRecovery = (uint8_t)(wValue & 0xFF);
+							health_set_max_recovery((uint8_t)(wValue & 0xFF));
+							glVendorRqtCnt++;
+							isHandled = CyTrue;
+							break;
+						case WDG_RESET_ESCALATE:
+							health_set_reset_escalation((wValue & 0xFF) != 0);
 							glVendorRqtCnt++;
 							isHandled = CyTrue;
 							break;
@@ -359,6 +484,10 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
+				/* Wake the ADC from SHDN standby (issue #131) and let it
+				 * settle before the GPIF SM begins clocking samples. */
+				rx888r2_AdcStandby(CyFalse);
+				CyU3PThreadSleep(ADC_WAKEUP_SETTLE_MS);
 				/* Stop any running SM before restart.  Always use
 				 * CyTrue (force-reload) here because StartGPIF()
 				 * calls CyU3PGpifLoad() which reloads the config
@@ -385,7 +514,7 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * what is actually wrong — the symptom it masked was an
 				 * xHCI endpoint-ring issue fixed host-side by clear_halt. */
 				glDMACount = 0;  /* reset so watchdog doesn't false-positive during GPIF bring-up */
-				glWdgRecoveryCount = 0;  /* new session — reset recovery cap */
+				health_reset_recovery_count();  /* new session — reset recovery cap */
 				apiRetStatus = CyU3PDmaMultiChannelSetXfer (&glMultiChHandleSlFifoPtoU, FIFO_DMA_RX_SIZE, 0);
 				if (apiRetStatus == CY_U3P_SUCCESS) {
 					apiRetStatus = StartGPIF();  /* reload waveform + SMStart */
@@ -419,7 +548,7 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint8_t smState = 0xFF;
 						CyU3PGpifGetSMState(&smState);
-						if (smState == 1 /* IDLE */) {
+						if (smState == GPIF_IDLE) {
 							CyU3PGpifDisable(CyFalse);
 						} else {
 							DebugPrint(4, "\r\nSTP soft-stop fail SM=%d, forcing", smState);
@@ -429,7 +558,10 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
-					glWdgRecoveryCount = 0;  /* reset recovery cap */
+					health_reset_recovery_count();  /* reset recovery cap */
+					/* No longer streaming — park the ADC in low-power
+					 * standby via SHDN (issue #131). */
+					rx888r2_AdcStandby(CyTrue);
 					{ uint8_t _s=0xFF; CyU3PGpifGetSMState(&_s);
 					  DebugPrint(4,"\r\nSTP s=%d",_s); }
 					isHandled = CyTrue;
@@ -482,6 +614,18 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * after HWDT_PERIOD_MS and resets the device.  Used by
 				 * the host-side test_main_recovery scenario to validate
 				 * Level-5 end-to-end. */
+				case HANGCOLDSTART:
+					/* TEST-ONLY (#137): suppress DMA-progress accounting so the
+					 * GPIF SM runs but glDMACount stays 0 — reproduces a
+					 * cold-start wedge.  The streaming watchdog detects it,
+					 * light recovery fails to clear it, and (clock healthy)
+					 * escalates to a device reset, which clears this flag. */
+					DebugPrint(4, "\r\nHANGCOLDSTART: suppressing DMA progress (test-only)");
+					glHealthForceColdStart = 1;
+					CyU3PUsbAckSetup();
+					isHandled = CyTrue;
+					break;
+
 				case HANGMAIN:
 					DebugPrint(4, "\r\nHANGMAIN: arming main-loop hang (test-only)");
 					glHealthHangMain = 1;

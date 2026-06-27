@@ -33,6 +33,9 @@ documentation.  For source and issue tracking, see the
   [diagnostics side-channel]({{ '/diagnostics_side_channel/' | relative_url }}),
   [wedge detection]({{ '/wedge_detection/' | relative_url }}),
   [license analysis]({{ '/LICENSE_ANALYSIS/' | relative_url }}).
+- **[ka9q-radio health & subsystem inspection]({{ '/ka9q-health-inspection/' | relative_url }})**
+  — direct, per-subsystem health checks for ka9q-radio and the systems the test
+  harness depends on (USB/FX3, radiod, rx888.so, Si5351, avahi, multicast, ka9q-web).
 
 ## If you're about to write FX3 firmware for an SDR
 
@@ -99,11 +102,11 @@ and [host application compatibility]({{ '/compatibility/' | relative_url }}).
 
 ### Exposing FX3 firmware counters to a host application
 
-`GETSTATS` (`0xB3`) is a 26-byte EP0 vendor read that returns DMA
+`GETSTATS` (`0xB3`) is a 30-byte EP0 vendor read that returns DMA
 buffer count, GPIF state, PIB error counts, I2C failure counts,
 streaming-fault count, Si5351 PLL status, a boot counter (for
-mid-test reset detection), and Si5351 CLK0 raw register plus the
-chip-query boolean.  Drop-in pattern for any FX3 firmware that
+mid-test reset detection), Si5351 CLK0 raw register plus the
+chip-query boolean, and packed GPIO state.  Drop-in pattern for any FX3 firmware that
 needs a host-readable health view.  See
 [USB API reference]({{ '/api/' | relative_url }}) (GETSTATS section)
 and the [diagnostics side-channel]({{ '/diagnostics_side_channel/' | relative_url }})

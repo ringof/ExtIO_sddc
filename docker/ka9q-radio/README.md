@@ -48,24 +48,43 @@ container is Linux-only.
 ### With firmware already loaded on the device
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  --network host \
   ka9q-radio
 ```
 
 ### With firmware upload (radiod handles it)
 
+Bind-mount the directory that contains your built `SDDC_FX3.img` onto
+`/firmware`. That directory is **external to the image** — point it wherever
+your firmware actually lives; the in-repo `SDDC_FX3/` source tree only has an
+`.img` after you build it.
+
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
+  -v /abs/path/to/firmware-dir:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
-  --network host \
   ka9q-radio
 ```
+
+If your firmware file has a different name, mount the file directly instead:
+`-v /abs/path/to/your.img:/firmware/SDDC_FX3.img`. With the `ka9q.sh` helper,
+set `FIRMWARE_DIR=/abs/path/to/firmware-dir ./ka9q.sh start` (defaults to the
+in-repo `SDDC_FX3/`).
+
+> **`--network host` is required** (not bridge). radiod's cold-start path —
+> upload firmware, FX3 re-enumerates `00f3`→`00f1`, re-acquire — depends on a
+> USB **hotplug** event, and hotplug is delivered over a **network-namespace-
+> scoped** netlink socket that a bridge container never receives, so libusb
+> fails with "device could not be found" (see `docs/ka9q-compat-audit.md` §1).
+> Host netns is the only way libusb sees the re-enumeration. Multicast stays
+> deterministic because everything is kept on **loopback**: radiod defaults to
+> `lo` and the harness consumers pin `-I lo` / `,lo` — the multi-homed hazard
+> only affects *un-pinned* consumers. Under host networking ka9q-web binds host
+> `:8081` directly, so no `-p` publish is needed.
 
 The `/run/udev` bind mount is **required** when radiod uploads the
 firmware: after the FX3 re-enumerates from `04b4:00f3` (DFU) to
@@ -86,15 +105,17 @@ Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
 
 | Value        | First-run time           | Runtime FFT performance |
 |--------------|--------------------------|-------------------------|
-| `estimate`   | instant                  | slowest                 |
-| `measure`    | minutes (default)        | near-optimal            |
+| `estimate`   | instant (default)        | slowest                 |
+| `measure`    | minutes                  | near-optimal            |
 | `patient`    | hours (1.62M-point FFT)  | optimal                 |
 | `exhaustive` | many hours to days       | marginally > patient    |
 
-Pass it with `-e FFTW_RIGOR=<value>` on `docker run`, e.g.
-`-e FFTW_RIGOR=estimate` for a quick firmware-validation session, or
-`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term
-and want the most efficient FFT plans.
+The default is **`estimate`** so a cold boot of this test/eval image is
+instant — appropriate for firmware-compatibility checks, where optimal
+runtime FFT plans don't matter. Override with `-e FFTW_RIGOR=<value>` on
+`docker run` (or `FFTW_RIGOR=measure ./ka9q.sh start`), e.g.
+`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term and
+want the most efficient FFT plans.
 
 ### Tuning and listening (helper script)
 
@@ -190,13 +211,18 @@ documented above.  This section is for debugging the image itself
 binaries, etc.) — it deliberately omits audio passthrough.
 
 ```
-docker run --rm -it --privileged \
+docker run --rm -it --privileged --network host \
   -v /dev/bus/usb:/dev/bus/usb \
   -v /run/udev:/run/udev:ro \
-  -v $(pwd)/SDDC_FX3:/firmware \
-  --network host \
+  -v /abs/path/to/firmware-dir:/firmware \
+  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   ka9q-radio bash
 ```
+
+> The `wisdom` mount + the default `FFTW_RIGOR=estimate` keep this debug
+> shell's cold boot instant; without the wisdom mount you still pay only the
+> instant `estimate` plan. Point `/firmware` at wherever your built
+> `SDDC_FX3.img` lives (see [With firmware upload](#with-firmware-upload-radiod-handles-it)).
 
 Then inside the container:
 
@@ -220,15 +246,31 @@ tune -r hf.local -s <ssrc> -f 14.074m
 monitor wwv-pcm.local
 ```
 
+## Verify it's streaming (no receiver UI)
+
+The proof that the firmware is really running the radio is the power
+spectrum itself — you don't need to listen to anything.  With the container
+up (`./ka9q.sh start`), run the whole-band smoke test from the repo root:
+
+```
+tests/ka9q_smoke.sh
+```
+
+It sweeps `0 .. fs/2` via `powers`, renders a PNG, and PASS/FAILs
+on whether the floor is a live, textured thermal spectrum (~-130 dB with
+natural variance, the ADC DC spike, and the fs/2 alias) versus the
+featureless flat line a frozen / shut-down ADC would produce.  See
+`tests/README.md` for the calibrated 50 Ω dummy-load reference.
+
 ## What this tests
 
 1. **Firmware upload** — ka9q-radio uses its own `ezusb.c` loader
    (same protocol as `rx888_stream -f`)
 2. **Si5351 clock programming** — ka9q programs the Si5351 directly
-   via `I2CWFX3`, then sends `STARTADC` (via container patch 03) so
-   the SDDC firmware's `glAdcClockEnabled` flag is set and
-   `STARTFX3`'s preflight check passes.  Without patch 03, STARTFX3
-   stalls and the GPIF state machine never starts.
+   via `I2CWFX3`.  The firmware reads the Si5351 CLK0 enable state back
+   from the chip, so `STARTFX3`'s GPIF preflight check passes with no
+   host-side workaround.  (An earlier container patch — 03,
+   `STARTADC` before `STARTFX3` — is retired; see `patches/README.md`.)
 3. **GPIF streaming** — `STARTFX3` + async bulk transfers at 64.8 MSPS
 4. **GPIO control** — `GPIOFX3` for dither, randomizer, HF/VHF select
 5. **Attenuator/VGA** — `SETARGFX3` with DAT31_ATT and AD8340_VGA
@@ -239,10 +281,17 @@ monitor wwv-pcm.local
 See `docs/ka9q-compat-audit.md` in the parent repository for the
 full analysis.  Summary:
 
-- **Missing `STARTADC` before `STARTFX3`** — SDDC requires it for
-  the GPIF preflight check; ka9q omits it.  Fixed by container
-  patch 03 (`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`).
-  The single ka9q-side change required for streaming to work.
+- **ka9q-radio pin** — the container builds ka9q-radio `87567fa` (main),
+  whose `rx888.c` does host-side Si5351 clock synthesis (new `si5351.c`
+  module), polls the Si5351 for lock, and logs the rx888 firmware version
+  via `TESTFX3`.  Paired with ka9q-web `91cbfca`.  See
+  `docs/ka9q-compat-audit.md` §12 for the full driver-eval analysis.
+- **Zero active container patches — builds vanilla ka9q-radio.**  Every local
+  ask has been upstreamed: the `powers` float/double fixes (`01`, `02`) and
+  the no-tuner-stdby change (`04`, removed at `87567fa`).  Patch `03`
+  (`STARTADC` before `STARTFX3`) remains retired (the firmware reports Si5351
+  CLK0 state truthfully, so the GPIF preflight passes with no host workaround).
+  See `patches/README.md`.
 - **`/run/udev` bind-mount required** at `docker run` time — libusb
   inside the container needs host udev events to see the FX3
   re-enumerate after firmware upload.  Container-side workaround,
@@ -250,8 +299,9 @@ full analysis.  Summary:
 - `sleep(1)` after firmware upload (`rx888.c:700`) — fragile in
   principle, sufficient on observed hardware with the udev mount.
   Documented in audit §1, no patch.
-- `TUNERSTDBY` (0xB8) calls produce harmless STALLs.  Cosmetic
-  noise, no functional impact.  Documented in audit §2, no patch.
+- `TUNERSTDBY` (0xB8) calls STALL on this firmware (no tuner) and could
+  intermittently wedge radiod's restart bring-up — removed on the HF path by
+  active patch `04-no-tuner-stdby` (audit §2, `patches/README.md`).
 - GPIO LED bit-mapping differences (cosmetic).
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 

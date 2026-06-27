@@ -43,6 +43,7 @@ typedef enum {
 typedef enum {
     HEALTH_OK = 0,
     HEALTH_WEDGED_EP0,        /* Vendor callback hung in SDK call (issue #104, #105) */
+    HEALTH_WEDGED_STREAMING,  /* DMA stalled in a GPIF BUSY/WAIT state — Level 1 (#115) */
     HEALTH_WEDGED_UNKNOWN,    /* Unidentified wedge — fall-through case */
 } health_status_t;
 
@@ -76,6 +77,13 @@ void health_main_heartbeat(void);
  * reset round-trip end-to-end. */
 extern volatile uint8_t glHealthHangMain;
 
+/* TEST-ONLY: when set non-zero (via the HANGCOLDSTART vendor command),
+ * the DMA producer callback (StartStopApplication.c) stops incrementing
+ * glDMACount, so the GPIF SM runs but records no buffer progress —
+ * reproducing a cold-start wedge for the host-side test_coldstart_recovery
+ * scenario (#137).  Cleared on device reset (RAM wiped). */
+extern volatile uint8_t glHealthForceColdStart;
+
 /* Read the boot counter — incremented once per firmware boot inside
  * health_init().  Exposed via GETSTATS so the host can detect that the
  * device reset between two snapshots, regardless of the cause (Level 4
@@ -96,5 +104,25 @@ health_status_t health_evaluate(void);
  * by main loop when health_evaluate() returns anything other than
  * HEALTH_OK.  May call CyU3PDeviceReset() for catastrophic statuses. */
 void health_recover(health_status_t status);
+
+/* Recovery-cap control for the Level-1 streaming watchdog (migrated from
+ * RunApplication.c into health_recover, issue #115).
+ *
+ *   health_set_max_recovery()     — backs the WDG_MAX_RECOV SETARGFX3 arg.
+ *                                    0 = unlimited; else stop attempting
+ *                                    after N consecutive recoveries until
+ *                                    the host starts a new session.
+ *   health_reset_recovery_count() — called on STARTFX3 / STOPFX3 to begin
+ *                                    a fresh streaming session.
+ */
+void health_set_max_recovery(uint8_t max);
+void health_reset_recovery_count(void);
+
+/* Enable/disable autonomous device-reset escalation for an unrecoverable
+ * cold-start streaming wedge (#137).  Backs the WDG_RESET_ESCALATE
+ * SETARGFX3 arg; on by default.  When enabled, a COLD_START wedge that
+ * survives the recovery cap triggers CyU3PDeviceReset (clock-health-gated,
+ * once per session). */
+void health_set_reset_escalation(CyBool_t enabled);
 
 #endif /* _INCLUDED_HEALTH_H_ */

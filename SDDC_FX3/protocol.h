@@ -8,7 +8,7 @@
 #pragma once
 
 #define FIRMWARE_VER_MAJOR 2
-#define FIRMWARE_VER_MINOR 3
+#define FIRMWARE_VER_MINOR 6
 
 /* USB vendor request command codes (bRequest field in SETUP packet) */
 enum FX3Command {
@@ -38,6 +38,14 @@ enum FX3Command {
                              * Used by tests/fx3_cmd.c test_main_recovery
                              * to validate Level-5 end-to-end.  Safe in
                              * production: HWDT auto-recovers. */
+    HANGCOLDSTART = 0xD0,   /* TEST-ONLY: set glHealthForceColdStart so the
+                             * DMA producer callback stops incrementing
+                             * glDMACount.  The GPIF SM runs but no buffer
+                             * progress is recorded, reproducing a cold-start
+                             * wedge (first buffer never arrives).  Used by
+                             * tests/fx3_cmd.c test_coldstart_recovery to
+                             * validate the #137 detection + reset escalation.
+                             * Cleared on device reset (RAM wiped). */
 };
 
 /* GPIO bit masks for GPIOFX3 control word (active-low/high depends on pin) */
@@ -78,9 +86,10 @@ enum RadioModel {
 };
 
 enum ArgumentList {
-    DAT31_ATT        = 10,   /* DAT-31 attenuator (0-63) */
-    AD8370_VGA       = 11,   /* AD8370 VGA (0-255) */
-    WDG_MAX_RECOV    = 14,   /* Max consecutive watchdog recoveries (0=unlimited) */
+    DAT31_ATT          = 10,   /* DAT-31 attenuator (0-63) */
+    AD8370_VGA         = 11,   /* AD8370 VGA (0-255) */
+    WDG_MAX_RECOV      = 14,   /* Max consecutive watchdog recoveries (0=unlimited) */
+    WDG_RESET_ESCALATE = 15,   /* Enable(!=0)/disable(0) cold-start reset escalation (#137) */
 };
 
 #define WDG_MAX_RECOVERY_DEFAULT 5
@@ -91,7 +100,7 @@ enum ArgumentList {
 /* Debug trace: command-name lookup tables */
 #define FX3_CMD_BASE           0xAA
 #define FX3_CMD_COUNT          17
-#define SETARGFX3_LIST_COUNT   15
+#define SETARGFX3_LIST_COUNT   16
 
 #ifdef TRACESERIAL
 extern const char *FX3CommandName[FX3_CMD_COUNT];

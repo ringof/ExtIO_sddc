@@ -11,11 +11,14 @@ This document describes the GPIF II state machine design, the soft-stop
 mechanism, and the GPIF-level recovery actions (force-stop fallback and
 the streaming-wedge watchdog) that keep the streaming pipeline alive.
 
-It covers the GPIF slice of the recovery story only.  The firmware also
-has higher-level recovery layers (EP0 vendor-handler liveness check with
-device reset, and an FX3 hardware-watchdog catastrophic backstop) that
-sit above the GPIF watchdog and handle wedges the GPIF layer cannot
-see.  For the full cascade across all layers, see
+It covers the GPIF slice of the recovery story only: the streaming-wedge
+watchdog is **Level 1** of the firmware's five-level recovery cascade.
+The firmware also has higher-level recovery layers (Level 4, the EP0
+vendor-handler liveness check with device reset, and Level 5, an FX3
+hardware-watchdog catastrophic backstop — both in `SDDC_FX3/health.c`)
+that sit above the GPIF watchdog and handle wedges the GPIF layer cannot
+see; Levels 2–3 are reserved and not yet implemented.  For the full
+cascade across all layers, see
 [README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness).
 
 For general firmware architecture, see [architecture.md](architecture.md).
@@ -282,8 +285,8 @@ CyU3PThreadSleep(1);
 }
 ```
 
-**Watchdog recovery** (`RunApplication.c`): same pattern, with the
-additional caveat that soft-stop requires the external clock to
+**Watchdog recovery** (`health.c`, `health_recover(HEALTH_WEDGED_STREAMING)`):
+same pattern, with the additional caveat that soft-stop requires the external clock to
 advance the SM.  If `si5351_clk0_enabled()` or `si5351_pll_locked()`
 return false, the SM cannot transition and force-stop is the only
 option.
@@ -425,7 +428,7 @@ early summary.
 | `SDDC_FX3/SDDC_GPIF.h` | Generated waveform with !FW_TRG transitions |
 | `SDDC_FX3/SDDC_GPIF/projectfiles/gpif2model.xml` | State machine source (16 transitions) |
 | `SDDC_FX3/USBHandler.c` | STOPFX3 soft-stop, STARTFX3 force-stop, recovery cap reset |
-| `SDDC_FX3/RunApplication.c` | Watchdog detection loop, watchdog recovery with soft-stop |
+| `SDDC_FX3/health.c` | Streaming-watchdog detection (`health_evaluate`) + recovery with soft-stop (`health_recover`) |
 | `SDDC_FX3/StartStopApplication.c` | `StartGPIF()`, `GpifPreflightCheck()` |
 | `SDDC_FX3/protocol.h` | `WDG_MAX_RECOVERY_DEFAULT` (5) |
 | `SDDC_FX3/driver/Si5351.c` | `si5351_clk0_enabled()`, `si5351_pll_locked()` |

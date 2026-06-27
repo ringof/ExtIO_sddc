@@ -14,6 +14,8 @@
 #include "SDDC_GPIF.h" // GPIFII include once
 #include "Application.h"
 #include "Si5351.h"
+#include "radio.h"  /* rx888r2_AdcStandby for SHDN park (issue #131) */
+#include "health.h" /* glHealthForceColdStart test hook (#137) */
 uint32_t glDMACount;
 uint16_t glLastPibArg;
 static volatile CyBool_t glPibNotified = CyFalse;  /* one-shot flag for PIB error queue event */
@@ -67,8 +69,13 @@ void DmaCallback (
     {
         /* This is a produce event notification to the CPU. This notification is
          * received upon reception of every buffer. The DMA transfer will not wait
-         * for the commit from CPU. Increment the counter. */
-        glDMACount++;
+         * for the commit from CPU. Increment the counter.
+         *
+         * The glHealthForceColdStart guard is a TEST-ONLY hook (HANGCOLDSTART):
+         * when set it suppresses progress accounting so the SM runs but
+         * glDMACount stays 0, reproducing a cold-start wedge for #137 testing. */
+        if (!glHealthForceColdStart)
+            glDMACount++;
     }
 }
 
@@ -206,6 +213,13 @@ void StopApplication ( void )
     CyU3PMemSet((uint8_t *)&epConfig, 0, sizeof(epConfig));
     Status = CyU3PSetEpConfig(CY_FX_EP_CONSUMER, &epConfig);
 	CheckStatus("SetEndpointConfig_Disable", Status);
+    /* Park the ADC in SHDN standby on every teardown path (issue #131),
+     * not just the explicit STOPFX3 vendor command. USBEventCallback
+     * routes SETCONF / RESET / DISCONNECT through here, so without this
+     * a host re-enumeration or unplug would leave the ADC powered while
+     * not streaming. The explicit STOPFX3 handler also calls this and
+     * the redundant GPIO write is harmless. */
+    rx888r2_AdcStandby(CyTrue);
     // OK, Application is now stopped
 	glIsApplnActive  = CyFalse;
 }

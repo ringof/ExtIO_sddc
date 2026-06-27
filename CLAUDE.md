@@ -1,5 +1,35 @@
 # CLAUDE.md — Working Agreement for Claude Code
 
+## Hypothesis Validation Policy
+
+- Before proposing a patch or claiming a root cause, state the hypothesis
+  as falsifiable: "X is the cause; if so, Y would change."
+- If the falsifier (Y) can be tested without committing or building,
+  test it FIRST and report the result. Do not propose code changes
+  whose justification rests on un-tested theory.
+- When an existing empirical observation contradicts a new theory
+  (e.g., "manual works, harness fails" vs "the avahi bounce is the
+  cause"), the existing observation wins until the new theory directly
+  explains it.
+- Do not generalize a negative across surfaces. "Docker-exec polling
+  didn't slow setup" does NOT rule out "docker exec sh -c invocation
+  affects the spawned process" — different mechanisms, different evidence.
+- Do not call fixes "decisive" or "this'll do it" before validation.
+  Predictions are noise; results are signal.
+- See `docs/docker.md` for the concrete container/harness gotchas this
+  policy was forged from. Read it before proposing changes to the
+  test harness or the docker image.
+
+## Bench / Container Debugging
+
+- When debugging the ka9q-radio container interactively, work INSIDE the
+  container via persistent interactive shells (`docker exec -it ... bash`),
+  using plain commands (`radiod`, `pgrep`, `powers`, `lsusb`).
+- Do NOT wrap per-action commands in host-side `docker exec ...`. Each one
+  spawns a separate process — that has caused real bugs (unforwarded
+  Ctrl-C, stray radiod claiming the USB device).
+- Do not hand over one-off scripts for manual investigation unless asked.
+
 ## Commit and Push Policy
 
 - **Always ask before committing and pushing.** Never commit or push without explicit user approval.

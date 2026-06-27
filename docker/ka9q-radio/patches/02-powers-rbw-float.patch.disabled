@@ -1,0 +1,26 @@
+# 02-powers-rbw-float.patch
+#
+# Fix `powers` reading the spectrum response's RESOLUTION_BW as a double.
+# radiod ENCODES it as a 4-byte float (radio_status.c: encode_float(...,
+# RESOLUTION_BW, chan->spectrum.rbw)), but powers' extract_powers decoded
+# it with decode_double -> misread as ~0, so the printed header's bin width
+# (and the derived start/stop frequencies) collapsed to 0 / center-only,
+# even though the bins themselves were correctly binned (radiod decodes the
+# *command's* RESOLUTION_BW with decode_float, so the requested width is
+# applied). Receive-side mirror of 01: decode_double -> decode_float.
+#
+# Candidate upstream PR to ka9q-radio. Applies against KA9Q_RADIO_SHA
+# 42273761 (after or independent of 01).
+diff --git a/src/powers.c b/src/powers.c
+index c966bdbc..eb6518af 100644
+--- a/src/powers.c
++++ b/src/powers.c
+@@ -351,7 +351,7 @@ int extract_powers(float *power,int npower,uint64_t *time,double *freq,double *r
+       }
+       break;
+     case RESOLUTION_BW:
+-      *rbw = decode_double(cp,optlen);
++      *rbw = decode_float(cp,optlen);
+       break;
+     case BIN_COUNT: // Do we check that this equals the length of the BIN_DATA tlv?
+       l_ccount = decode_int(cp,optlen);
