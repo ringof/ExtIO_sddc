@@ -81,7 +81,7 @@ CyU3PGpifWaveData CyFxGpifWavedata[]  = {
    Table that maps state indices to the descriptor table indices.
  */
 uint8_t CyFxGpifWavedataPosition[]  = {
-    0,1,2,3,4,5,6,7,8,9,10,11,1,12
+    0,1,2,3,4,5,6,7,8,9,10,11,12,1       /* cross-route: TH0_PPS_COMMIT→TH1_RD_LD, TH1_PPS_COMMIT→TH0_RD_LD */
 };
 
 /* Summary
