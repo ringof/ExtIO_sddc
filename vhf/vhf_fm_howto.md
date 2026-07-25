@@ -145,7 +145,26 @@ fine; or just stop the container.)
 | Audio silent in `monitor` | Host has no `/dev/snd`, or `fm-pcm.local` not resolving. Check `docker logs ka9q-radio` for "Established under name". |
 | It was working, then went dead after I toggled dither/rand in ka9q | radiod rewrote the whole GPIO word and cleared `VHF_EN`. Re-run `python3 vhf/vhf_tune.py <freq> --persist`. Don't toggle dither/rand during VHF use. |
 | First `--vhf` start is slow | One-time FFTW wisdom generation for the 384 kHz channel. Cached after. Set `FFTW_RIGOR=estimate` for an instant (slower-runtime) build. |
-| Stereo/RDS won't decode | High-side LO (`LO = RF + IF`) inverts the spectrum. Mono FM audio is unaffected; stereo subcarriers may not lock. |
+| Stereo/RDS won't decode | High-side LO (`LO = RF + IF`, the default) inverts the spectrum. Mono FM audio is unaffected; stereo subcarriers may not lock. Fix: in the TUI press `s` to switch to **low-side** injection (`LO = RF − IF`), which yields a **non-inverted** spectrum — or tell ka9q-radio the input is inverted (see below). Trade-off: low-side moves the image to `RF − 2·IF` (~9.14 MHz below), so tracking-filter image rejection differs. |
+
+## Injection side and spectral inversion
+
+The R828D mixes to a fixed IF (4.57 MHz). The TUI defaults to **high-side**
+injection (`LO = RF + IF`), which flips the spectrum at the IF; the `s` key
+switches to **low-side** (`LO = RF − IF`), which does not. The tuner stays
+internally correct either way — pressing `s` reprograms the mixer sideband bit
+(`0x07[7]`) in lockstep with the LO and recalibrates the channel filter — but
+the ADC stream that ka9q-radio receives is inverted only for high-side.
+
+There is **no automatic signalling** of the side to ka9q-radio: the TUI drives
+the tuner over EP0 while `radiod` streams the ADC in a separate process, with
+no shared metadata channel. So you match them by hand:
+
+- The TUI shows the live state on the Bandwidth line — `LO+ INVERTED`
+  (high-side) or `LO- normal` (low-side).
+- For **high-side**, tell `radiod` the front end is inverted so demods see an
+  upright spectrum; for **low-side**, leave inversion off. (Mono FM doesn't
+  care; stereo/RDS does.)
 
 ## Reference
 
@@ -155,7 +174,7 @@ fine; or just stop the container.)
 | Launcher | `./docker/ka9q-radio/ka9q.sh start --vhf` |
 | Tuner (TUI, preferred) | `python3 vhf/vhf_fm_radio.py` |
 | Tuner (CLI) | `python3 vhf/vhf_tune.py <fm_hz> --persist` |
-| Receiver park frequency | 4.570 MHz (`IF_CARRIER`); `LO = RF + 4.57 MHz` |
+| Receiver park frequency | 4.570 MHz (`IF_CARRIER`); `LO = RF + 4.57 MHz` (high-side default; `s` toggles low-side `LO = RF − 4.57 MHz`) |
 | Tuner reference (CLKB) | 16 MHz |
 | ADC sample rate | 64.8 MHz (`samprate = 64m8`) |
 | Stream name | `fm-pcm.local` |

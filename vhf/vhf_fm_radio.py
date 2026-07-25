@@ -67,6 +67,7 @@ HELP_TEXT = """\
 [dim]e[/]  toggle FILTER_EXT   [dim]w[/]  toggle FLT_EXT_WIDEST
 [dim]i / I[/]  IF offset \u00b1100 kHz (probe filter edges)
 [dim]0[/]  reset IF offset     [dim]r[/]  toggle ref 16/32 MHz
+[dim]s[/]  toggle LO side (high/low injection; low = non-inverted)
 [dim]p / P[/]  cal park \u00b110 MHz (probe filter corner vs park)
 [dim]q[/]  quit"""
 
@@ -131,6 +132,7 @@ class VHFRadioApp(App):
         self._if_offset = 0         # IF probe offset from nominal (Hz)
         self._cal_code = None       # FILT_CODE from calibrate_filter()
         self._cal_park = 100_100_000  # cal PLL park freq (non-round → sdm≠0)
+        self._sideband_low = False  # False = high-side (LO=RF+IF); True = low-side
         self._status_msg = ""
 
     def compose(self) -> ComposeResult:
@@ -228,9 +230,11 @@ class VHFRadioApp(App):
         ref_mhz = self._ref_hz // 1_000_000
         ref_str = (f"  [cyan]ref {ref_mhz}M[/]"
                    if ref_mhz != 16 else f"  ref {ref_mhz}M")
+        side_str = ("  [cyan]LO- normal[/]" if self._sideband_low
+                    else "  LO+ [yellow]INVERTED[/]")
         self.query_one("#bw", Static).update(
             f"  Bandwidth   {bw_str}"
-            f"    IF {actual_if / 1e6:.3f} MHz{off_str}{ref_str}")
+            f"    IF {actual_if / 1e6:.3f} MHz{off_str}{ref_str}{side_str}")
 
         def bar(label, val, agc=False, max_val=15):
             filled = "\u2588" * val + "\u2591" * (max_val - val)
@@ -329,6 +333,8 @@ class VHFRadioApp(App):
             self._reset_if_offset()
         elif char == "r":
             self._toggle_ref()
+        elif char == "s":
+            self._toggle_sideband()
         elif char == "p":
             self._nudge_cal_park(10_000_000)
         elif char == "P":
@@ -416,6 +422,20 @@ class VHFRadioApp(App):
         self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
         cal_str = f" cal={self._cal_code}" if self._cal_code is not None else " cal=FAIL"
         self._status_msg = f"[cyan]Ref \u2192 {self._ref_hz // 1_000_000} MHz{cal_str}[/]"
+        self._update_display()
+
+    def _toggle_sideband(self) -> None:
+        """Toggle LO injection side (high ⇄ low), reprogram the mixer sideband
+        bit in lockstep with the LO, recalibrate the filter, and retune.
+        Low-side yields a non-inverted spectrum; high-side inverts it."""
+        self._sideband_low = not self._sideband_low
+        self._rx.sideband_low = self._sideband_low
+        self._cal_code = self._rx.calibrate_filter(self._cal_park)
+        self._locked = self._rx.r828d_set_freq(int(self._freq_hz))
+        side = "low (LO−IF)" if self._sideband_low else "high (LO+IF)"
+        spec = "normal" if self._sideband_low else "INVERTED"
+        cal_str = f" cal={self._cal_code}" if self._cal_code is not None else " cal=FAIL"
+        self._status_msg = f"[cyan]Injection → {side}, spectrum {spec}{cal_str}[/]"
         self._update_display()
 
     def _toggle_chan_filter(self) -> None:
