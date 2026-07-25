@@ -164,6 +164,9 @@ class RX888:
         self.regs = {}            # R828D register shadow (for masked writes)
         self.ref_hz = R828D_REF_HZ   # active R828D reference (CLKB); set by clkb_on
         self.if_hz = IF_CARRIER      # active IF center; set by set_bandwidth
+        self.sideband_low = False    # False = high-side (LO=RF+IF, default);
+                                     # True = low-side (LO=RF-IF). Kept in
+                                     # lockstep with 0x07[7] by r828d_set_freq.
 
     # ── EP0 transport (libusb control transfers) ──────────────────────────
     def _out_u32(self, cmd, value):              # GPIOFX3 / STARTADC payload
@@ -311,13 +314,32 @@ class RX888:
 
     # ── R828D tune (partial port of set_freq64: set_mux + set_pll + input sw) ─
     def r828d_set_freq(self, rf_hz):
-        """LO = RF + IF (low-side). set_mux + set_pll, then the Air-In/Cable1
-        input switch. No harmonic retry (out of VHF scope). True iff PLL locked."""
-        lo = rf_hz + self.if_hz
+        """Tune to rf_hz. High-side injection LO = RF + IF by default; low-side
+        LO = RF - IF when self.sideband_low is set. The mixer sideband bit
+        (0x07[7]) is written here in lockstep with the LO so the image-reject
+        mixer always matches the injection side. set_mux + set_pll, then the
+        Air-In/Cable1 input switch. No harmonic retry (out of VHF scope).
+        True iff PLL locked."""
+        lo = rf_hz - self.if_hz if self.sideband_low else rf_hz + self.if_hz
+        self.set_sideband(self.sideband_low)   # keep 0x07[7] matched to the LO
         self._set_mux(lo)
         ok = self._set_pll(lo)
         self._wr_mask(0x05, 0x00 if rf_hz > 345_000_000 else 0x60, 0x60)  # Air/Cable
         return ok
+
+    def set_sideband(self, low):
+        """Select mixer sideband / injection side via 0x07 bit 7.
+        low=False -> bit7=0 = high-side (LO above RF), the chip/init default;
+        low=True  -> bit7=1 = low-side  (LO below RF).
+        Polarity follows the r82xx lineage (tuner_r82xx_explained.md:94);
+        BENCH-CONFIRM on the RX888 mk2. set_mixer_gain (mask 0x0F) and
+        set_mixer_agc (mask 0x10) leave bit 7 untouched, so this persists."""
+        self._wr_mask(0x07, 0x80 if low else 0x00, 0x80)
+
+    def spectrum_inverted(self):
+        """True if the current injection side inverts the spectrum at the IF.
+        High-side (LO=RF+IF) inverts; low-side (LO=RF-IF) does not."""
+        return not self.sideband_low
 
     def _set_mux(self, lo):
         mhz = lo // 1_000_000
